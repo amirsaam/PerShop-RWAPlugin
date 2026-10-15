@@ -14,8 +14,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install cryptography
+      - run: pip install cryptography fastapi
       - run: python3 tests/test_shop.py
+      - run: python3 tests/test_routes_build.py
       - run: node --check rwa_plugin_pershop/static/app.js
 
   wheel:
@@ -28,8 +29,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install setuptools wheel cryptography
+      - run: pip install setuptools wheel cryptography fastapi
       - run: python3 tests/test_shop.py
+      - run: python3 tests/test_routes_build.py
       - run: pip wheel . --no-deps -w dist
       - uses: actions/upload-artifact@v4
         with:
