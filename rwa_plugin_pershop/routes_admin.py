@@ -1,16 +1,129 @@
 """Admin CRUD + approve/deny + /app bundle. Every route requires shop permission."""
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import Request
+from pydantic import BaseModel, Field
+
+
+class ShopIn(BaseModel):
+    bot_token: str | None = None
+    admin_tg_id: int
+    prefix: str
+    lang: str = "en"
+    card_text: str = ""
+    welcome_text: str = ""
+    thank_you_text: str = ""
+    approved_text: str = ""
+    denied_text: str = ""
+    currency_label: str = ""
+    unit_rate: float | None = Field(default=None, gt=0)
+    test_enabled: bool = False
+    referral_text: str = ""
+    # % of each invited buyer's purchase credited to the inviter (0 = off).
+    referral_percent: float = Field(default=0, ge=0, le=100)
+    support_text: str = ""
+    # Hours a pending receipt may wait before the owner gets a Telegram
+    # nudge (0 = off). Re-nudged every window until decided.
+    pending_nag_hours: int = Field(default=6, ge=0, le=168)
+
+
+class PluginSettingsIn(BaseModel):
+    polling_enabled: bool = False
+    tutorial_text: str = ""
+    test_duration_days: int = Field(default=1, ge=1, le=365)
+    test_traffic_gb: int = Field(default=1, ge=0, le=100000)
+    test_squad_uuid: str = ""
+    test_hwid: int | None = Field(default=None, ge=0, le=100000)
+    public_base_url: str = ""
+
+
+class PkgIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    tier_id: int | None = None
+    traffic_limit_bytes: int | None = Field(default=None, ge=0)
+    # 0/blank = timeless package (no expiry, subs written as year 2999).
+    duration_days: int = Field(default=30, ge=0, le=3650)
+    price_units: float = Field(default=0, ge=0)
+    squad_uuid: str | None = None
+    # effect: full = plan buy/renew, time_only = +days top-up offer,
+    # traffic_only = +GB top-up offer (top-ups only extend existing subs).
+    # hwid toggle: default (panel default) | fixed (admin value) |
+    # input (buyer picks in bot) | unlimited (no cap)
+    hwid_mode: str = "default"
+    hwid_min: int = Field(default=1, ge=0)
+    hwid_default: int = Field(default=1, ge=0)
+    hwid_max: int = Field(default=10, ge=0)
+    hwid_free: int = Field(default=1, ge=0)
+    hwid_percent: float = Field(default=50, ge=0)
+    hwid_fixed: int | None = Field(default=None, ge=0)
+    # renew traffic math: True = cap resets to the package limit,
+    # False = leftover rolls over, package traffic is added on top.
+    traffic_reset: bool = True
+    effect: str = "full"
+    # Scope for top-up offers: NULL = offered for every tier's subs,
+    # else only for subs matched to that tier's plan.
+    scope_tier_id: int | None = None
+    active: bool = True
+
+
+class TierIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    squad_uuid: str | None = None
+    hwid_default: int | None = Field(default=None, ge=0)
+    sort: int = 0
+    active: bool = True
+
+
+class SvcCatIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    sort: int = 0
+    active: bool = True
+
+
+class SvcIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    cat_id: int | None = None
+    price_units: float = Field(default=0, ge=0)
+    description: str = Field(default="", max_length=2000)
+    done_text: str = Field(default="", max_length=2000)
+    sort: int = 0
+    active: bool = True
+
+
+class DenyIn(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class PubUserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    expire_at: datetime
+    traffic_limit_bytes: int | None = Field(default=None, ge=0)
+    hwid_device_limit: int | None = Field(default=None, ge=0)
+    telegram_id: int | None = None
+    squad_uuid: str | None = None
+
+
+class PubUserUpdate(BaseModel):
+    expire_at: datetime | None = None
+    traffic_limit_bytes: int | None = Field(default=None, ge=0)
+    hwid_device_limit: int | None = Field(default=None, ge=0)
+    telegram_id: int | None = None
+    squad_uuid: str | None = None
+    status: str | None = None
+
+
+class AssignIn(BaseModel):
+    user_uuid: str = Field(min_length=1)
+    package_id: int
 
 
 def build_admin_router(ctx):
-    from datetime import datetime, timezone
+    from datetime import timezone
 
     from fastapi import APIRouter, Depends, HTTPException, Response
-    from pydantic import BaseModel, Field
     from web.backend.core.plugin_api import auth_deps
 
     from rwa_plugin_pershop.crypto import decrypt_token, encrypt_token
@@ -19,104 +132,6 @@ def build_admin_router(ctx):
 
     AdminUser, require_permission = auth_deps()
     router = APIRouter()
-
-    class ShopIn(BaseModel):
-        bot_token: str | None = None
-        admin_tg_id: int
-        prefix: str
-        lang: str = "en"
-        card_text: str = ""
-        welcome_text: str = ""
-        thank_you_text: str = ""
-        approved_text: str = ""
-        denied_text: str = ""
-        currency_label: str = ""
-        unit_rate: float | None = Field(default=None, gt=0)
-        test_enabled: bool = False
-        referral_text: str = ""
-        # % of each invited buyer's purchase credited to the inviter (0 = off).
-        referral_percent: float = Field(default=0, ge=0, le=100)
-        support_text: str = ""
-        # Hours a pending receipt may wait before the owner gets a Telegram
-        # nudge (0 = off). Re-nudged every window until decided.
-        pending_nag_hours: int = Field(default=6, ge=0, le=168)
-
-    class PluginSettingsIn(BaseModel):
-        polling_enabled: bool = False
-        tutorial_text: str = ""
-        test_duration_days: int = Field(default=1, ge=1, le=365)
-        test_traffic_gb: int = Field(default=1, ge=0, le=100000)
-        test_squad_uuid: str = ""
-        test_hwid: int | None = Field(default=None, ge=0, le=100000)
-        public_base_url: str = ""
-
-    class PkgIn(BaseModel):
-        name: str = Field(min_length=1, max_length=120)
-        tier_id: int | None = None
-        traffic_limit_bytes: int | None = Field(default=None, ge=0)
-        # 0/blank = timeless package (no expiry, subs written as year 2999).
-        duration_days: int = Field(default=30, ge=0, le=3650)
-        price_units: float = Field(default=0, ge=0)
-        squad_uuid: str | None = None
-        # effect: full = plan buy/renew, time_only = +days top-up offer,
-        # traffic_only = +GB top-up offer (top-ups only extend existing subs).
-        # hwid toggle: default (panel default) | fixed (admin value) |
-        # input (buyer picks in bot) | unlimited (no cap)
-        hwid_mode: str = "default"
-        hwid_min: int = Field(default=1, ge=0)
-        hwid_default: int = Field(default=1, ge=0)
-        hwid_max: int = Field(default=10, ge=0)
-        hwid_free: int = Field(default=1, ge=0)
-        hwid_percent: float = Field(default=50, ge=0)
-        hwid_fixed: int | None = Field(default=None, ge=0)
-        # renew traffic math: True = cap resets to the package limit,
-        # False = leftover rolls over, package traffic is added on top.
-        traffic_reset: bool = True
-        effect: str = "full"
-        # Scope for top-up offers: NULL = offered for every tier's subs,
-        # else only for subs matched to that tier's plan.
-        scope_tier_id: int | None = None
-        active: bool = True
-
-    class TierIn(BaseModel):
-        name: str = Field(min_length=1, max_length=120)
-        squad_uuid: str | None = None
-        hwid_default: int | None = Field(default=None, ge=0)
-        sort: int = 0
-        active: bool = True
-
-    class SvcCatIn(BaseModel):
-        name: str = Field(min_length=1, max_length=120)
-        sort: int = 0
-        active: bool = True
-
-    class SvcIn(BaseModel):
-        name: str = Field(min_length=1, max_length=120)
-        cat_id: int | None = None
-        price_units: float = Field(default=0, ge=0)
-        description: str = Field(default="", max_length=2000)
-        done_text: str = Field(default="", max_length=2000)
-        sort: int = 0
-        active: bool = True
-
-    class DenyIn(BaseModel):
-        reason: str = Field(min_length=1, max_length=1000)
-
-    class PubUserCreate(BaseModel):
-        username: str = Field(min_length=1, max_length=64)
-        expire_at: datetime
-        traffic_limit_bytes: int | None = Field(default=None, ge=0)
-        hwid_device_limit: int | None = Field(default=None, ge=0)
-        telegram_id: int | None = None
-        squad_uuid: str | None = None
-
-    class PubUserUpdate(BaseModel):
-        expire_at: datetime | None = None
-        traffic_limit_bytes: int | None = Field(default=None, ge=0)
-        hwid_device_limit: int | None = Field(default=None, ge=0)
-        telegram_id: int | None = None
-        squad_uuid: str | None = None
-        status: str | None = None
 
     def _check_hwid(payload: PkgIn) -> None:
         from rwa_plugin_pershop.service import EFFECTS, HWID_MODES
@@ -467,10 +482,6 @@ def build_admin_router(ctx):
         if not shop:
             raise HTTPException(400, "no shop")
         return await unmapped_users(ctx, shop)
-
-    class AssignIn(BaseModel):
-        user_uuid: str = Field(min_length=1)
-        package_id: int
 
     @router.post("/subs/assign-plan")
     async def subs_assign(payload: AssignIn, _a: AdminUser = Depends(require_permission("pershop", "edit"))):
