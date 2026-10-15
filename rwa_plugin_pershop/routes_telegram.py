@@ -5,6 +5,8 @@ This is the ONLY open route in the plugin; everything else requires RBAC.
 """
 from __future__ import annotations
 
+from fastapi import APIRouter, Header, Request
+
 
 async def handle_update(ctx, shop: dict, update: dict) -> None:
     from rwa_plugin_pershop.crypto import decrypt_token
@@ -2508,8 +2510,6 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
 
 
 def build_telegram_router(ctx):
-    from fastapi import APIRouter, Header, Request
-
     router = APIRouter()
 
     @router.post("/tg/{shop_id}")
