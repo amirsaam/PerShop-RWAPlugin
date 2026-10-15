@@ -1,0 +1,21 @@
+name: build
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install setuptools wheel
+      - run: python3 tests/test_shop.py
+      - run: pip wheel . --no-deps -w dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pershop-wheel
+          path: dist/*.whl

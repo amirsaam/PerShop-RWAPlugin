@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rwa-plugin-pershop"
+version = "0.1.0"
+description = "Per-admin Telegram shop for Remnawave Admin (Plugin API v1)"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.110", "pydantic>=2.5", "httpx>=0.27", "cryptography>=42"]
+
+[project.entry-points."rwa.plugin"]
+pershop = "rwa_plugin_pershop:manifest"
+
+[project.entry-points."rwa.plugin.migrations"]
+pershop = "rwa_plugin_pershop.migrations:versions_path"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rwa_plugin_pershop*"]
+
+[tool.setuptools.package-data]
+"rwa_plugin_pershop" = ["migrations/versions/*.py", "static/*.js"]
