@@ -83,6 +83,24 @@ async def _clear_session(ctx, shop_id: int, tg_id: int, role: str) -> None:
                          shop_id, tg_id, role)
 
 
+async def _show(tg, chat_id: int, mid: int | None, text: str,
+                reply_markup: dict | None = None) -> int | None:
+    """Render a button-driven screen: edit the tapped message in place so
+    the DM never fills up; fall back to a fresh send when there is nothing
+    to edit (typed entry points, expired messages). Returns the message id
+    now showing the screen (or None). Never raises."""
+    if mid:
+        try:
+            if await tg.edit_text(chat_id, mid, text, reply_markup):
+                return mid
+        except Exception:
+            pass
+    try:
+        return await tg.send_message(chat_id, text, reply_markup=reply_markup)
+    except Exception:
+        return None
+
+
 async def _packages(ctx, shop_id: int) -> list:
     rows = await ctx.db.fetch(
         "SELECT * FROM plugin_pershop_packages WHERE shop_id=$1 AND active ORDER BY id", shop_id)
@@ -133,7 +151,7 @@ def _pkg_label(shop, pkg) -> str:
     return f"{pkg['name']} — {price}" if price else pkg["name"]
 
 
-async def _send_buyer_menu(ctx, shop, tg, chat_id) -> None:
+async def _send_buyer_menu(ctx, shop, tg, chat_id, edit=None) -> None:
     """Main menu as a persistent bottom panel (reply keyboard).
 
     Same entries, order and visibility rules as the old inline menu, two
@@ -164,24 +182,29 @@ async def _send_buyer_menu(ctx, shop, tg, chat_id) -> None:
         labels.append(L(shop, "support_btn"))
     labels.append(L(shop, "account_btn"))
     rows = [labels[i:i + 2] for i in range(0, len(labels), 2)]
-    await tg.send_message(chat_id, (shop["welcome_text"] or "").strip() or L(shop, "menu_title"),
-                          reply_markup=reply_kb(rows))
+    text = (shop["welcome_text"] or "").strip() or L(shop, "menu_title")
+    if edit:
+        # A reply keyboard cannot ride on an edited message; the persistent
+        # panel is already up, so only the text is refreshed in place.
+        await _show(tg, chat_id, edit, text)
+    else:
+        await tg.send_message(chat_id, text, reply_markup=reply_kb(rows))
 
 
-async def _send_test_offer(ctx, shop, tg, sender) -> None:
+async def _send_test_offer(ctx, shop, tg, sender, edit=None) -> None:
     """Trial terms + Get-test button. Shared by inline tap and panel tap."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import test_terms
     from rwa_plugin_pershop.telegram import kb
 
     if not shop.get("test_enabled"):
-        await tg.send_message(sender, L(shop, "test_off"))
+        await _show(tg, sender, edit, L(shop, "test_off"))
         return
     terms = await test_terms(ctx, shop)
-    await tg.send_message(
-        sender, L(shop, "test_confirm", days=terms["days"], gb=terms["gb"]),
-        reply_markup=kb([[{"text": L(shop, "test_confirm_btn"), "callback_data": "testconfirm"}]]
-                        + _back_row(shop)))
+    await _show(
+        tg, sender, edit, L(shop, "test_confirm", days=terms["days"], gb=terms["gb"]),
+        kb([[{"text": L(shop, "test_confirm_btn"), "callback_data": "testconfirm"}]]
+           + _back_row(shop)))
 
 
 async def _on_menu_action(ctx, shop, tg, chat_id, buyer_id, buyer_un, action) -> None:
@@ -219,7 +242,7 @@ async def _on_menu_action(ctx, shop, tg, chat_id, buyer_id, buyer_un, action) ->
         await _send_account(ctx, shop, tg, buyer_id)
 
 
-async def _send_buy_list(ctx, shop, tg, chat_id) -> None:
+async def _send_buy_list(ctx, shop, tg, chat_id, edit=None) -> None:
     """Buy entry: tier buttons (or legacy packages) + Back to main menu."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
@@ -229,16 +252,16 @@ async def _send_buy_list(ctx, shop, tg, chat_id) -> None:
     if tiers:
         rows = [[{"text": t["name"], "callback_data": f"tiers:{t['id']}"}] for t in tiers]
         rows += _back_row(shop)
-        await tg.send_message(chat_id, L(shop, "choose_tier"), reply_markup=kb(rows))
+        await _show(tg, chat_id, edit, L(shop, "choose_tier"), kb(rows))
         return
     pkgs = await _packages(ctx, shop["id"])
     rows = [[{"text": _pkg_label(shop, p), "callback_data": f"buy:{p['id']}"}] for p in pkgs]
     rows += _back_row(shop)
-    await tg.send_message(chat_id, L(shop, "welcome_fallback"),
-                          reply_markup=kb(rows) if rows else None)
+    await _show(tg, chat_id, edit, L(shop, "welcome_fallback"),
+                kb(rows) if rows else None)
 
 
-async def _send_tier_packages(ctx, shop, tg, sender, tier) -> None:
+async def _send_tier_packages(ctx, shop, tg, sender, tier, edit=None) -> None:
     """Package list of one tier + Back to menu."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
@@ -247,10 +270,10 @@ async def _send_tier_packages(ctx, shop, tg, sender, tier) -> None:
         "SELECT * FROM plugin_pershop_packages WHERE tier_id=$1 AND active ORDER BY id", tier["id"])
     rows = [[{"text": _pkg_label(shop, p), "callback_data": f"buy:{p['id']}"}] for p in _full_only(pkgs)]
     rows += _back_row(shop)
-    await tg.send_message(sender, L(shop, "tier_pkg_title"), reply_markup=kb(rows))
+    await _show(tg, sender, edit, L(shop, "tier_pkg_title"), kb(rows))
 
 
-async def _send_svc_list(ctx, shop, tg, chat_id) -> None:
+async def _send_svc_list(ctx, shop, tg, chat_id, edit=None) -> None:
     """Other-Services entry: category buttons (or direct items) + Back."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import cat_services, service_cats
@@ -262,13 +285,13 @@ async def _send_svc_list(ctx, shop, tg, chat_id) -> None:
         if await cat_services(ctx, shop["id"], None):
             rows.append([{"text": L(shop, "scat_other"), "callback_data": "svcother:"}])
         rows += _back_row(shop)
-        await tg.send_message(chat_id, L(shop, "choose_scat"), reply_markup=kb(rows))
+        await _show(tg, chat_id, edit, L(shop, "choose_scat"), kb(rows))
         return
     await _send_svc_items(ctx, shop, tg, chat_id,
-                          await cat_services(ctx, shop["id"], None))
+                          await cat_services(ctx, shop["id"], None), edit=edit)
 
 
-async def _send_svc_items(ctx, shop, tg, chat_id, svcs, title=None) -> None:
+async def _send_svc_items(ctx, shop, tg, chat_id, svcs, title=None, edit=None) -> None:
     """Item buttons of one category + Back to the service list."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import format_price
@@ -277,10 +300,10 @@ async def _send_svc_items(ctx, shop, tg, chat_id, svcs, title=None) -> None:
     rows = [[{"text": f"{s['name']} — {format_price(shop, s.get('price_units') or 0)}",
               "callback_data": f"svc:{s['id']}"}] for s in svcs or []]
     rows.append([{"text": L(shop, "back_btn"), "callback_data": "pershop:services"}])
-    await tg.send_message(chat_id, title or L(shop, "choose_scat"), reply_markup=kb(rows))
+    await _show(tg, chat_id, edit, title or L(shop, "choose_scat"), kb(rows))
 
 
-async def _send_svc_detail(ctx, shop, tg, chat_id, svc, back="pershop:services") -> None:
+async def _send_svc_detail(ctx, shop, tg, chat_id, svc, back="pershop:services", edit=None) -> None:
     """One service: description + converted price + Buy + Back."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import format_price
@@ -290,26 +313,26 @@ async def _send_svc_detail(ctx, shop, tg, chat_id, svc, back="pershop:services")
     if (svc.get("description") or "").strip():
         text += f"\n{(svc['description'] or '').strip()}"
     text += f"\n{L(shop, 'svc_price', price=format_price(shop, svc.get('price_units') or 0))}"
-    await tg.send_message(chat_id, text, reply_markup=kb(
+    await _show(tg, chat_id, edit, text, kb(
         [[{"text": L(shop, "contract_pay_btn"), "callback_data": f"svcbuy:{svc['id']}"}],
          [{"text": L(shop, "back_btn"), "callback_data": back}]]))
 
 
-async def _send_svc_note_prompt(ctx, shop, tg, chat_id, svc, back) -> None:
+async def _send_svc_note_prompt(ctx, shop, tg, chat_id, svc, back, edit=None) -> None:
     """Step 1 of a service order: optional buyer note (or Skip)."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
 
-    await _set_session(ctx, shop["id"], chat_id, "buyer",
-                       f"await_svc_note:{svc['id']}",
-                       {"service_id": svc["id"], "back": back})
-    await tg.send_message(chat_id, L(shop, "svc_note_prompt"), reply_markup=kb(
+    mid = await _show(tg, chat_id, edit, L(shop, "svc_note_prompt"), kb(
         [[{"text": L(shop, "svc_skip_btn"), "callback_data": f"svcskip:{svc['id']}"}],
          [{"text": L(shop, "back_btn"), "callback_data": f"svc:{svc['id']}"}]]))
+    await _set_session(ctx, shop["id"], chat_id, "buyer",
+                       f"await_svc_note:{svc['id']}",
+                       {"service_id": svc["id"], "back": back, "pm": mid})
 
 
 async def _send_svc_contract(ctx, shop, tg, sender, svc, note, back,
-                             credit_applied=False) -> dict:
+                             credit_applied=False, edit=None) -> dict:
     """Contract screen for a service: item + converted price + note, then Pay."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import credit_balance, format_price
@@ -338,7 +361,7 @@ async def _send_svc_contract(ctx, shop, tg, sender, svc, note, back,
              "total_units": price, "back": back, "credit": bool(use_credit)}
     await _set_session(ctx, shop["id"], sender, "buyer",
                        f"await_summary:svc:{svc['id']}", saved)
-    await tg.send_message(sender, "\n\n".join(lines), reply_markup=kb(
+    await _show(tg, sender, edit, "\n\n".join(lines), kb(
         [[{"text": L(shop, "contract_pay_btn"), "callback_data": "stconfirm"}]]
         + credit_row +
         [[{"text": L(shop, "back_btn"), "callback_data": back}]]))
@@ -378,12 +401,12 @@ async def _submit_svc_receipt(ctx, shop, tg, msg, text, buyer_id, buyer_un, chat
 
     receipt_ref, kind, message_id = _extract_receipt(msg, text)
     if not receipt_ref:
-        await tg.send_message(chat_id, L(shop, "need_receipt"))
+        await _show(tg, chat_id, data.get("pm"), L(shop, "need_receipt"))
         return
     svc = await service_by_id(ctx, data.get("service_id"))
     if not svc:
         await _clear_session(ctx, shop["id"], buyer_id, "buyer")
-        await tg.send_message(chat_id, L(shop, "svc_unavailable"))
+        await _show(tg, chat_id, data.get("pm"), L(shop, "svc_unavailable"))
         return
     note = (data.get("note") or "")[:500]
     total = float(svc.get("price_units") or 0)
@@ -438,7 +461,25 @@ async def _submit_svc_receipt(ctx, shop, tg, msg, text, buyer_id, buyer_un, chat
         ctx.logger.warning("shop.forward_failed", extra={"err": str(e)})
     from rwa_plugin_pershop.service import message_text
 
-    await tg.send_message(chat_id, message_text(shop, "thank_you"))
+    # Receipt step: the buyer's receipt stays, the bot's prompt is removed,
+    # and the confirmation arrives as one fresh message after the receipt.
+    try:
+        if data.get("pm"):
+            await tg.delete_message(chat_id, data["pm"])
+    except Exception:
+        pass
+    confirm_id = None
+    try:
+        confirm_id = await tg.send_message(chat_id, message_text(shop, "thank_you"))
+    except Exception:
+        pass
+    try:
+        if confirm_id:
+            await ctx.db.execute(
+                "UPDATE plugin_pershop_orders SET buyer_msg_id=$1 WHERE id=$2",
+                confirm_id, row["id"])
+    except Exception:
+        pass
 
 
 async def _subs_state(ctx, shop, sub) -> dict:
@@ -531,7 +572,7 @@ async def _subs_state(ctx, shop, sub) -> dict:
     return st
 
 
-async def _send_subs_list(ctx, shop, tg, sender) -> None:
+async def _send_subs_list(ctx, shop, tg, sender, edit=None) -> None:
     """My-subs dashboard: one status-rich row per subscription + link + Back."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
@@ -540,39 +581,26 @@ async def _send_subs_list(ctx, shop, tg, sender) -> None:
                               shop["id"], sender)
     link_row = [[{"text": L(shop, "link_sub_btn"), "callback_data": "linksub"}]]
     if not rows:
-        await tg.send_message(sender, L(shop, "no_subs"),
-                              reply_markup=kb(link_row + _back_row(shop)))
+        await _show(tg, sender, edit, L(shop, "no_subs"),
+                    kb(link_row + _back_row(shop)))
         return
     btns = []
     for r in rows:
         st = await _subs_state(ctx, shop, r)
         if st["pending"]:
-            dot, trailer = "⏳", L(shop, "pending_badge")
+            dot = "⏳"
         elif st["expired"]:
-            dot, trailer = "🔴", L(shop, "t_overdue", d=st["days"] or 0)
+            dot = "🔴"
         elif st["timeless"] and not st["has_cap"]:
-            dot, trailer = "♾️", L(shop, "t_never")
+            dot = "♾️"
         else:
             out = st["left"] is not None and st["left"] <= 0
             urgent = (st["days"] is not None and st["days"] <= 3) or bool(out)
             dot = "🟡" if urgent else "🟢"
-            bits = []
-            if st["timeless"]:
-                bits.append("∞")
-            elif st["days"] is not None:
-                bits.append(L(shop, "t_today") if st["days"] <= 0 and not st["expired"]
-                            else L(shop, "t_left", d=st["days"]))
-            if not st["has_cap"]:
-                bits.append(L(shop, "g_unlimited"))
-            elif st["left"] is not None:
-                bits.append(L(shop, "g_out") if st["left"] <= 0
-                            else L(shop, "g_left", left=_fmt_gb(st["left"]),
-                                              cap=_fmt_gb(st["limit"])))
-            trailer = " · ".join(bits)
-        label = f"{dot} {r['username']}" + (f" · {trailer}" if trailer else "")
-        btns.append([{"text": label, "callback_data": f"sub:{r['id']}"}])
+        btns.append([{"text": f"{dot} {r['username']}",
+                      "callback_data": f"sub:{r['id']}"}])
     btns += link_row + _back_row(shop)
-    await tg.send_message(sender, L(shop, "pick_sub"), reply_markup=kb(btns))
+    await _show(tg, sender, edit, L(shop, "pick_sub"), kb(btns))
 
 
 def _fmt_gb(value) -> str:
@@ -588,7 +616,7 @@ def _fmt_gb(value) -> str:
         return "?"
 
 
-async def _send_sub_detail(ctx, shop, tg, sender, sub) -> None:
+async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
     """Sub-detail dashboard: live numbers + exactly the buttons that make
     sense for this sub's state. Pending hides every pay button."""
     from rwa_plugin_pershop.lang import L
@@ -608,7 +636,7 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub) -> None:
         traffic = _fmt_gb(st["limit"])
     else:
         traffic = f"{_fmt_gb(st['used'])} / {_fmt_gb(st['limit'])}"
-    plan = st["plan"] or L(shop, "plan_unset")
+    plan = st["plan"] or "—"
     text = L(shop, "sub_info", username=sub["username"], status=status,
              expire=format_when(shop, st["exp"]), traffic=traffic, plan=plan)
     home = [[{"text": L(shop, "back_btn"), "callback_data": "back:subs"},
@@ -621,17 +649,17 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub) -> None:
         pid = (st["pending"] or {}).get("id") if isinstance(st["pending"], dict) else None
         btns = ([[{"text": L(shop, "cancel_receipt_btn"),
                    "callback_data": f"cancelorder:{pid}"}]] if pid else []) + home
-        await tg.send_message(sender, text, reply_markup=kb(btns))
+        await _show(tg, sender, edit, text, kb(btns))
         return
     if sub.get("cancelled"):
         text += "\n\n" + L(shop, "cancelled_lbl")
-        await tg.send_message(sender, text, reply_markup=kb(home))
+        await _show(tg, sender, edit, text, kb(home))
         return
     if sub.get("is_test"):
         # Trial accounts are info-only: no renew, no top-ups. A full plan
         # is bought through the Buy menu like any new subscription.
         text += "\n\n" + L(shop, "test_no_renew")
-        await tg.send_message(sender, text, reply_markup=kb(home))
+        await _show(tg, sender, edit, text, kb(home))
         return
     offer = None
     if sub.get("buyer_tg_id"):
@@ -658,7 +686,17 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub) -> None:
             pass
     if st["timeless"] and not st["has_cap"]:
         text += "\n\n" + L(shop, "lifetime_ok")
-        await tg.send_message(sender, text, reply_markup=kb(cancel_row + home))
+        await _show(tg, sender, edit, text, kb(cancel_row + home))
+        return
+    if not st["pkg"]:
+        # Linked / pre-shop sub with no shop package: it is shown as-is
+        # from the system. The only renewal path is picking a package
+        # from this shop (change-plan chain) — no quick renew, no owner
+        # ping, no package talk.
+        btns = [[{"text": L(shop, "renew_btn", username=sub["username"]),
+                  "callback_data": f"renew:{sub['id']}"}]]
+        btns += cancel_row + home
+        await _show(tg, sender, edit, text, kb(btns))
         return
     if st["expired"]:
         quick = L(shop, "reactivate_btn")
@@ -678,14 +716,73 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub) -> None:
     if extra:
         btns.append(extra)
     btns += cancel_row + home
-    await tg.send_message(sender, text, reply_markup=kb(btns))
+    await _show(tg, sender, edit, text, kb(btns))
 
 
-async def _send_account(ctx, shop, tg, sender) -> None:
-    """My account: every order ever placed (all statuses) + the buyer's own
-    language chooser + Back. Always the last main-menu button."""
-    from rwa_plugin_pershop.lang import LANGS, L, normalize_lang
-    from rwa_plugin_pershop.service import credit_balance, format_price, format_when
+async def _send_account(ctx, shop, tg, sender, edit=None) -> None:
+    """My account hub: Credit Balance / Purchase History / Language buttons."""
+    from rwa_plugin_pershop.lang import LANGS, LANG_FLAGS, L, normalize_lang
+    from rwa_plugin_pershop.service import credit_balance, format_price
+    from rwa_plugin_pershop.telegram import kb
+
+    bal = await credit_balance(ctx, shop["id"], sender)
+    try:
+        n = await ctx.db.fetchval(
+            "SELECT COUNT(*) FROM plugin_pershop_orders WHERE shop_id=$1 AND buyer_tg_id=$2",
+            shop["id"], sender) or 0
+    except Exception:
+        n = 0
+    cur = normalize_lang(shop.get("_buyer_lang") or shop.get("lang"))
+    rows = [
+        [{"text": L(shop, "acc_balance_btn", value=format_price(shop, bal)),
+          "callback_data": "acc:balance"}],
+        [{"text": L(shop, "acc_history_btn", n=n), "callback_data": "acc:history"}],
+        [{"text": L(shop, "acc_lang_btn",
+                   lang=f"{LANG_FLAGS.get(cur, '')} {cur}"),
+          "callback_data": "langmenu"}],
+    ]
+    text = L(shop, "account_title") + "\n\n" + L(shop, "acc_hub_hint")
+    await _show(tg, sender, edit, text, kb(rows + _back_row(shop)))
+
+
+async def _send_balance(ctx, shop, tg, sender, edit=None) -> None:
+    """Credit balance detail: the invitees whose purchases earned credit."""
+    from rwa_plugin_pershop.lang import L
+    from rwa_plugin_pershop.service import credit_balance, format_price
+    from rwa_plugin_pershop.telegram import kb
+
+    try:
+        rows = await ctx.db.fetch(
+            """SELECT r.referred_tg_id, COALESCE(SUM(o.credit_units), 0) AS earned,
+                      MAX(o.buyer_username) AS uname
+               FROM plugin_pershop_referrals r LEFT JOIN plugin_pershop_orders o
+                 ON o.shop_id=r.shop_id AND o.buyer_tg_id=r.referred_tg_id
+                AND o.status='approved'
+               WHERE r.shop_id=$1 AND r.referrer_tg_id=$2
+               GROUP BY r.referred_tg_id ORDER BY earned DESC""",
+            shop["id"], sender)
+    except Exception:
+        rows = []
+    contrib = [r for r in (rows or [])
+               if float(r.get("earned") or 0) > 0]
+    bal = await credit_balance(ctx, shop["id"], sender)
+    head = L(shop, "credit_balance", value=format_price(shop, bal))
+    if not contrib:
+        text = head + "\n\n" + L(shop, "acc_no_contrib")
+    else:
+        lines = []
+        for r in contrib:
+            name = r.get("uname") or str(r.get("referred_tg_id"))
+            lines.append(f"@{name} · {format_price(shop, r.get('earned') or 0)}")
+        text = head + "\n\n" + L(shop, "acc_contrib_title") + "\n\n" + "\n".join(lines)
+    await _show(tg, sender, edit, text, kb(
+        [[{"text": L(shop, "back_btn"), "callback_data": "account"}]]))
+
+
+async def _send_history(ctx, shop, tg, sender, edit=None) -> None:
+    """Purchase history: every order ever placed (all statuses)."""
+    from rwa_plugin_pershop.lang import L
+    from rwa_plugin_pershop.service import format_price, format_when
     from rwa_plugin_pershop.telegram import kb
 
     rows = await ctx.db.fetch(
@@ -698,10 +795,8 @@ async def _send_account(ctx, shop, tg, sender) -> None:
     status_word = {"pending": L(shop, "ord_pending"), "approved": L(shop, "ord_approved"),
                    "denied": L(shop, "ord_denied"), "cancelled": L(shop, "ord_cancelled"),
                    "withdraw_requested": L(shop, "pending_badge")}
-    bal = await credit_balance(ctx, shop["id"], sender)
-    bal_line = L(shop, "credit_balance", value=format_price(shop, bal))
     if not rows:
-        text = bal_line + "\n\n" + L(shop, "history_empty")
+        text = L(shop, "account_title") + "\n\n" + L(shop, "history_empty")
     else:
         lines = []
         for o in rows:
@@ -712,24 +807,23 @@ async def _send_account(ctx, shop, tg, sender) -> None:
                          f"{o.get('package_name') or o.get('service_name') or ''} · "
                          f"{format_price(shop, units)} · "
                          f"{status_word.get(o.get('status'), o.get('status') or '')}")
-        text = bal_line + "\n\n" + L(shop, "account_title") + "\n\n" + "\n".join(lines)
-    cur = normalize_lang(shop.get("_buyer_lang") or shop.get("lang"))
-    lang_row = [[{"text": f"{L(shop, 'lang_btn')}: {LANGS.get(cur, cur)}",
-                  "callback_data": "langmenu"}]]
-    await tg.send_message(sender, text, reply_markup=kb(lang_row + _back_row(shop)))
+        text = L(shop, "account_title") + "\n\n" + "\n".join(lines)
+    await _show(tg, sender, edit, text, kb(
+        [[{"text": L(shop, "back_btn"), "callback_data": "account"}]]))
 
 
-async def _send_lang_menu(ctx, shop, tg, sender) -> None:
+async def _send_lang_menu(ctx, shop, tg, sender, edit=None) -> None:
     """Buyer language picker (overrides the shop default for this buyer)."""
-    from rwa_plugin_pershop.lang import LANGS, L, normalize_lang
+    from rwa_plugin_pershop.lang import LANGS, LANG_FLAGS, L, normalize_lang
     from rwa_plugin_pershop.telegram import kb
 
     cur = normalize_lang(shop.get("_buyer_lang") or shop.get("lang"))
-    rows = [[{"text": (f"✅ {name}" if code == cur else name),
+    rows = [[{"text": (f"{LANG_FLAGS.get(code, '')} {name} ✅" if code == cur
+                       else f"{LANG_FLAGS.get(code, '')} {name}"),
               "callback_data": f"langpick:{code}"}]
             for code, name in LANGS.items()]
     rows.append([{"text": L(shop, "back_btn"), "callback_data": "account"}])
-    await tg.send_message(sender, L(shop, "lang_title"), reply_markup=kb(rows))
+    await _show(tg, sender, edit, L(shop, "lang_title"), kb(rows))
 
 
 async def _cancel_back_target(ctx, shop, order) -> str:
@@ -744,7 +838,7 @@ async def _cancel_back_target(ctx, shop, order) -> str:
     return f"sub:{sub['id']}" if sub else "my_subs"
 
 
-async def _send_withdraw_reason(ctx, shop, tg, sender, order_id: str) -> None:
+async def _send_withdraw_reason(ctx, shop, tg, sender, order_id: str, edit=None) -> None:
     """Withdraw step 1: only a still-pending order can enter the flow.
     Anything already decided answers 'too late' instead of a dead button."""
     from rwa_plugin_pershop.lang import L
@@ -756,18 +850,18 @@ async def _send_withdraw_reason(ctx, shop, tg, sender, order_id: str) -> None:
     except (TypeError, ValueError):
         order = None
     if not order or order.get("buyer_tg_id") != sender:
-        await _send_subs_list(ctx, shop, tg, sender)
+        await _send_subs_list(ctx, shop, tg, sender, edit=edit)
         return
     if order.get("status") != "pending":
-        await tg.send_message(sender, L(shop, "withdraw_too_late"))
-        await _send_subs_list(ctx, shop, tg, sender)
+        mid = await _show(tg, sender, edit, L(shop, "withdraw_too_late"))
+        await _send_subs_list(ctx, shop, tg, sender, edit=mid)
         return
     back = await _cancel_back_target(ctx, shop, order)
+    mid = await _show(
+        tg, sender, edit, L(shop, "withdraw_reason_prompt", id=order["id"]),
+        kb([[{"text": L(shop, "back_btn"), "callback_data": back}]]))
     await _set_session(ctx, shop["id"], sender, "buyer",
-                       f"await_wd_reason:{order['id']}", {"back": back})
-    await tg.send_message(
-        sender, L(shop, "withdraw_reason_prompt", id=order["id"]),
-        reply_markup=kb([[{"text": L(shop, "back_btn"), "callback_data": back}]]))
+                       f"await_wd_reason:{order['id']}", {"back": back, "pm": mid})
 
 
 async def _finalize_withdraw(ctx, shop, tg, sender, chat_id, order_id: int,
@@ -813,11 +907,18 @@ async def _finalize_withdraw(ctx, shop, tg, sender, chat_id, order_id: int,
         if prefunded > 0:
             card_text += "\n" + L(osh, "owner_credit_returned",
                                  value=_fp12(osh, prefunded))
-        await tg.send_message(
-            shop["admin_tg_id"], card_text,
+        _wd_card_id = await _show(
+            tg, shop["admin_tg_id"], order.get("owner_msg_id"), card_text,
             reply_markup=kb(
                 [[{"text": L(osh, "wd_process_btn"),
                    "callback_data": f"wdprocess:{order['id']}"}]]))
+        if _wd_card_id:
+            try:
+                await ctx.db.execute(
+                    "UPDATE plugin_pershop_orders SET owner_msg_id=$1 WHERE id=$2",
+                    _wd_card_id, order["id"])
+            except Exception:
+                pass
     except Exception as e:
         ctx.logger.warning("shop.withdraw_ping_failed", extra={"err": str(e)})
     try:
@@ -846,7 +947,7 @@ async def _wd_open_order(ctx, shop, order_id: int):
     return order
 
 
-async def _process_withdraw_cb(ctx, shop, tg, order_id: int) -> None:
+async def _process_withdraw_cb(ctx, shop, tg, order_id: int, edit=None) -> None:
     """Owner opens a cancellation request (admin-only callback). One
     Process button -> Approve cancellation / Deny as fake receipt. There
     is deliberately no keep option: holding a buyer's cancel request
@@ -856,10 +957,10 @@ async def _process_withdraw_cb(ctx, shop, tg, order_id: int) -> None:
 
     order = await _wd_open_order(ctx, shop, order_id)
     if not order:
-        await tg.send_message(shop["admin_tg_id"], L(shop, "wd_stale"))
+        await _show(tg, shop["admin_tg_id"], edit, L(shop, "wd_stale"))
         return
-    await tg.send_message(
-        shop["admin_tg_id"], L(shop, "decide_order", id=order["id"]),
+    await _show(
+        tg, shop["admin_tg_id"], edit, L(shop, "decide_order", id=order["id"]),
         reply_markup=kb(
             [[{"text": L(shop, "wd_approve_btn"),
                "callback_data": f"wdapprove:{order['id']}"},
@@ -867,7 +968,7 @@ async def _process_withdraw_cb(ctx, shop, tg, order_id: int) -> None:
                "callback_data": f"wddeny:{order['id']}"}]]))
 
 
-async def _approve_withdraw_cb(ctx, shop, tg, order_id: int) -> None:
+async def _approve_withdraw_cb(ctx, shop, tg, order_id: int, edit=None) -> None:
     """Owner approves a cancellation (admin-only callback): show the
     buyer's bank details and wait for the refund receipt. The order only
     settles to withdrawn once that receipt arrives and is forwarded."""
@@ -876,11 +977,11 @@ async def _approve_withdraw_cb(ctx, shop, tg, order_id: int) -> None:
 
     order = await _wd_open_order(ctx, shop, order_id)
     if not order:
-        await tg.send_message(shop["admin_tg_id"], L(shop, "wd_stale"))
+        await _show(tg, shop["admin_tg_id"], edit, L(shop, "wd_stale"))
         return
     await _set_session(ctx, shop["id"], shop["admin_tg_id"], "admin",
-                       f"await_refund:{order_id}", {"order_id": order_id})
-    await tg.send_message(shop["admin_tg_id"],
+                       f"await_refund:{order_id}", {"order_id": order_id, "pm": edit})
+    await _show(tg, shop["admin_tg_id"], edit,
         L(shop, "wd_approve_ask", id=order["id"],
           card=order.get("withdraw_card") or ""),
         reply_markup=kb(_cancel_row(shop)))
@@ -945,32 +1046,32 @@ def _fmt_exp(value) -> str:
         return str(value or "?")
 
 
-async def _send_link_prompt(ctx, shop, tg, sender) -> None:
+async def _send_link_prompt(ctx, shop, tg, sender, edit=None) -> None:
     """Link step: ask for the sub link + Back to subs list."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
 
-    await _set_session(ctx, shop["id"], sender, "buyer", "await_sub_link", {})
     rows = [[{"text": L(shop, "back_btn"), "callback_data": "back:subs"}]]
-    await tg.send_message(sender, L(shop, "link_sub_prompt"), reply_markup=kb(rows))
+    mid = await _show(tg, sender, edit, L(shop, "link_sub_prompt"), kb(rows))
+    await _set_session(ctx, shop["id"], sender, "buyer", "await_sub_link", {"pm": mid})
 
 
-async def _send_renew_picker(ctx, shop, tg, sender, sub) -> None:
+async def _send_renew_picker(ctx, shop, tg, sender, sub, edit=None) -> None:
     """Package-picker step for renewing one sub (tier-less shops): package buttons + Back to detail."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
 
     pkgs = _full_only(await _packages(ctx, shop["id"]))
     if not pkgs:
-        await tg.send_message(sender, L(shop, "no_packages"))
+        await _show(tg, sender, edit, L(shop, "no_packages"))
         return
     btns = [[{"text": f"{p['name']} — {p['price_text']}", "callback_data": f"renewpkg:{sub['id']}:{p['id']}"}]
             for p in pkgs]
     btns.append([{"text": L(shop, "back_btn"), "callback_data": f"sub:{sub['id']}"}])
-    await tg.send_message(sender, L(shop, "choose_renew_pkg"), reply_markup=kb(btns))
+    await _show(tg, sender, edit, L(shop, "choose_renew_pkg"), kb(btns))
 
 
-async def _send_renew_tiers(ctx, shop, tg, sender, sub) -> None:
+async def _send_renew_tiers(ctx, shop, tg, sender, sub, edit=None) -> None:
     """Renew entry: tier buttons (tier change allowed) + Back to detail."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
@@ -978,14 +1079,14 @@ async def _send_renew_tiers(ctx, shop, tg, sender, sub) -> None:
     tiers = await ctx.db.fetch(
         "SELECT * FROM plugin_pershop_tiers WHERE shop_id=$1 AND active ORDER BY sort, id", shop["id"])
     if not tiers:
-        await _send_renew_picker(ctx, shop, tg, sender, sub)
+        await _send_renew_picker(ctx, shop, tg, sender, sub, edit=edit)
         return
     rows = [[{"text": t["name"], "callback_data": f"renewtier:{sub['id']}:{t['id']}"}] for t in tiers]
     rows.append([{"text": L(shop, "back_btn"), "callback_data": f"sub:{sub['id']}"}])
-    await tg.send_message(sender, L(shop, "choose_tier"), reply_markup=kb(rows))
+    await _show(tg, sender, edit, L(shop, "choose_tier"), kb(rows))
 
 
-async def _send_renew_tier_packages(ctx, shop, tg, sender, sub, tier) -> None:
+async def _send_renew_tier_packages(ctx, shop, tg, sender, sub, tier, edit=None) -> None:
     """Renew packages of one tier + Back to the renew tier list."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
@@ -994,7 +1095,7 @@ async def _send_renew_tier_packages(ctx, shop, tg, sender, sub, tier) -> None:
         "SELECT * FROM plugin_pershop_packages WHERE tier_id=$1 AND active ORDER BY id", tier["id"])
     rows = [[{"text": _pkg_label(shop, p), "callback_data": f"renewpkg:{sub['id']}:{p['id']}"}] for p in _full_only(pkgs)]
     rows.append([{"text": L(shop, "back_btn"), "callback_data": f"renew:{sub['id']}"}])
-    await tg.send_message(sender, L(shop, "tier_pkg_title"), reply_markup=kb(rows))
+    await _show(tg, sender, edit, L(shop, "tier_pkg_title"), kb(rows))
 
 
 
@@ -1018,7 +1119,7 @@ def _hwid_line(shop, pkg, hwid_value):
              value=value, price=format_price(shop, hwid_extra(base, cfg, hwid_value)))
 
 
-async def _send_hwid(ctx, shop, tg, sender, pkg, value) -> None:
+async def _send_hwid(ctx, shop, tg, sender, pkg, value, edit=None) -> None:
     """Device-count picker. Shown only for input-mode packages; stores await_hwid."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import hwid_cfg
@@ -1027,11 +1128,11 @@ async def _send_hwid(ctx, shop, tg, sender, pkg, value) -> None:
     cfg = hwid_cfg(pkg)
     value = max(cfg["min"], min(cfg["max"], int(value or cfg["default"])))
     back_cb = f"back:tier:{pkg['tier_id']}" if pkg.get("tier_id") else "menu"
-    await tg.send_message(sender,
+    await _show(tg, sender, edit,
         f"<b>{L(shop, 'step_hwid').rstrip(':：')}</b>\n"
         f"{value}  ({cfg['min']} - {cfg['max']})\n"
         f"{L(shop, 'per_extra', p=cfg['percent'])}",
-        reply_markup=kb([
+        kb([
             [{"text": "-", "callback_data": "hminus"},
              {"text": "+", "callback_data": "hplus"}],
             [{"text": L(shop, "opt_next"), "callback_data": "hnext"}],
@@ -1109,7 +1210,7 @@ async def _ping_owner(ctx, shop, text) -> None:
 
 
 async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back="menu",
-                         credit_applied=False) -> dict:
+                         credit_applied=False, edit=None) -> dict:
     """Universal contract screen: plan, exact outcome, price — then Pay.
 
     sub None = brand-new buy. Back is a callback string re-rendering the
@@ -1151,7 +1252,7 @@ async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back=
              "hwid": hwid_value, "total_units": pv["price_units"], "back": back,
              "credit": bool(use_credit)}
     await _set_session(ctx, shop["id"], sender, "buyer", f"await_summary:{pkg['id']}", saved)
-    await tg.send_message(sender, "\n\n".join(lines), reply_markup=kb(
+    await _show(tg, sender, edit, "\n\n".join(lines), kb(
         [[{"text": L(shop, "contract_pay_btn"), "callback_data": "stconfirm"}]]
         + credit_row +
         [[{"text": L(shop, "back_btn"), "callback_data": back}]]))
@@ -1250,15 +1351,9 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
             if status == "linked":
                 await tg.send_message(chat_id, L(shop, "link_sub_success", username=info["username"],
                                                  expire=_fmt_exp(info.get("expire_at"))))
-                try:
-                    row = await ctx.db.fetchrow(
-                        "SELECT package_id FROM plugin_pershop_subs WHERE shop_id=$1 AND buyer_tg_id=$2 AND username=$3",
-                        shop["id"], buyer_id, info["username"])
-                    if row is not None and not row["package_id"]:
-                        await _ping_owner(ctx, shop, L(_owner_shop(shop), "owner_ping_linked",
-                                                       sub=info["username"], buyer=buyer_id))
-                except Exception:
-                    pass
+                # Linked as-is: the sub keeps whatever the system holds
+                # (status, expiry, traffic). No plan is needed — renewing
+                # later just picks a package from this shop.
             else:
                 await tg.send_message(chat_id, L(shop, "link_sub_already_yours"))
             await _send_subs_list(ctx, shop, tg, buyer_id)
@@ -1415,7 +1510,20 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
             ctx.logger.warning("shop.forward_failed", extra={"err": str(e)})
         from rwa_plugin_pershop.service import message_text
 
-        await tg.send_message(chat_id, message_text(shop, "thank_you"))
+        # Receipt exception: drop the prompt, send one fresh waiting message,
+        # and remember its id so the later decision can edit it in place.
+        try:
+            if data.get("pm"):
+                await tg.delete_message(chat_id, data["pm"])
+        except Exception:
+            pass
+        thank_id = await tg.send_message(chat_id, message_text(shop, "thank_you"))
+        try:
+            await ctx.db.execute(
+                "UPDATE plugin_pershop_orders SET buyer_msg_id=$1 WHERE id=$2",
+                thank_id, row["id"])
+        except Exception:
+            pass
         return
 
     # No command, no pending step: re-show the button menu (no commands to learn).
@@ -1449,7 +1557,8 @@ async def _on_admin_message(ctx, shop, tg, msg, text) -> None:
         import json
 
         try:
-            order_id = json.loads(ses["data"] or "{}")["order_id"]
+            _wd = json.loads(ses["data"] or "{}")
+            order_id = _wd["order_id"]
         except Exception:
             await _clear_session(ctx, shop["id"], shop["admin_tg_id"], "admin")
             return
@@ -1479,15 +1588,16 @@ async def _on_admin_message(ctx, shop, tg, msg, text) -> None:
             return
         await _clear_session(ctx, shop["id"], shop["admin_tg_id"], "admin")
         try:
-            await tg.send_message(order["buyer_tg_id"],
-                                  _L2(_bshop, "withdraw_done", id=order["id"]))
+            await _show(tg, order["buyer_tg_id"], order.get("buyer_msg_id"),
+                        _L2(_bshop, "withdraw_done", id=order["id"]))
             if float(settled.get("credit_refunded") or 0) > 0:
                 from rwa_plugin_pershop.service import format_price as _fp12
 
                 await tg.send_message(order["buyer_tg_id"],
                     _L2(_bshop, "credit_refunded",
                         value=_fp12(_bshop, float(settled["credit_refunded"]))))
-            await tg.send_message(chat_id, _L2(shop, "owner_wd_done", id=order["id"]))
+            await _show(tg, chat_id, _wd.get("pm"),
+                        _L2(shop, "owner_wd_done", id=order["id"]))
         except Exception as e:
             ctx.logger.warning("shop.notify_failed", extra={"err": str(e)})
         return
@@ -1513,7 +1623,8 @@ async def _on_admin_message(ctx, shop, tg, msg, text) -> None:
         from rwa_plugin_pershop.service import message_text as _mt
 
         try:
-            await tg.send_message(order["buyer_tg_id"], _mt(shop, "denied", reason=reason))
+            await _show(tg, order["buyer_tg_id"], order.get("buyer_msg_id"),
+                        _mt(shop, "denied", reason=reason))
             if (refunded or 0) > 0:
                 from rwa_plugin_pershop.service import format_price as _fp10
                 from rwa_plugin_pershop.service import shop_for_tg as _sft4
@@ -1523,7 +1634,10 @@ async def _on_admin_message(ctx, shop, tg, msg, text) -> None:
                     L(_bshop, "credit_refunded", value=_fp10(_bshop, float(refunded))))
         except Exception as e:
             ctx.logger.warning("shop.notify_buyer_failed", extra={"err": str(e)})
-        await tg.send_message(chat_id, L(shop, "order_denied", id=order_id))
+        who = order.get("buyer_username") or str(order.get("buyer_tg_id"))
+        await _show(tg, chat_id, order.get("owner_msg_id"),
+            L(_owner_shop(shop), "owner_final_denied",
+              id=order_id, username=who, reason=reason))
         try:
             from rwa_plugin_pershop.telegram import kb as _kb3
 
@@ -1556,7 +1670,7 @@ async def _load_draft(ctx, shop, sender):
     return pkg, data.get("hwid"), ses["state"] or "", data
 
 
-async def _send_topup_picker(ctx, shop, tg, sender, sub, effect) -> None:
+async def _send_topup_picker(ctx, shop, tg, sender, sub, effect, edit=None) -> None:
     """Offer list for one top-up kind (+traffic / +days) + Back to detail."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import format_price
@@ -1577,13 +1691,13 @@ async def _send_topup_picker(ctx, shop, tg, sender, sub, effect) -> None:
               if o.get("scope_tier_id") is None
               or (tier is not None and int(o["scope_tier_id"]) == int(tier))]
     if not offers:
-        await _send_sub_detail(ctx, shop, tg, sender, sub)
+        await _send_sub_detail(ctx, shop, tg, sender, sub, edit=edit)
         return
     rows = [[{"text": f"{o['name']} — {format_price(shop, o.get('price_units') or 0)}",
               "callback_data": f"topick:{sub['id']}:{o['id']}"}] for o in offers]
     rows.append([{"text": L(shop, "back_btn"), "callback_data": f"sub:{sub['id']}"}])
-    await tg.send_message(sender, L(shop, "topup_pick", username=sub["username"]),
-                          reply_markup=kb(rows))
+    await _show(tg, sender, edit, L(shop, "topup_pick", username=sub["username"]),
+                kb(rows))
 
 
 async def _topup_sub(ctx, shop, sender, sub_id: int):
@@ -1618,11 +1732,11 @@ async def _draft_sub(ctx, shop, saved):
     return sub
 
 
-async def _to_summary(ctx, shop, tg, sender, pkg, hwid_value=None, sub=None, back=None) -> None:
+async def _to_summary(ctx, shop, tg, sender, pkg, hwid_value=None, sub=None, back=None, edit=None) -> None:
     """Show the contract screen (was: plain summary)."""
     if back is None:
         back = f"back:tier:{pkg['tier_id']}" if pkg.get("tier_id") else "menu"
-    await _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value, back)
+    await _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value, back, edit=edit)
 
 
 async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
@@ -1698,7 +1812,8 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
                 res["username"], row["id"])
         except Exception:
             pass
-    await tg.send_message(sender,
+    _cb_mid = (cb.get("message") or {}).get("message_id")
+    await _show(tg, sender, _cb_mid,
         L(shop, "auto_approved_note", id=row["id"], item=label,
           amount=_fp7(shop, total)))
     await _notify_approval(ctx, shop, tg, order, res, sub_pre)
@@ -1712,19 +1827,20 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
     return True
 
 
-async def _notify_approval(ctx, shop, tg, order, res, sub_pre=None) -> None:
+async def _notify_approval(ctx, shop, tg, order, res, sub_pre=None, edit=None) -> None:
     """Buyer-side DMs for an approved order: the service done-text or the
     effect-aware VPN texts, plus the inviter earn notice. Shared by the
     owner Approve button and full-credit auto-approval. Never raises."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import message_text as _mt
 
+    bmid = order.get("buyer_msg_id") or edit
     if res.get("service"):
         try:
             from rwa_plugin_pershop.service import shop_for_tg as _sft
 
             bshop = await _sft(ctx, shop, order["buyer_tg_id"])
-            await tg.send_message(order["buyer_tg_id"],
+            await _show(tg, order["buyer_tg_id"], bmid,
                 res.get("done_text") or L(bshop, "service_done_default"))
         except Exception as e:
             ctx.logger.warning("shop.notify_buyer_failed", extra={"err": str(e)})
@@ -1736,7 +1852,7 @@ async def _notify_approval(ctx, shop, tg, order, res, sub_pre=None) -> None:
         target = (pkg or {}).get("traffic_limit_bytes")
         if res.get("renewed") and eff == "traffic_only":
             added = max(0, (res.get("traffic_limit_bytes") or 0) - (target or 0))
-            await tg.send_message(order["buyer_tg_id"],
+            await _show(tg, order["buyer_tg_id"], bmid,
                 L(shop, "contract_traffic_roll", left=_fmt_gb(added),
                   cap=_fmt_gb(res.get("traffic_limit_bytes"))))
         elif res.get("renewed") and eff == "time_only":
@@ -1745,10 +1861,10 @@ async def _notify_approval(ctx, shop, tg, order, res, sub_pre=None) -> None:
                 "effect": "full", "new_expire_at": res.get("expire_at"),
                 "current_expire_at": (sub_pre or {}).get("expire_at"),
             }, {"username": res["username"]})
-            await tg.send_message(order["buyer_tg_id"],
+            await _show(tg, order["buyer_tg_id"], bmid,
                 L(shop, "contract_days_add", days=days) + ("\n" + date_ln if date_ln else ""))
         elif res.get("renewed"):
-            await tg.send_message(order["buyer_tg_id"],
+            await _show(tg, order["buyer_tg_id"], bmid,
                 _mt(shop, "renewed", username=res["username"], expire=res["expire_at"]))
             if target is not None and res.get("traffic_limit_bytes"):
                 left = (res["traffic_limit_bytes"] or 0) - target
@@ -1758,7 +1874,7 @@ async def _notify_approval(ctx, shop, tg, order, res, sub_pre=None) -> None:
                           cap=_fmt_gb(res["traffic_limit_bytes"])))
         else:
             url = res.get("subscription_url") or L(shop, "url_fallback")
-            await tg.send_message(order["buyer_tg_id"],
+            await _show(tg, order["buyer_tg_id"], bmid,
                 _mt(shop, "approved", username=res["username"], expire=res["expire_at"], url=url))
     except Exception as e:
         ctx.logger.warning("shop.notify_buyer_failed", extra={"err": str(e)})
@@ -1794,21 +1910,30 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
     data = cb.get("data") or ""
     cb_id = cb.get("id")
     sender = (cb.get("from") or {}).get("id")
+    mid = (cb.get("message") or {}).get("message_id")
     try:
         await tg.answer_callback(cb_id)
     except Exception:
         pass
 
     if data == "my_subs":
-        await _send_subs_list(ctx, shop, tg, sender)
+        await _send_subs_list(ctx, shop, tg, sender, edit=mid)
         return
 
     if data == "account":
-        await _send_account(ctx, shop, tg, sender)
+        await _send_account(ctx, shop, tg, sender, edit=mid)
+        return
+
+    if data == "acc:balance":
+        await _send_balance(ctx, shop, tg, sender, edit=mid)
+        return
+
+    if data == "acc:history":
+        await _send_history(ctx, shop, tg, sender, edit=mid)
         return
 
     if data == "langmenu":
-        await _send_lang_menu(ctx, shop, tg, sender)
+        await _send_lang_menu(ctx, shop, tg, sender, edit=mid)
         return
 
     if data.startswith("langpick:"):
@@ -1825,19 +1950,19 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             ctx.logger.warning("shop.lang_save_failed", extra={"err": str(e)})
         shop = dict(shop)
         shop["_buyer_lang"] = code
-        await _send_account(ctx, shop, tg, sender)
+        await _send_account(ctx, shop, tg, sender, edit=mid)
         return
 
     if data.startswith("cancelorder:"):
-        await _send_withdraw_reason(ctx, shop, tg, sender, data.split(":", 1)[1])
+        await _send_withdraw_reason(ctx, shop, tg, sender, data.split(":", 1)[1], edit=mid)
         return
 
     if data == "linksub":
-        await _send_link_prompt(ctx, shop, tg, sender)
+        await _send_link_prompt(ctx, shop, tg, sender, edit=mid)
         return
 
     if data == "pershop:services":
-        await _send_svc_list(ctx, shop, tg, sender)
+        await _send_svc_list(ctx, shop, tg, sender, edit=mid)
         return
 
     if data.startswith("svccat:"):
@@ -1850,11 +1975,11 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         except (TypeError, ValueError):
             cat = None
         if not cat:
-            await _send_svc_list(ctx, shop, tg, sender)
+            await _send_svc_list(ctx, shop, tg, sender, edit=mid)
             return
         await _send_svc_items(ctx, shop, tg, sender,
                               await cat_services(ctx, shop["id"], cat["id"]),
-                              cat["name"])
+                              cat["name"], edit=mid)
         return
 
     if data == "svcother:":
@@ -1862,7 +1987,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
 
         await _send_svc_items(ctx, shop, tg, sender,
                               await cat_services(ctx, shop["id"], None),
-                              L(shop, "scat_other"))
+                              L(shop, "scat_other"), edit=mid)
         return
 
     if data.startswith("svcbuy:"):
@@ -1873,11 +1998,11 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         except (TypeError, ValueError):
             svc = None
         if not svc or svc.get("shop_id") != shop["id"]:
-            await tg.send_message(sender, L(shop, "svc_unavailable"))
+            await _show(tg, sender, mid, L(shop, "svc_unavailable"))
             return
         await _maybe_scam_warn(ctx, shop, tg, sender,
                                ((cb.get("from") or {}).get("username")) or "")
-        await _send_svc_note_prompt(ctx, shop, tg, sender, svc, f"svc:{svc['id']}")
+        await _send_svc_note_prompt(ctx, shop, tg, sender, svc, f"svc:{svc['id']}", edit=mid)
         return
 
     if data.startswith("svcskip:"):
@@ -1888,9 +2013,9 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         except (TypeError, ValueError):
             svc = None
         if not svc or svc.get("shop_id") != shop["id"]:
-            await tg.send_message(sender, L(shop, "svc_unavailable"))
+            await _show(tg, sender, mid, L(shop, "svc_unavailable"))
             return
-        await _send_svc_contract(ctx, shop, tg, sender, svc, "", f"svc:{svc['id']}")
+        await _send_svc_contract(ctx, shop, tg, sender, svc, "", f"svc:{svc['id']}", edit=mid)
         return
 
     if data.startswith("svc:"):
@@ -1901,17 +2026,17 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         except (TypeError, ValueError):
             svc = None
         if not svc or svc.get("shop_id") != shop["id"]:
-            await tg.send_message(sender, L(shop, "svc_unavailable"))
+            await _show(tg, sender, mid, L(shop, "svc_unavailable"))
             return
-        await _send_svc_detail(ctx, shop, tg, sender, svc)
+        await _send_svc_detail(ctx, shop, tg, sender, svc, edit=mid)
         return
 
     if data == "pershop:buy":
-        await _send_buy_list(ctx, shop, tg, sender)
+        await _send_buy_list(ctx, shop, tg, sender, edit=mid)
         return
 
     if data == "pershop:test":
-        await _send_test_offer(ctx, shop, tg, sender)
+        await _send_test_offer(ctx, shop, tg, sender, edit=mid)
         return
 
     if data == "testconfirm":
@@ -1921,11 +2046,11 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             res = await claim_test_sub(ctx, shop, sender,
                                        ((cb.get("from") or {}).get("username")) or "")
         except ValueError:
-            await tg.send_message(sender, L(shop, "test_limit_one"))
+            await _show(tg, sender, mid, L(shop, "test_limit_one"))
             return
         url = res.get("subscription_url") or L(shop, "url_fallback")
-        await tg.send_message(
-            sender, L(shop, "test_success", username=res["username"],
+        await _show(
+            tg, sender, mid, L(shop, "test_success", username=res["username"],
                       expire=res["expire_at"].strftime("%Y-%m-%d %H:%M UTC"), url=url))
         return
 
@@ -1935,23 +2060,24 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         bot_un = (shop.get("bot_username") or "").strip().lstrip("@")
         if bot_un:
-            await tg.send_message(
-                sender, L(shop, "referral_body", text=text,
-                          link=f"https://t.me/{bot_un}?start=r_{sender}"))
+            await _show(tg, sender, mid,
+                L(shop, "referral_body", text=text,
+                  link=f"https://t.me/{bot_un}?start=r_{sender}"))
         else:
-            await tg.send_message(sender, L(shop, "referral_nocode", text=text, id=sender))
+            await _show(tg, sender, mid,
+                L(shop, "referral_nocode", text=text, id=sender))
         return
 
     if data == "pershop:how":
         tutorial = (await ctx.settings.get("tutorial_text", default="") or "").strip()
         if tutorial:
-            await tg.send_message(sender, tutorial)
+            await _show(tg, sender, mid, tutorial)
         return
 
     if data == "pershop:help":
         support = (shop.get("support_text") or "").strip()
         if support:
-            await tg.send_message(sender, support)
+            await _show(tg, sender, mid, support)
         return
 
     if data.startswith("tiers:"):
@@ -1964,7 +2090,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             tier_id, shop["id"])
         if not tier:
             return
-        await _send_tier_packages(ctx, shop, tg, sender, tier)
+        await _send_tier_packages(ctx, shop, tg, sender, tier, edit=mid)
         return
 
     if data.startswith("back:tier:"):
@@ -1977,7 +2103,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             tier_id, shop["id"])
         if not tier:
             return
-        await _send_tier_packages(ctx, shop, tg, sender, tier)
+        await _send_tier_packages(ctx, shop, tg, sender, tier, edit=mid)
         return
 
     if data.startswith("buy:"):
@@ -1991,15 +2117,15 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         from rwa_plugin_pershop.service import hwid_cfg, pkg_effect
 
         if not pkg or pkg_effect(pkg) != "full":
-            await tg.send_message(sender, L(shop, "pkg_unavailable"))
+            await _show(tg, sender, mid, L(shop, "pkg_unavailable"))
             return
         await _maybe_scam_warn(ctx, shop, tg, sender,
                                ((cb.get("from") or {}).get("username")) or "")
         if hwid_cfg(pkg)["mode"] == "input":
-            await _send_hwid(ctx, shop, tg, sender, pkg, hwid_cfg(pkg)["default"])
+            await _send_hwid(ctx, shop, tg, sender, pkg, hwid_cfg(pkg)["default"], edit=mid)
             return
         back_cb = f"back:tier:{pkg['tier_id']}" if pkg.get("tier_id") else "menu"
-        await _send_contract(ctx, shop, tg, sender, None, pkg, None, back_cb)
+        await _send_contract(ctx, shop, tg, sender, None, pkg, None, back_cb, edit=mid)
         return
 
     if data.startswith("cfcancel:"):
@@ -2023,9 +2149,9 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         except Exception:
             _offer = None
         if not _offer or _csub.get("cancelled"):
-            await _send_sub_detail(ctx, shop, tg, sender, _csub)
+            await _send_sub_detail(ctx, shop, tg, sender, _csub, edit=mid)
             return
-        await tg.send_message(sender,
+        await _show(tg, sender, mid,
             L(shop, "credit_cancel_confirm", item=_csub["username"],
               amount=_fp8(shop, float(_offer["total_units"] or 0))),
             reply_markup=kb([[{"text": L(shop, "credit_cancel_btn"),
@@ -2051,13 +2177,13 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         except ValueError:
             _fresh = await ctx.db.fetchrow(
                 "SELECT * FROM plugin_pershop_subs WHERE id=$1 AND shop_id=$2", _csid, shop["id"])
-            await _send_sub_detail(ctx, shop, tg, sender, _fresh or _csub)
+            await _send_sub_detail(ctx, shop, tg, sender, _fresh or _csub, edit=mid)
             return
         except Exception as e:
             ctx.logger.warning("shop.credit_cancel_failed", extra={"err": str(e)})
-            await tg.send_message(sender, L(shop, "order_error", id=_csid, err=e))
+            await _show(tg, sender, mid, L(shop, "order_error", id=_csid, err=e))
             return
-        await tg.send_message(sender,
+        await _show(tg, sender, mid,
             L(shop, "credit_cancel_done", amount=_fp9(shop, _out["amount"])))
         try:
             _osh = _owner_shop(shop)
@@ -2069,7 +2195,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             ctx.logger.warning("shop.owner_note_failed", extra={"err": str(e)})
         _fresh = await ctx.db.fetchrow(
             "SELECT * FROM plugin_pershop_subs WHERE id=$1 AND shop_id=$2", _csid, shop["id"])
-        await _send_sub_detail(ctx, shop, tg, sender, _fresh or _csub)
+        await _send_sub_detail(ctx, shop, tg, sender, _fresh or _csub, edit=None)
         return
 
     if data.startswith("sub:"):
@@ -2081,7 +2207,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             "SELECT * FROM plugin_pershop_subs WHERE id=$1 AND shop_id=$2", sub_id, shop["id"])
         if not sub or sub["buyer_tg_id"] != sender:
             return
-        await _send_sub_detail(ctx, shop, tg, sender, sub)
+        await _send_sub_detail(ctx, shop, tg, sender, sub, edit=mid)
         return
 
     if data.startswith("qrenew:"):
@@ -2093,10 +2219,10 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             "SELECT * FROM plugin_pershop_subs WHERE id=$1 AND shop_id=$2", sub_id, shop["id"])
         if not sub or sub.get("buyer_tg_id") != sender:
             return
-        from rwa_plugin_pershop.service import format_expire, pending_for_sub, pkg_effect
+        from rwa_plugin_pershop.service import pending_for_sub, pkg_effect
 
         if await pending_for_sub(ctx, shop["id"], sub["username"]):
-            await tg.send_message(sender, L(shop, "pending_note"),
+            await _show(tg, sender, mid, L(shop, "pending_note"),
                 reply_markup=kb([[{"text": L(shop, "back_btn"),
                                    "callback_data": f"sub:{sub['id']}"}]]))
             return
@@ -2106,14 +2232,11 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                 "SELECT * FROM plugin_pershop_packages WHERE id=$1 AND shop_id=$2 AND active",
                 sub["package_id"], shop["id"])
         if not pkg or pkg_effect(pkg) != "full":
-            # No owner-matched plan: buyer-language explainer, ping the owner
-            # toward Plan matching, then fall through to the change-plan chain.
-            await tg.send_message(sender, L(shop, "renew_no_plan"))
-            await _ping_owner(ctx, shop, L(_owner_shop(shop), "owner_ping_unmatched", buyer=sender,
-                username=sub["username"], expire=format_expire(shop, sub.get("expire_at"))))
-            await _send_renew_tiers(ctx, shop, tg, sender, sub)
+            # Safety net (the button is hidden for package-less subs):
+            # straight into the change-plan chain, no explainer, no ping.
+            await _send_renew_tiers(ctx, shop, tg, sender, sub, edit=mid)
             return
-        await _send_contract(ctx, shop, tg, sender, sub, pkg, None, back=f"sub:{sub['id']}")
+        await _send_contract(ctx, shop, tg, sender, sub, pkg, None, back=f"sub:{sub['id']}", edit=mid)
         return
 
     if data.startswith("renew:"):
@@ -2125,7 +2248,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             "SELECT * FROM plugin_pershop_subs WHERE id=$1 AND shop_id=$2", sub_id, shop["id"])
         if not sub or sub["buyer_tg_id"] != sender:
             return
-        await _send_renew_tiers(ctx, shop, tg, sender, sub)
+        await _send_renew_tiers(ctx, shop, tg, sender, sub, edit=mid)
         return
 
     if data.startswith("renewtier:"):
@@ -2140,7 +2263,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", tier_id, shop["id"])
         if not sub or sub["buyer_tg_id"] != sender or not tier:
             return
-        await _send_renew_tier_packages(ctx, shop, tg, sender, sub, tier)
+        await _send_renew_tier_packages(ctx, shop, tg, sender, sub, tier, edit=mid)
         return
 
     if data.startswith("back:renewpkgs:"):
@@ -2155,7 +2278,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", tier_id, shop["id"])
         if not sub or sub["buyer_tg_id"] != sender or not tier:
             return
-        await _send_renew_tier_packages(ctx, shop, tg, sender, sub, tier)
+        await _send_renew_tier_packages(ctx, shop, tg, sender, sub, tier, edit=mid)
         return
 
     if data.startswith("renewpkg:"):
@@ -2174,14 +2297,14 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         if not sub or sub["buyer_tg_id"] != sender or not pkg or pkg_effect(pkg) != "full":
             return
         if await pending_for_sub(ctx, shop["id"], sub["username"]):
-            await tg.send_message(sender, L(shop, "pending_note"),
+            await _show(tg, sender, mid, L(shop, "pending_note"),
                 reply_markup=kb([[{"text": L(shop, "back_btn"),
                                    "callback_data": f"sub:{sub['id']}"}]]))
             return
         tier_id = pkg.get("tier_id")
         back_cb = (f"back:renewpkgs:{sub['id']}:{tier_id}" if tier_id
                    else f"back:picker:{sub['id']}")
-        await _send_contract(ctx, shop, tg, sender, sub, pkg, None, back_cb)
+        await _send_contract(ctx, shop, tg, sender, sub, pkg, None, back_cb, edit=mid)
         return
 
     if data.startswith("addtraffic:") or data.startswith("adddays:"):
@@ -2192,11 +2315,11 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         if not sub:
             return
         if await pending_for_sub(ctx, shop["id"], sub["username"]):
-            await tg.send_message(sender, L(shop, "pending_note"),
+            await _show(tg, sender, mid, L(shop, "pending_note"),
                 reply_markup=kb([[{"text": L(shop, "back_btn"),
                                    "callback_data": f"sub:{sub['id']}"}]]))
             return
-        await _send_topup_picker(ctx, shop, tg, sender, sub, effect)
+        await _send_topup_picker(ctx, shop, tg, sender, sub, effect, edit=mid)
         return
 
     if data.startswith("topick:"):
@@ -2214,12 +2337,12 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         if not sub or not pkg or pkg_effect(pkg) == "full":
             return
         if await pending_for_sub(ctx, shop["id"], sub["username"]):
-            await tg.send_message(sender, L(shop, "pending_note"),
+            await _show(tg, sender, mid, L(shop, "pending_note"),
                 reply_markup=kb([[{"text": L(shop, "back_btn"),
                                    "callback_data": f"sub:{sub['id']}"}]]))
             return
         back_cb = f"back:topups:{sub['id']}:{pkg_effect(pkg)}"
-        await _send_contract(ctx, shop, tg, sender, sub, pkg, None, back_cb)
+        await _send_contract(ctx, shop, tg, sender, sub, pkg, None, back_cb, edit=mid)
         return
 
     if data.startswith("back:topups:"):
@@ -2230,16 +2353,16 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         sub = await _topup_sub(ctx, shop, sender, sub_id)
         if not sub or effect not in ("traffic_only", "time_only"):
             return
-        await _send_topup_picker(ctx, shop, tg, sender, sub, effect)
+        await _send_topup_picker(ctx, shop, tg, sender, sub, effect, edit=mid)
         return
 
     if data == "menu":
         await _clear_session(ctx, shop["id"], sender, "buyer")
-        await _send_buyer_menu(ctx, shop, tg, sender)
+        await _send_buyer_menu(ctx, shop, tg, sender, edit=mid)
         return
 
     if data == "back:subs":
-        await _send_subs_list(ctx, shop, tg, sender)
+        await _send_subs_list(ctx, shop, tg, sender, edit=mid)
         return
 
     if data.startswith("back:picker:"):
@@ -2251,7 +2374,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             "SELECT * FROM plugin_pershop_subs WHERE id=$1 AND shop_id=$2", sub_id, shop["id"])
         if not sub or sub["buyer_tg_id"] != sender:
             return
-        await _send_renew_picker(ctx, shop, tg, sender, sub)
+        await _send_renew_picker(ctx, shop, tg, sender, sub, edit=mid)
         return
 
     if data in ("hminus", "hplus"):
@@ -2269,7 +2392,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         except (TypeError, ValueError):
             cur = cfg["default"]
         cur = max(cfg["min"], min(cfg["max"], cur + (1 if data == "hplus" else -1)))
-        await _send_hwid(ctx, shop, tg, sender, pkg, cur)
+        await _send_hwid(ctx, shop, tg, sender, pkg, cur, edit=mid)
         return
 
     if data == "hnext":
@@ -2281,7 +2404,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         pkg, hwid_value, state, _d = draft
         if not state.startswith("await_hwid:") or hwid_cfg(pkg)["mode"] != "input":
             return
-        await _to_summary(ctx, shop, tg, sender, pkg, hwid_value)
+        await _to_summary(ctx, shop, tg, sender, pkg, hwid_value, edit=mid)
         return
 
     if data == "back:hwid":
@@ -2293,7 +2416,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         pkg, hwid_value, _state, _d = draft
         if hwid_cfg(pkg)["mode"] != "input":
             return
-        await _send_hwid(ctx, shop, tg, sender, pkg, hwid_value)
+        await _send_hwid(ctx, shop, tg, sender, pkg, hwid_value, edit=mid)
         return
 
     if data == "stconfirm":
@@ -2319,12 +2442,15 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                     await _clear_session(ctx, shop["id"], sender, "buyer")
                     return
                 await _set_session(ctx, shop["id"], sender, "buyer",
-                                   f"await_receipt:svc:{svc['id']}", saved)
-                await tg.send_message(sender,
+                                   f"await_receipt:svc:{svc['id']}", dict(saved, pm=mid))
+                pm = await _show(tg, sender, mid,
                     L(shop, "send_receipt_new", pkg=svc["name"],
                       price=format_price(shop, saved["total_units"]), card=shop["card_text"])
                     + credit_note,
                     reply_markup=kb([[{"text": L(shop, "back_btn"), "callback_data": "back:contract"}]]))
+                if pm:
+                    await _set_session(ctx, shop["id"], sender, "buyer",
+                                       f"await_receipt:svc:{svc['id']}", dict(saved, pm=pm))
             return
         draft = await _load_draft(ctx, shop, sender)
         if not draft:
@@ -2347,20 +2473,27 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                 ctx, shop, tg, cb, "pkg", pkg, saved):
             await _clear_session(ctx, shop["id"], sender, "buyer")
             return
-        await _set_session(ctx, shop["id"], sender, "buyer", f"await_receipt:{pkg['id']}", saved)
+        await _set_session(ctx, shop["id"], sender, "buyer", f"await_receipt:{pkg['id']}",
+                             dict(saved, pm=mid))
         if pkg_effect(pkg) != "full":
             sub = await _draft_sub(ctx, shop, saved)
-            await tg.send_message(sender,
+            pm = await _show(tg, sender, mid,
                 L(shop, "send_receipt_topup", label=pkg["name"],
                   username=(sub["username"] if sub else saved.get("renew_username") or "?"),
                   card=shop["card_text"]) + credit_note,
                 reply_markup=kb([[{"text": L(shop, "back_btn"), "callback_data": "back:contract"}]]))
+            if pm:
+                await _set_session(ctx, shop["id"], sender, "buyer", f"await_receipt:{pkg['id']}",
+                                   dict(saved, pm=pm))
             return
-        await tg.send_message(sender,
+        pm = await _show(tg, sender, mid,
             L(shop, "send_receipt_new", pkg=pkg["name"],
               price=format_price(shop, saved["total_units"]), card=shop["card_text"])
             + credit_note,
             reply_markup=kb([[{"text": L(shop, "back_btn"), "callback_data": "back:contract"}]]))
+        if pm:
+            await _set_session(ctx, shop["id"], sender, "buyer", f"await_receipt:{pkg['id']}",
+                               dict(saved, pm=pm))
         return
 
     if data == "credituse":
@@ -2370,7 +2503,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             if saved.get("total_units") is not None:
                 sub = await _draft_sub(ctx, shop, saved)
                 await _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value,
-                                     saved.get("back") or "menu", credit_applied=True)
+                                     saved.get("back") or "menu", credit_applied=True, edit=mid)
                 return
         sdraft = await _load_svc_draft(ctx, shop, sender)
         if sdraft:
@@ -2378,7 +2511,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             if saved.get("total_units") is not None:
                 await _send_svc_contract(ctx, shop, tg, sender, svc, note,
                                          saved.get("back") or f"svc:{svc['id']}",
-                                         credit_applied=True)
+                                         credit_applied=True, edit=mid)
         return
     if data == "back:contract":
         sdraft = await _load_svc_draft(ctx, shop, sender)
@@ -2386,7 +2519,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             svc, note, _st, saved = sdraft
             if saved.get("total_units") is not None:
                 await _send_svc_contract(ctx, shop, tg, sender, svc, note,
-                                         saved.get("back") or f"svc:{svc['id']}")
+                                         saved.get("back") or f"svc:{svc['id']}", edit=mid)
             return
         draft = await _load_draft(ctx, shop, sender)
         if not draft:
@@ -2396,13 +2529,13 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         sub = await _draft_sub(ctx, shop, saved)
         await _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value,
-                             saved.get("back") or "menu")
+                             saved.get("back") or "menu", edit=mid)
         return
 
     if data == "cancel":
         role = "admin" if sender == shop["admin_tg_id"] else "buyer"
         await _clear_session(ctx, shop["id"], sender, role)
-        await tg.send_message(sender, L(shop, "admin_cancelled" if role == "admin" else "cancel_again"))
+        await _show(tg, sender, mid, L(shop, "admin_cancelled" if role == "admin" else "cancel_again"))
         return
 
     # Admin-only below.
@@ -2414,9 +2547,9 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         except ValueError:
             return
         if data.startswith("wdprocess:"):
-            await _process_withdraw_cb(ctx, shop, tg, wd_id)
+            await _process_withdraw_cb(ctx, shop, tg, wd_id, edit=mid)
         else:
-            await _approve_withdraw_cb(ctx, shop, tg, wd_id)
+            await _approve_withdraw_cb(ctx, shop, tg, wd_id, edit=mid)
         return
     if data.startswith("wddeny:"):
         try:
@@ -2426,14 +2559,14 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         if not await _wd_open_order(ctx, shop, order_id):
             from rwa_plugin_pershop.lang import L as _L
 
-            await tg.send_message(shop["admin_tg_id"], _L(shop, "wd_stale"))
+            await _show(tg, shop["admin_tg_id"], mid, _L(shop, "wd_stale"))
             return
         await _set_session(ctx, shop["id"], shop["admin_tg_id"], "admin",
                            f"await_reason:{order_id}", {"order_id": order_id})
         from rwa_plugin_pershop.lang import L
         from rwa_plugin_pershop.telegram import kb
 
-        await tg.send_message(shop["admin_tg_id"], L(shop, "ask_reason", id=order_id),
+        await _show(tg, shop["admin_tg_id"], mid, L(shop, "ask_reason", id=order_id),
             reply_markup=kb(_cancel_row(shop)))
         return
     if data.startswith("approve:"):
@@ -2462,15 +2595,9 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             await tg.send_message(shop["admin_tg_id"], L(shop, "order_error", id=order_id, err=e))
             return
         await _notify_approval(ctx, shop, tg, order, res, sub_pre)
-        if res.get("service"):
-            word = L(shop, "order_approved_word")
-            await tg.send_message(shop["admin_tg_id"],
-                L(shop, "order_done", id=order_id, approved=word,
-                  username=res.get("service_name") or "?"))
-            return
-        word = L(shop, "order_renewed_word") if res.get("renewed") else L(shop, "order_approved_word")
-        await tg.send_message(shop["admin_tg_id"],
-            L(shop, "order_done", id=order_id, approved=word, username=res["username"]))
+        who = res.get("service_name") or res.get("username") or "?"
+        await _show(tg, shop["admin_tg_id"], order.get("owner_msg_id") or mid,
+            L(_owner_shop(shop), "owner_final_approved", id=order_id, username=who))
         return
     if data.startswith("scam:"):
         try:
@@ -2489,13 +2616,22 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             await tg.send_message(shop["admin_tg_id"], L(shop, "order_error", id=order_id, err=e))
             return
         order = res["order"]
+        buyer_disp = order.get("buyer_username") or str(order["buyer_tg_id"])
         try:
             bshop = await shop_for_tg(ctx, res["shop"], order["buyer_tg_id"])
-            await tg.send_message(order["buyer_tg_id"], L(bshop, "scammed_note"))
+            await _show(tg, order["buyer_tg_id"], order.get("buyer_msg_id"),
+                        L(bshop, "scammed_note"))
         except Exception as e:
             ctx.logger.warning("shop.notify_buyer_failed", extra={"err": str(e)})
-        await tg.send_message(shop["admin_tg_id"],
+        # The scam button lives on the post-deny offer message: replace it with
+        # the done note, and append the flag line to the final Denied card.
+        await _show(tg, shop["admin_tg_id"], mid,
             L(_owner_shop(shop), "scam_done", id=order_id, buyer_id=order["buyer_tg_id"]))
+        who = order.get("buyer_username") or str(order.get("buyer_tg_id"))
+        await _show(tg, shop["admin_tg_id"], order.get("owner_msg_id"),
+            L(_owner_shop(shop), "owner_final_denied", id=order_id, username=who,
+              reason=order.get("deny_reason") or "")
+            + "\n\n" + L(_owner_shop(shop), "owner_final_scam", buyer=buyer_disp))
         return
     if data.startswith("deny:"):
         try:
@@ -2504,7 +2640,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         await _set_session(ctx, shop["id"], shop["admin_tg_id"], "admin",
                            f"await_reason:{order_id}", {"order_id": order_id})
-        await tg.send_message(shop["admin_tg_id"], L(shop, "ask_reason", id=order_id),
+        await _show(tg, shop["admin_tg_id"], mid, L(shop, "ask_reason", id=order_id),
             reply_markup=kb(_cancel_row(shop)))
         return
 

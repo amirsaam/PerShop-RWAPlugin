@@ -20,6 +20,9 @@ class FakeSettings:
     async def set(self, key, value):
         self.d[key] = value
 
+    async def delete(self, key):
+        self.d.pop(key, None)
+
 
 class FakeLogger:
     def warning(self, *a, **k):
@@ -266,6 +269,20 @@ class FakeDB:
         if "FROM plugin_pershop_buyers WHERE shop_id" in q:
             lang = self.buyers.get((a[0], a[1]))
             return [{"lang": lang}] if lang else []
+        if "GROUP BY r.referred_tg_id" in q:
+            out = []
+            for (s, referrer, referred) in self.referrals:
+                if s != a[0] or referrer != a[1]:
+                    continue
+                earned = sum(float(o.get("credit_units") or 0) for o in self.orders.values()
+                             if o["shop_id"] == s and o.get("buyer_tg_id") == referred
+                             and o["status"] == "approved")
+                uname = next((o.get("buyer_username") for o in self.orders.values()
+                              if o["shop_id"] == s and o.get("buyer_tg_id") == referred
+                              and o.get("buyer_username")), None)
+                out.append({"referred_tg_id": referred, "earned": earned, "uname": uname})
+            out.sort(key=lambda r: float(r["earned"]), reverse=True)
+            return out
         if "DISTINCT referred_tg_id FROM plugin_pershop_referrals WHERE shop_id" in q:
             return [{"referred_tg_id": r[2]} for r in self.referrals if r[0] == a[0]]
         if "FROM plugin_pershop_referrals WHERE shop_id" in q:
@@ -360,6 +377,9 @@ class FakeDB:
         if "COALESCE(SUM(credit_units)" in q:
             return sum(float(o.get("credit_units") or 0) for o in self.orders.values()
                        if o["shop_id"] == a[0] and o["status"] == "approved")
+        if "COUNT(*)" in q and "plugin_pershop_orders" in q and "buyer_tg_id" in q:
+            return sum(1 for o in self.orders.values()
+                       if o["shop_id"] == a[0] and o.get("buyer_tg_id") == a[1])
         if "status IN (" in q and "plugin_pershop_orders" in q:
             return sum(1 for o in self.orders.values()
                        if o["shop_id"] == a[0] and o["status"] in ("pending", "withdraw_requested"))
@@ -387,7 +407,10 @@ class FakeDB:
                                                 "state": a[3], "data": a[4]}
             return
         if "DELETE FROM plugin_pershop_sessions" in q:
-            self.sessions.pop((a[0], a[1], a[2]), None)
+            if not a:
+                self.sessions.clear()
+            else:
+                self.sessions.pop((a[0], a[1], a[2]), None)
             return
         if "INSERT INTO plugin_pershop_subs" in q:
             nid = self._next("sub")
@@ -404,6 +427,9 @@ class FakeDB:
         if "UPDATE plugin_pershop_subs SET buyer_tg_id" in q:
             self.subs[a[1]]["buyer_tg_id"] = a[0]
             self.subs[a[1]]["is_linked"] = True
+            return
+        if "DELETE FROM plugin_pershop_referrals" in q and not a:
+            self.referrals.clear()
             return
         if "plugin_pershop_referrals" in q:
             self.referrals.add((a[0], a[1], a[2]))
@@ -455,6 +481,9 @@ class FakeDB:
             o["owner_chat_id"] = a[0]
             o["owner_msg_id"] = a[1]
             return
+        if "plugin_pershop_orders SET buyer_msg_id=$1" in q:
+            self.orders[a[1]]["buyer_msg_id"] = a[0]
+            return
         if "scam_noted_at" in q and "plugin_pershop_buyers" in q:
             self.scam_noted.add((a[0], a[1]))
             return
@@ -474,6 +503,28 @@ class FakeDB:
             return
         if "UPDATE plugin_pershop_orders SET renew_username" in q:
             self.orders[a[1]]["renew_username"] = a[0]
+            return
+        if "UPDATE plugin_pershop_shops SET bot_token_enc=NULL WHERE id=$1" in q:
+            self.shops[a[0]]["bot_token_enc"] = None
+            return
+        if q.strip().startswith("DELETE FROM plugin_pershop_"):
+            table = q.strip().split()[2]
+            store = {"plugin_pershop_broadcasts": self.bcs,
+                     "plugin_pershop_referrals": self.referrals,
+                     "plugin_pershop_test_claims": self.test_claims,
+                     "plugin_pershop_scammers": self.scammers,
+                     "plugin_pershop_buyers": self.buyers,
+                     "plugin_pershop_sessions": self.sessions,
+                     "plugin_pershop_orders": self.orders,
+                     "plugin_pershop_subs": self.subs,
+                     "plugin_pershop_packages": self.pkgs,
+                     "plugin_pershop_services": self.svcs,
+                     "plugin_pershop_tiers": self.tiers,
+                     "plugin_pershop_service_cats": self.svc_cats,
+                     "plugin_pershop_shops": self.shops}.get(table)
+            if store is None:
+                raise AssertionError(f"unhandled wipe: {q!r}")
+            store.clear()
             return
         if "UPDATE plugin_pershop_subs SET cancelled=TRUE" in q:
             self.subs[a[0]]["cancelled"] = True
@@ -643,6 +694,15 @@ class FakeTg:
     async def edit_reply_markup(self, chat_id, message_id, reply_markup=None):
         self.sent.append(("editReplyMarkup", {"chat_id": chat_id, "message_id": message_id,
                                               "rm": reply_markup}))
+        return True
+
+    async def edit_text(self, chat_id, message_id, text, reply_markup=None):
+        self.sent.append(("editMessageText", {"chat_id": chat_id, "message_id": message_id,
+                                              "text": text, "rm": reply_markup}))
+        return True
+
+    async def delete_message(self, chat_id, message_id):
+        self.sent.append(("deleteMessage", {"chat_id": chat_id, "message_id": message_id}))
         return True
 
     async def forward_message(self, to_chat, from_chat, message_id):
@@ -1176,9 +1236,14 @@ async def _match_topup_flow():
                        "notified_80": False, "notified_72h": False, "notified_expired": False}
     pool = await svc.unmapped_users(ctx, shop)
     assert [s["username"] for s in pool["unplanned"]] == ["own-two"], pool
+    # package-less sub: quick renew goes straight to the change-plan chain —
+    # no explainer, no owner ping.
     await cb(f"qrenew:{sub2id}", "m3")
-    assert any("exact terms" in t for t in
-               [p[1]["text"] for inst in FakeTg.instances for p in inst.sent if p[0] == "sendMessage"]), "no-plan message missing"
+    chain_rms = [p[1].get("rm") for inst in FakeTg.instances for p in inst.sent
+                 if p[0] == "sendMessage" and p[1].get("rm")]
+    assert any("renewtier:" in str(r) for r in chain_rms), chain_rms
+    assert not any("exact terms" in p[1]["text"] for inst in FakeTg.instances for p in inst.sent
+                   if p[0] == "sendMessage"), "explainer should be gone"
     svc._owner_account_id, svc._owner_is_superadmin = real_owner, real_super
     print("MATCH TOPUP FLOW PASSED")
 
@@ -1678,9 +1743,10 @@ async def _link_flow():
                                   "trafficLimitBytes": None, "activeInternalSquads": []}
         await txt("https://sub.example.com/s/tokE", uid=333, un="cara")
         assert "cara-sub" in texts()[-2], texts()[-2:]  # success, then subs list
-        assert any("no plan matched yet" in p["text"]
-                   for inst in FakeTg.instances for m, p in inst.sent
-                   if m == "sendMessage" and p.get("chat_id") != 333), "owner ping missing"
+        # linked as-is: NO owner ping about plan matching anymore
+        assert not any(p.get("chat_id") != 333
+                       for inst in FakeTg.instances for m, p in inst.sent
+                       if m == "sendMessage"), "owner ping should be gone"
         assert panel.updated[-1] == ("uu-e", {"telegramId": 333}), panel.updated
         # same link again -> already yours
         await cb("linksub", "l2", uid=333, un="cara")
@@ -1780,13 +1846,14 @@ async def _account_cancel_flow():
 
     def owner_msgs():
         return [(p["text"], p.get("rm")) for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["chat_id"] == 999]
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == 999]
 
     def flat_rm(rm):
         return str(rm or "")
 
     # purchase history: both orders, both statuses
     await cb("account", "a1")
+    await cb("acc:history", "a1b")
     hist = mine()[-1]
     assert "Pro" in hist and "waiting for admin" in hist and "approved" in hist, hist
     # step 1: reason prompt carries the no-pullback caveat
@@ -1802,9 +1869,9 @@ async def _account_cancel_flow():
     assert o["withdraw_reason"] == "changed my mind, found cheaper", o
     assert o["withdraw_card"] == "IR-1234-5678", o
     assert any("withdraw request sent" in t.lower() for t in mine()[-2:]), mine()[-2:]
-    edits = [p for inst in FakeTg.instances for m, p in inst.sent
-             if m == "editReplyMarkup" and p.get("message_id") == 555]
-    assert edits, "old approve/deny buttons must be stripped"
+    card_edits = [p for inst in FakeTg.instances for m, p in inst.sent
+                  if m == "editMessageText" and p.get("message_id") == 555]
+    assert card_edits and "changed my mind" in card_edits[-1]["text"], card_edits
     wd = [t for t, rm in owner_msgs() if f"wdprocess:{pend}" in flat_rm(rm)]
     assert wd and "changed my mind" in wd[-1] and "IR-1234-5678" in wd[-1], owner_msgs()
     assert not any("wdconfirm:" in flat_rm(rm) or "wdreject:" in flat_rm(rm)
@@ -1911,7 +1978,7 @@ async def _mixed_withdraw_flow():
 
     def owner_msgs():
         return [(p["text"], p.get("rm")) for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["chat_id"] == 999]
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == 999]
 
     def flat_rm(rm):
         return str(rm or "")
@@ -2008,15 +2075,92 @@ async def _buyer_lang_flow():
     keys = [b.get("text") for r in (menu_en or {}).get("keyboard", []) for b in (r or [])]
     assert keys and keys[-1] == "👤 My account", menu_en
     await cb("account", "l1")
-    assert "English" in str(rms()[-1]), rms()[-1]
+    assert "🇬🇧 en" in str(rms()[-1]), rms()[-1]
     await cb("langmenu", "l2")
+    assert "🇬🇧 English ✅" in str(rms()[-1]), rms()[-1]
     await cb("langpick:fa", "l3")
     assert db.buyers.get((sid, 111)) == "fa", db.buyers
-    assert "فارسی" in str(rms()[-1]), rms()[-1]
+    assert "🇮🇷 fa" in str(rms()[-1]), rms()[-1]
     await cb("menu", "l4")
     menu_fa = rms()[-1]
     assert menu_fa != menu_en, "buyer language must change the menu"
     print("BUYER LANG FLOW PASSED")
+
+
+async def _account_hub_flow():
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _legacy = make_shop(db)
+    _tid, pid = make_stepped(db, sid)
+    shop = db.shops[sid]
+    db.credits[(sid, 111)] = 5.0
+    now = datetime.now(timezone.utc)
+
+    def _order(buyer, uname, units, earned, status="approved"):
+        oid = db._next("order")
+        db.orders[oid] = {"id": oid, "shop_id": sid, "package_id": pid, "service_id": None,
+                          "buyer_tg_id": buyer, "buyer_username": uname,
+                          "receipt_file_id": "f1", "receipt_kind": "photo",
+                          "renew_username": None, "status": status, "deny_reason": None,
+                          "withdraw_reason": None, "withdraw_card": None,
+                          "owner_chat_id": None, "owner_msg_id": None,
+                          "total_units": units, "options_snapshot": None,
+                          "credit_units": earned, "created_at": now,
+                          "decided_at": None, "decided_by": None,
+                          "owner_nudged_at": None}
+        return oid
+
+    _order(111, "alice", 2.5, 0)
+    _order(222, "carol", 2.5, 0.25)
+    db.referrals.add((sid, 111, 222))
+    db.referrals.add((sid, 111, 333))
+    FakeTg.instances.clear()
+
+    async def cb(data, cid, uid=111, un="alice"):
+        await handle_update(ctx, shop, {"update_id": 320, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    def rms(uid=111):
+        return [p.get("rm") for inst in FakeTg.instances for m, p in inst.sent
+                if m == "sendMessage" and p["chat_id"] == uid]
+
+    def texts(uid=111):
+        return [p.get("text", "") for inst in FakeTg.instances for m, p in inst.sent
+                if m == "sendMessage" and p["chat_id"] == uid]
+
+    def btns(rm):
+        return [b.get("text") for r in (rm or {}).get("inline_keyboard", []) for b in (r or [])]
+
+    await cb("account", "h1")
+    hub = btns(rms()[-1])
+    assert hub[0] == "💰 Credit Balance (1,250,000 تومان)", hub
+    assert hub[1] == "🧾 Purchase History [1 item(s)]", hub
+    assert hub[2] == "🌐 Language (🇬🇧 en)", hub
+
+    await cb("acc:history", "h2")
+    assert "Pro" in texts()[-1] and "approved" in texts()[-1], texts()[-1]
+
+    await cb("acc:balance", "h3")
+    assert "@carol" in texts()[-1], texts()[-1]
+    assert "62,500" in texts()[-1], texts()[-1]
+    assert "333" not in texts()[-1], texts()[-1]
+
+    await cb("acc:balance", "h4", uid=333, un="dave")
+    assert "No invitee" in texts(333)[-1], texts(333)
+    print("ACCOUNT HUB FLOW PASSED")
+
+
+def test_account_hub_flow():
+    asyncio.run(_account_hub_flow())
 
 
 def test_buyer_lang_flow():
@@ -2537,8 +2681,11 @@ async def _service_flow(ctx, shop, db):
     oid = orders[0]["id"]
     await cb(f"approve:{oid}", "s5", uid=999)
     assert db.orders[oid]["status"] == "approved", db.orders[oid]
-    assert any("check your inbox" in t for t in mine()), mine()
+    done_edits = [p for inst in FakeTg.instances for m, p in inst.sent
+                  if m == "editMessageText" and "check your inbox" in p.get("text", "")]
+    assert done_edits, "approval must edit the buyer waiting message with the done text"
     await cb("account", "s6")
+    await cb("acc:history", "s6b")
     assert "Setup help" in mine()[-1], mine()[-1]
     print("SERVICE FLOW PASSED")
 
@@ -2849,6 +2996,7 @@ async def _credit_flow():
     await svc.add_credit(ctx, sid, 777, 1.0)
     assert await svc.credit_balance(ctx, sid, 777) == 1.25
     await txt("👤 My account", uid=777, un="bob")
+    await cb("acc:balance", "k1f", uid=777, un="bob")
     assert any("312,500" in t for t in texts(777)), texts(777)
     await buy_contract(777, "bob", "k2")
     assert any("credituse" in str(rm) for rm in rms()), rms()
@@ -2959,12 +3107,186 @@ async def _credit_auto_flow():
     print("CREDIT AUTO FLOW PASSED")
 
 
+async def _edit_place_flow():
+    """Edit-in-place: button taps rewrite the tapped message; the receipt
+    step is the only exception (prompt deleted, fresh waiting message).
+    Owner approve/deny rewrite both the buyer waiting message and the
+    owner decide card, stripping the buttons."""
+    db, ctx, svc = await _approve_new()
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    shop = dict(db.shops[1])
+    FakeTg.instances.clear()
+
+    def _all():
+        return [(m, p) for inst in FakeTg.instances for m, p in inst.sent]
+
+    def _sends():
+        return [p for m, p in _all() if m == "sendMessage"]
+
+    def _edits():
+        return [p for m, p in _all() if m == "editMessageText"]
+
+    async def _tap(data, who=111, mid=5000, cid="e"):
+        await handle_update(ctx, shop, {"update_id": 100, "callback_query":
+            {"id": cid, "from": {"id": who}, "data": data, "message": {"message_id": mid}}})
+
+    # buyer taps rewrite the same message, no new sends
+    await _tap("my_subs", mid=5001, cid="e1")
+    await _tap("back:subs", mid=5001, cid="e2")
+    await _tap("account", mid=5001, cid="e3")
+    await _tap("menu", mid=5001, cid="e4")
+    assert not _sends(), _sends()
+    assert len(_edits()) == 4, _edits()
+
+    # full buy with taps: contract edits, receipt prompt edits, submit
+    # deletes the prompt and sends ONE fresh waiting message
+    await _tap("pershop:buy", mid=5001, cid="e5")
+    await _tap("buy:1", mid=5001, cid="e6")
+    await _tap("stconfirm", mid=5001, cid="e7")
+    n_sends = len(_sends())
+    await handle_update(ctx, shop, {"update_id": 101, "message": {"message_id": 60,
+        "from": {"id": 111, "username": "alice"}, "chat": {"id": 111}, "text": "rcpt-1"}})
+    pend = [o for o in db.orders.values() if o["status"] == "pending"]
+    assert pend, "receipt did not create order"
+    order = pend[-1]
+    assert any(m == "deleteMessage" for m, _ in _all()), _all()
+    fresh = [p for p in _sends()[n_sends:] if p["chat_id"] == 111]
+    assert len(fresh) == 1, _sends()
+    assert order.get("buyer_msg_id"), order
+    assert order.get("owner_msg_id"), order
+
+    # owner approves from the decide card: buyer waiting message becomes
+    # the credentials, decide card becomes the final Approved stub
+    FakeTg.instances.clear()
+    await _tap(f"approve:{order['id']}", who=999, mid=order["owner_msg_id"], cid="e8")
+    assert db.orders[order["id"]]["status"] == "approved"
+    edits = _edits()
+    buyer_edits = [p for p in edits if p["chat_id"] == 111]
+    owner_edits = [p for p in edits if p["chat_id"] == 999]
+    assert any(p["message_id"] == order["buyer_msg_id"] and "vip-alice" in p["text"]
+               for p in buyer_edits), edits
+    assert any(p["message_id"] == order["owner_msg_id"] and "Approved" in p["text"]
+               and not p["rm"] for p in owner_edits), edits
+    assert not [p for p in _sends() if p["chat_id"] == 111], _sends()
+
+    # deny path on a second order, then post-deny scammer report
+    db.orders[10] = {"id": 10, "shop_id": 1, "package_id": 1, "buyer_tg_id": 112,
+                     "buyer_username": "bob", "receipt_file_id": "r", "receipt_kind": "text",
+                     "renew_username": None, "status": "pending",
+                     "buyer_msg_id": 7001, "owner_msg_id": 7002}
+    db.seq["order"] = 10
+    FakeTg.instances.clear()
+    await _tap("deny:10", who=999, mid=7002, cid="e9")
+    await handle_update(ctx, shop, {"update_id": 102, "message": {"message_id": 61,
+        "from": {"id": 999}, "chat": {"id": 999}, "text": "fake receipt"}})
+    assert db.orders[10]["status"] == "denied"
+    edits = _edits()
+    assert any(p["chat_id"] == 112 and p["message_id"] == 7001
+               and "fake receipt" in p["text"] for p in edits), edits
+    assert any(p["chat_id"] == 999 and p["message_id"] == 7002
+               and "Denied" in p["text"] and "fake receipt" in p["text"]
+               and not p["rm"] for p in edits), edits
+    FakeTg.instances.clear()
+    await _tap("scam:10", who=999, mid=7003, cid="e10")
+    edits = _edits()
+    assert any("scam" in p["text"].lower() and p["message_id"] == 7003
+               for p in edits if p["chat_id"] == 999), edits
+    assert any(p["message_id"] == 7002 and "marked as scammer" in p["text"]
+               for p in edits if p["chat_id"] == 999), edits
+    print("EDIT IN PLACE FLOW PASSED")
+
+
+def test_edit_place_flow():
+    import asyncio
+
+    asyncio.run(_edit_place_flow())
+
+
 def test_credit_auto_flow():
     asyncio.run(_credit_auto_flow())
 
 
 def test_credit_flow():
     asyncio.run(_credit_flow())
+
+
+async def _shop_admin_flow():
+    """Disconnect keeps settings, reset wipes everything, linked subs show
+    as-is with a single Renew button into the package chain."""
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.service as svc
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.routes_telegram import handle_update
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _pid = make_shop(db)
+    shop = dict(db.shops[sid])
+
+    # 1. disconnect: Telegram deleteWebhook fires, token cleared, rest stays
+    FakeTg.instances.clear()
+    res = await svc.disconnect_shop(ctx, "admin1")
+    assert res == {"ok": True, "disconnected": True}, res
+    assert any(m == "deleteWebhook" for inst in FakeTg.instances for m, _p in inst.sent), "no deleteWebhook"
+    assert db.shops[sid]["bot_token_enc"] is None, db.shops[sid]
+    assert db.shops[sid]["prefix"] == "vip", "settings must survive disconnect"
+    res = await svc.disconnect_shop(ctx, "admin1")
+    assert res == {"ok": True, "disconnected": False}, res
+    res = await svc.disconnect_shop(ctx, "nobody")
+    assert res["ok"] is False, res
+
+    # 2. reset: every table wiped, every plugin setting deleted
+    await ctx.settings.set("polling_enabled", True)
+    await ctx.settings.set("public_base_url", "https://x.example")
+    await ctx.settings.set("tg_offset:1", 42)
+    assert len(db.shops) == 1
+    res = await svc.reset_all(ctx)
+    assert res["ok"] is True and len(res["wiped"]) == 13, res
+    assert db.shops == {} and db.pkgs == {} and db.subs == {}, db
+    assert ctx.settings.d == {}, ctx.settings.d
+
+    # 3. linked package-less sub: detail shows system values, plan "—",
+    #    single Renew button (no quick renew), renew opens the tier chain
+    sid, _pid = make_shop(db)
+    tid, _ppid = make_stepped(db, sid)
+    shop = dict(db.shops[sid])
+    exp = _dt.now(_tz.utc) + _td(days=100)
+    GB = 1073741824
+    db.users["uu-l"] = {"uuid": "uu-l", "username": "legacy-amy", "status": "ACTIVE",
+                        "expire_at": exp, "used_traffic_bytes": 5 * GB,
+                        "traffic_limit_bytes": 50 * GB, "created_by_admin_id": 42}
+    subid = db._next("sub")
+    db.subs[subid] = {"id": subid, "shop_id": sid, "buyer_tg_id": 555, "user_uuid": "uu-l",
+                      "username": "legacy-amy", "expire_at": exp,
+                      "traffic_limit_bytes": 50 * GB, "package_id": None,
+                      "is_test": False, "is_linked": True, "cancelled": False,
+                      "notified_80": False, "notified_72h": False, "notified_expired": False}
+    FakeTg.instances.clear()
+
+    async def cb(data, cid, uid=555, un="amy"):
+        await handle_update(ctx, shop, {"update_id": 900, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    await cb(f"sub:{subid}", "s1")
+    last = FakeTg.instances[-1].sent[-1][1]
+    assert "legacy-amy" in last["text"] and "—" in last["text"], last["text"]
+    assert "Quick renew" not in str(last["rm"]), last["rm"]
+    assert f"renew:{subid}" in str(last["rm"]), last["rm"]
+    await cb(f"renew:{subid}", "s2")
+    rms = str(FakeTg.instances[-1].sent[-1][1].get("rm"))
+    assert "Tier A" in rms and f"renewtier:{subid}:{tid}" in rms, rms
+    print("SHOP ADMIN FLOW PASSED")
+
+
+def test_shop_admin_flow():
+    asyncio.run(_shop_admin_flow())
 
 
 if __name__ == "__main__":
@@ -2987,6 +3309,7 @@ if __name__ == "__main__":
     test_account_cancel_flow()
     test_mixed_withdraw_flow()
     test_buyer_lang_flow()
+    test_account_hub_flow()
     test_broadcast_flow()
     test_nag_flow()
     test_followup6_flow()
@@ -2999,3 +3322,5 @@ if __name__ == "__main__":
     test_stats_flow()
     test_credit_flow()
     test_credit_auto_flow()
+    test_edit_place_flow()
+    test_shop_admin_flow()

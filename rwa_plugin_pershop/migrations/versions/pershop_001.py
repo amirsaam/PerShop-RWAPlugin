@@ -18,7 +18,7 @@ def upgrade() -> None:
         CREATE TABLE IF NOT EXISTS plugin_pershop_shops (
             id BIGSERIAL PRIMARY KEY,
             owner_admin TEXT NOT NULL UNIQUE,
-            bot_token_enc TEXT NOT NULL,
+            bot_token_enc TEXT,
             bot_username TEXT,
             admin_tg_id BIGINT NOT NULL,
             prefix TEXT NOT NULL UNIQUE,
@@ -123,6 +123,7 @@ def upgrade() -> None:
             withdraw_card TEXT,
             owner_chat_id BIGINT,
             owner_msg_id BIGINT,
+            buyer_msg_id BIGINT,
             owner_nudged_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             decided_at TIMESTAMPTZ,

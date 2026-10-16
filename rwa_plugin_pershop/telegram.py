@@ -65,6 +65,39 @@ class TgClient:
         except Exception:
             return None
 
+    async def edit_text(self, chat_id: int, message_id: int, text: str,
+                    reply_markup: dict | None = None) -> bool:
+        """Edit an already-sent message's text in place (buyer screens and
+        owner decide cards). Returns True when the message now shows the
+        text; False when a fresh send is needed instead. Never raises."""
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id,
+                                   "text": text, "parse_mode": "HTML",
+                                   "reply_markup": reply_markup or {"inline_keyboard": []}}
+        try:
+            await self.call("editMessageText", payload)
+            return True
+        except Exception as e:
+            body = ""
+            try:
+                resp = getattr(e, "response", None)
+                if resp is not None:
+                    body = str(resp.json())
+            except Exception:
+                body = ""
+            if "message is not modified" in (body + str(e)).lower():
+                return True
+            return False
+
+    async def delete_message(self, chat_id: int, message_id: int) -> bool:
+        """Delete one bot message (the receipt prompt after a receipt
+        arrives). Never raises."""
+        try:
+            await self.call("deleteMessage",
+                            {"chat_id": chat_id, "message_id": message_id})
+            return True
+        except Exception:
+            return False
+
     async def edit_reply_markup(self, chat_id: int, message_id: int,
                                 reply_markup: dict | None = None) -> bool:
         """Replace/clear inline buttons on an already-sent message."""

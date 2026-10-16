@@ -19,6 +19,13 @@ configures the plugin; each admin manages only their own shop.
   `pershop_system` (`manage`, superadmin only). The management console is a
   single frontend page at `/plugins/pershop`. Panel 5.x or newer is required
   (panel 5.x mounts wheel UI on the single route `/plugins/:pluginId`).
+- **Access model.** Any admin role granted `pershop:view` / `pershop:edit` /
+  `pershop:moderate` can create and run exactly one shop: the first save under
+  Shops creates the caller's shop, later saves edit it. Every shop is
+  owner-scoped — tiers, packages, services, orders, subs, and buyers are
+  invisible to other shops. `pershop_system:manage` (superadmin only)
+  additionally unlocks the Plugin Settings tab and the all-shops overview; it
+  does not grant anyone else's shop data beyond that overview.
 - **Panel-facing only.** All panel reads go through `ctx.db`; all account
   writes go through the in-process `panel_api()` facade (`create_user` /
   `update_user` / `extend_user_expiration` / `delete_user` /
@@ -71,6 +78,18 @@ plugin id from it).
 `GET` additionally returns `version` (wheel version) and
 `counts: {shops, pending_orders, subs}`.
 
+**Who can open this tab.** Only roles holding
+`pershop_system:manage` — the superadmin role, not per-shop roles. Shop
+owners with only `pershop` permissions see an access-denied notice here.
+(A panel superadmin acting as a shop owner can additionally open a shop of
+their own from the Shops tab.)
+
+**Danger zone (superadmin only).** `DELETE /admin/reset` wipes every
+`plugin_pershop_*` table and every `plugin_settings` key the plugin owns
+(shops, catalog, orders, subs, referrals, buyer preferences, credit
+balances, scammer flags, test claims, broadcasts). Sold panel accounts are
+never touched. The button asks for confirmation twice.
+
 Currency is configured per shop (see Shop setup), not globally. Shops using
 different currencies coexist on one panel.
 
@@ -99,14 +118,21 @@ different currencies coexist on one panel.
    thank-you (receipt received), approved (`{username} {expire} {url}`),
    denied (`{reason}`). Empty fields fall back to built-in templates in the
    shop language.
-6. **Save.** The token is stored Fernet-encrypted; the plugin generates the
+6. **Save.** Saving never requires a bot token: texts, currency, catalog,
+   and matching can be configured first and the bot connected later (or after
+   a disconnect). When a token is supplied, it is stored Fernet-encrypted; the plugin generates the
    shop's `webhook_secret` and registers the webhook on the bot via
    `setWebhook` automatically — no manual webhook configuration is needed.
    The response reports the registration result. The **Connect bot** button
    (`POST /shops/mine/webhook`) re-registers on demand and reports live
    `getWebhookInfo` state (`url`, queued `pending` count, `last_error`).
    `POST /shops/mine/rotate-secret` rotates the webhook secret
-   (re-register afterwards).
+   (re-register afterwards). The **Disconnect bot** button
+   (`POST /shops/mine/disconnect`) calls `deleteWebhook` on Telegram's side
+   and clears the stored token while keeping every other setting; a new token
+   can be connected later. A shop without a token keeps all its data, but the
+   bot sends and receives nothing: background tasks skip it and the webhook
+   endpoint answers `{"ok": false}`.
 7. **Pending-receipt nudge** (`pending_nag_hours`, 0–168, default 6): the
    maximum time a receipt may wait before the owner receives a Telegram
    reminder. `0` disables it. The reminder repeats once per window until the
@@ -291,10 +317,11 @@ use inline buttons on their own message.
   creator id equals the shop owner's account id and the short UUID
   matches, the account links under that shop; a creator-less account with
   a matching short UUID links only into a superadmin-owned shop; anything
-  else is refused. Linked rows join the notifier, renewals, and My Subs
-  immediately. When no plan is matched yet, Quick renew is unavailable:
-  the bot explains the situation, shows the subscription's actual terms,
-  notifies the owner, and opens the change-plan flow.
+  else is refused. Linked rows show their system values as-is and join the
+  notifier, renewals, and My Subs immediately; renewing is always done
+  through the shop's packages, so no plan matching is needed at link time.
+  A subscription without a matched plan shows a single Renew button that
+  opens the change-plan flow.
 - **Plan matching (Shops tab, owner-side):** `GET /unmapped` lists the owner's panel users with no subscription row plus
   subscription rows with no plan; `POST /subs/assign-plan
   {user_uuid, package_id}` (full plans only) attaches one. Buyer
@@ -443,6 +470,7 @@ references).
 | `GET /shops/mine` · `PUT /shops/mine` | view / edit | Own shop (Shop setup). Saving with a fresh `bot_token` auto-registers the webhook and returns the result. |
 | `POST /shops/mine/webhook` | edit | (Re)register `setWebhook` + live `getWebhookInfo` state |
 | `POST /shops/mine/rotate-secret` | edit | New Telegram secret (re-register after) |
+| `POST /shops/mine/disconnect` | edit | `deleteWebhook` + clear stored token; settings kept |
 | `GET /shops/mine/apikey` · `POST …/rotate` · `DELETE …` | view / edit / edit | External key lifecycle |
 | `GET /tiers` · `POST /tiers` · `PUT /tiers/{id}` · `DELETE /tiers/{id}` | view / edit… | Tiers |
 | `GET /packages` · `POST …` · `PUT /packages/{id}` · `DELETE …` | view / edit… | Packages |
@@ -457,6 +485,7 @@ references).
 | `POST /broadcast` · `GET /broadcasts` | edit / view | Broadcast |
 | `GET /buyers?search=` | view | Buyer lookup: balance, language, subscription count, scammer flag |
 | `DELETE /scammers/{tg_id}` | moderate | Lift a network scammer flag |
+| `DELETE /admin/reset` | `pershop_system:manage` | Wipe all plugin data (never panel accounts) |
 | `GET /shops/all` | `pershop_system:manage` | Every shop, tokens stripped |
 | `GET /plugin-settings` · `PUT /plugin-settings` | `pershop_system:manage` | Superadmin settings |
 | `GET /app` | view | The console bundle itself |

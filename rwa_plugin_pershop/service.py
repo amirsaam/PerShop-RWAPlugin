@@ -115,6 +115,90 @@ async def webhook_status(ctx, shop: dict) -> dict:
         return {"ok": False, "error": str(e)[:200]}
 
 
+async def disconnect_shop(ctx, owner_admin: str) -> dict:
+    """Detach the shop's bot: deleteWebhook on Telegram's side (best
+    effort), then clear the stored token. All other shop settings stay
+    untouched, so the shop can be re-connected later with a new token.
+    Never raises; returns {ok, disconnected}."""
+    from rwa_plugin_pershop.telegram import TgClient
+
+    shop = await shop_for_owner(ctx, owner_admin)
+    if not shop:
+        return {"ok": False, "disconnected": False, "error": "no shop yet"}
+    had = bool(shop.get("bot_token_enc"))
+    if had:
+        try:
+            from rwa_plugin_pershop.crypto import decrypt_token
+
+            token = await decrypt_token(ctx, shop["bot_token_enc"])
+            await TgClient(token).call("deleteWebhook", {"drop_pending_updates": True})
+        except Exception:
+            pass
+        try:
+            await ctx.db.execute(
+                "UPDATE plugin_pershop_shops SET bot_token_enc=NULL WHERE id=$1", shop["id"])
+        except Exception as e:
+            return {"ok": False, "disconnected": False, "error": str(e)[:200]}
+    return {"ok": True, "disconnected": had}
+
+
+_PERSHOP_TABLES = [
+    "plugin_pershop_broadcasts",
+    "plugin_pershop_referrals",
+    "plugin_pershop_test_claims",
+    "plugin_pershop_scammers",
+    "plugin_pershop_buyers",
+    "plugin_pershop_sessions",
+    "plugin_pershop_orders",
+    "plugin_pershop_subs",
+    "plugin_pershop_packages",
+    "plugin_pershop_services",
+    "plugin_pershop_tiers",
+    "plugin_pershop_service_cats",
+    "plugin_pershop_shops",
+]
+
+_PERSHOP_SETTING_KEYS = [
+    "bot_key",
+    "polling_enabled",
+    "public_base_url",
+    "tutorial_text",
+    "test_duration_days",
+    "test_traffic_gb",
+    "test_squad_uuid",
+    "test_hwid",
+]
+
+
+async def reset_all(ctx) -> dict:
+    """Superadmin wipe: delete every PerShop row and every PerShop plugin
+    setting (tokens, offsets, flags). The schema stays; the plugin starts
+    over empty. Never raises; returns {ok, wiped}."""
+    try:
+        shops = await ctx.db.fetch("SELECT id FROM plugin_pershop_shops")
+    except Exception:
+        shops = []
+    wiped = []
+    for t in _PERSHOP_TABLES:
+        try:
+            await ctx.db.execute(f"DELETE FROM {t}")
+            wiped.append(t)
+        except Exception:
+            pass
+    keys = list(_PERSHOP_SETTING_KEYS)
+    for s in shops or []:
+        try:
+            keys.append(f"tg_offset:{s['id']}")
+        except Exception:
+            pass
+    for k in keys:
+        try:
+            await ctx.settings.delete(k)
+        except Exception:
+            pass
+    return {"ok": True, "wiped": wiped}
+
+
 async def existing_usernames(ctx, shop_id: int) -> set[str]:
     names: set[str] = set()
     try:

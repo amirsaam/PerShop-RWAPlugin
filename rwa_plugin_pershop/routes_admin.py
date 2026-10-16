@@ -164,8 +164,10 @@ def build_admin_router(ctx):
         if not row:
             return {"shop": None}
         row = dict(row)
+        has_token = row.get("bot_token_enc") is not None
         row.pop("bot_token_enc", None)
-        row["webhook_configured"] = bool(row.get("webhook_secret"))
+        row["has_token"] = has_token
+        row["webhook_configured"] = bool(row.get("webhook_secret")) and has_token
         return {"shop": row}
 
     @router.put("/shops/mine")
@@ -181,9 +183,10 @@ def build_admin_router(ctx):
         lang = normalize_lang(payload.lang)
         cur = await shop_for_owner(ctx, me)
         token_given = bool(payload.bot_token and payload.bot_token.strip())
+        # Token is optional: the shop (texts, currency, catalog…) can be
+        # fully configured before any bot is connected, or after a
+        # disconnect. Webhook registration only runs when a token is given.
         token_enc = await encrypt_token(ctx, payload.bot_token) if token_given else (cur["bot_token_enc"] if cur else None)
-        if not token_enc:
-            raise HTTPException(400, "bot_token required on first setup")
         secret = (cur and cur.get("webhook_secret")) or secrets.token_urlsafe(24)
         try:
             if cur:
@@ -383,6 +386,14 @@ def build_admin_router(ctx):
         result = await register_webhook(ctx, dict(shop))
         status = await webhook_status(ctx, dict(shop)) if result.get("ok") else {"ok": False}
         return {"webhook": result, "status": status}
+
+    @router.post("/shops/mine/disconnect")
+    async def shops_disconnect(_a: AdminUser = Depends(require_permission("pershop", "edit"))):
+        """Detach the shop's bot (deleteWebhook + clear stored token).
+        Texts, currency, catalog and buyers stay untouched."""
+        from rwa_plugin_pershop.service import disconnect_shop
+
+        return await disconnect_shop(ctx, owner(_a))
 
     @router.get("/packages")
     async def pkgs(_a: AdminUser = Depends(require_permission("pershop", "view"))):
@@ -925,8 +936,10 @@ def build_admin_router(ctx):
         out = []
         for r in rows:
             d = dict(r)
+            has_token = d.get("bot_token_enc") is not None
             d.pop("bot_token_enc", None)
-            d["webhook_configured"] = bool(d.get("webhook_secret"))
+            d["has_token"] = has_token
+            d["webhook_configured"] = bool(d.get("webhook_secret")) and has_token
             out.append(d)
         return {"shops": out}
 
@@ -968,6 +981,14 @@ def build_admin_router(ctx):
                 "test_squad_uuid": (payload.test_squad_uuid or "").strip(),
                 "test_hwid": payload.test_hwid,
                 "public_base_url": base}
+
+    @router.delete("/admin/reset")
+    async def admin_reset(_a: AdminUser = Depends(require_permission("pershop_system", "manage"))):
+        """Superadmin wipe: every shop, order, sub, buyer, flag, broadcast
+        and plugin setting is deleted. The schema stays; IRREVERSIBLE."""
+        from rwa_plugin_pershop.service import reset_all
+
+        return await reset_all(ctx)
 
     @router.post("/broadcast")
     async def broadcast(request: Request, _a: AdminUser = Depends(require_permission("pershop", "edit"))):

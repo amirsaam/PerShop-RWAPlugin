@@ -128,7 +128,11 @@ window.rwaPluginUI['pershop'] = {
         + '<input id="base" class="' + INP + '" placeholder="https://panel.example.com" value="' + esc(d.public_base_url || '') + '">'
         + '<p class="' + HELP + '">HTTPS origin — the plugin points each bot at itself, no manual setWebhook needed.</p></div>'
         + '<div class="flex items-center gap-3"><button id="save" class="' + BTN_P + '">Save settings</button><span id="msg" class="text-sm text-dark-300"></span></div>'
-        + '</div></div>';
+        + '</div>'
+        + '<div class="mt-8 border-t border-input pt-5"><h3 class="text-sm font-semibold text-red-400 mb-2">Danger zone</h3>'
+        + '<p class="text-xs text-dark-400 mb-3">Delete every shop, order, subscription, buyer, flag, broadcast and plugin setting. The database tables stay, but everything in them is gone. This cannot be undone.</p>'
+        + '<button id="reset" class="' + BTN_D + '">Reset all PerShop data</button></div>'
+        + '</div>';
       j(api + '/squads').then(({squads}) => {
         const sel = q('tsquad');
         (squads || []).forEach((s) => {
@@ -155,6 +159,16 @@ window.rwaPluginUI['pershop'] = {
           } catch (e2) { q('msg').textContent = 'Saved, but refresh failed: ' + e2.message; }
         } catch (e) { q('msg').textContent = 'Save failed: ' + e.message; }
       };
+      q('reset').onclick = async () => {
+        if (!confirm('Delete ALL PerShop data — every shop, order, subscription, buyer, flag and setting?')) return;
+        if (!confirm('Last chance. This cannot be undone. Really reset everything?')) return;
+        q('msg').textContent = 'Resetting…';
+        try {
+          const r = await j(api + '/admin/reset', {method: 'DELETE'});
+          q('msg').textContent = 'Reset done (' + (r.wiped || []).length + ' tables wiped).';
+          openSettings();
+        } catch (e) { q('msg').textContent = 'Reset failed: ' + e.message; }
+      };
       wireFmt(el);
     };
 
@@ -162,23 +176,19 @@ window.rwaPluginUI['pershop'] = {
       q('tabbody').innerHTML = '<div id="stats" class="grid grid-cols-2 sm:grid-cols-4 gap-3"></div>'
         + (isAdmin ? '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">All shops</h2><div id="all" class="text-sm text-dark-300">Loading…</div></div>' : '')
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">My shop</h2><div id="mine" class="grid gap-4 sm:grid-cols-2">'
-        + '<div><label class="' + LBL + '" for="prefix">Username prefix</label><input id="prefix" class="' + INP + '" placeholder="e.g. vip"><p class="' + HELP + '">Accounts are named prefix-telegramusername.</p></div>'
-        + '<div><label class="' + LBL + '" for="tgid">Admin Telegram ID</label><input id="tgid" inputmode="numeric" class="' + INP + '" placeholder="numeric id — receives order DMs"></div>'
+        + '<div><label class="' + LBL + '" for="prefix">Username prefix</label><input id="prefix" class="' + INP + '" placeholder="e.g. vip — every account name starts with this"><p class="' + HELP + '">Accounts are named prefix-telegramusername, numbered when taken.</p></div>'
+        + '<div><label class="' + LBL + '" for="tgid">Admin Telegram ID</label><input id="tgid" inputmode="numeric" class="' + INP + '" placeholder="your numeric id — order alerts arrive here"></div>'
         + '<div><label class="' + LBL + '" for="lang">Bot language</label><select id="lang" class="' + INP + '"><option value="en">English</option><option value="fa">فارسی</option><option value="ru">Русский</option><option value="zh">简体中文</option></select></div>'
-        + '<div><label class="' + LBL + '" for="token">Bot token</label><input id="token" type="password" class="' + INP + '" placeholder="blank keeps the current token"></div>'
-        + '<div class="sm:col-span-2"><label class="' + LBL + '" for="card">Payment / card text</label>' + fmtBar('card') + '<textarea id="card" rows="3" class="' + TA + '" placeholder="where buyers send money"></textarea></div>'
-        + '<div class="sm:col-span-2"><label class="' + LBL + '" for="welcome">Welcome text</label>' + fmtBar('welcome') + '<textarea id="welcome" rows="3" class="' + TA + '"></textarea></div>'
-        + '<div><label class="' + LBL + '" for="currency">Currency label</label><input id="currency" class="' + INP + '" placeholder="e.g. تومان"></div>'
-        + '<div><label class="' + LBL + '" for="rate">Unit rate</label><input id="rate" inputmode="decimal" class="' + INP + '" placeholder="250000 (1 unit = ? currency)"></div>'
-        + '<div class="sm:col-span-2"><label class="' + LBL + '" for="thanks">Thank-you text (after receipt)</label>' + fmtBar('thanks') + '<textarea id="thanks" class="' + TA + '"></textarea></div>'
-        + '<div class="sm:col-span-2"><label class="' + LBL + '" for="approved">Approved text</label>' + fmtBar('approved') + varBar('approved', ['username', 'expire', 'url']) + '<textarea id="approved" class="' + TA + '" placeholder="{username} {expire} {url}"></textarea><p class="' + HELP + '">{url} is only filled on new purchases — renewals reuse this text without it.</p></div>'
-        + '<div class="sm:col-span-2"><label class="' + LBL + '" for="denied">Denied text</label>' + fmtBar('denied') + varBar('denied', ['reason']) + '<textarea id="denied" class="' + TA + '" placeholder="{reason}"></textarea></div>'
+        + '<div><label class="' + LBL + '" for="token">Bot token</label><input id="token" type="password" class="' + INP + '" placeholder="paste a BotFather token to connect — blank leaves it as is"></div>'
+        + '<div><label class="' + LBL + '" for="currency">Currency label</label><input id="currency" class="' + INP + '" placeholder="shown after every price, e.g. تومان"></div>'
+        + '<div><label class="' + LBL + '" for="rate">Unit rate</label><input id="rate" inputmode="decimal" class="' + INP + '" placeholder="how much 1 unit costs, e.g. 250000"></div>'
+        + '<div><label class="' + LBL + '" for="refpct">Referral reward %</label><input id="refpct" inputmode="decimal" class="' + INP + '" placeholder="0 = off"><p class="' + HELP + '">% of each invited purchase, gifted to the inviter as shop credit.</p></div>'
+        + '<div><label class="' + LBL + '" for="naghours">Pending-receipt nudge (hours)</label><input id="naghours" inputmode="numeric" class="' + INP + '" placeholder="6"><p class="' + HELP + '">0 = off — remind me when a receipt waits longer than this.</p></div>'
+        + '<div class="sm:col-span-2"><label class="' + LBL + '" for="bosel">Bot texts</label>'
+        + '<select id="bosel" class="' + INP + ' max-w-xs mb-2"><option value="card">Payment / card text</option><option value="welcome">Welcome text</option><option value="thanks">Thank-you text (after receipt)</option><option value="approved">Approved text</option><option value="denied">Denied text</option><option value="referral">Referral program text (blank hides the button)</option><option value="support">Support text (blank hides the button)</option></select>'
+        + fmtBar('botext') + '<div id="bovars"></div><textarea id="botext" rows="4" class="' + TA + '"></textarea></div>'
         + '<div class="sm:col-span-2 flex items-start gap-3"><input type="checkbox" id="teston" class="h-4 w-4 mt-1 accent-primary"><div><label for="teston" class="text-sm text-white">Test subscription enabled</label><p class="' + HELP + '">Free trial, one per person across all shops.</p></div></div>'
-        + '<div class="sm:col-span-2"><label class="' + LBL + '" for="referral">Referral program text (blank hides the button)</label>' + fmtBar('referral') + '<textarea id="referral" class="' + TA + '"></textarea></div>'
-        + '<div><label class="' + LBL + '" for="refpct">Referral reward %</label><input id="refpct" inputmode="decimal" class="' + INP + '" placeholder="0 = off"><p class="' + HELP + '">% of each invited purchase, credited to the inviter.</p></div>'
-        + '<div class="sm:col-span-2"><label class="' + LBL + '" for="support">Support text (blank hides the button)</label>' + fmtBar('support') + '<textarea id="support" class="' + TA + '" placeholder="e.g. contact @username"></textarea></div>'
-        + '<div><label class="' + LBL + '" for="naghours">Pending-receipt nudge (hours)</label><input id="naghours" inputmode="numeric" class="' + INP + '" value="6"><p class="' + HELP + '">0 = off.</p></div>'
-        + '</div><div class="flex items-center gap-2 mt-4"><button id="save" class="' + BTN_P + '">Save shop</button><button id="connect" class="' + BTN_S + '">Connect bot</button><span id="sec" class="text-xs text-dark-400"></span></div></div>'
+        + '</div><div class="flex flex-wrap items-center gap-2 mt-4"><button id="save" class="' + BTN_P + '">Save shop</button><button id="connect" class="' + BTN_S + '">Connect bot</button><button id="disconnect" class="' + BTN_M + '">Disconnect bot</button><span id="sec" class="text-xs text-dark-400"></span></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Catalog — tiers → packages</h2><div id="tiers" class="flex flex-wrap gap-2"></div><div id="tierdetail" class="mt-4"></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Other Services — categories → items</h2><p class="text-xs text-dark-400 mb-3">Non-VPN sellables. No duration, traffic or device limits.</p><div id="scats" class="flex flex-wrap gap-2"></div><div id="scatdetail" class="mt-4"></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Plan matching — users without a plan</h2><div id="unmapped"><button id="uload" class="' + BTN_M + '">Load users</button></div></div>'
@@ -224,7 +234,21 @@ window.rwaPluginUI['pershop'] = {
             + '</tbody></table>' : '<i>no shops yet</i>';
         }).catch(() => { q('all').textContent = 'Unavailable.'; });
       }
-      j(api + '/shops/mine').then(({shop}) => {
+      const BOTEXT_VARS = {approved: ['username', 'expire', 'url'], denied: ['reason']};
+      let botextCache = {};
+      const botextShow = (key) => {
+        q('botext').value = botextCache[key] || '';
+        q('bovars').innerHTML = varBar('botext', BOTEXT_VARS[key] || [])
+          + (key === 'approved' ? '<p class="' + HELP + '">{url} is only filled on new purchases — renewals reuse this text without it.</p>' : '');
+        wireFmt(el);
+      };
+      q('bosel').onchange = () => {
+        botextCache[q('bosel').dataset.cur || 'card'] = q('botext').value;
+        const k = q('bosel').value;
+        q('bosel').dataset.cur = k;
+        botextShow(k);
+      };
+      const loadMine = () => j(api + '/shops/mine').then(({shop}) => {
         if (!shop) {
           const note = '<i>Save your shop above first — tiers, packages and services unlock after setup.</i>';
           q('tiers').innerHTML = note; q('scats').innerHTML = note;
@@ -233,18 +257,21 @@ window.rwaPluginUI['pershop'] = {
         shopCache = shop;
         renderStats();
         q('prefix').value = shop.prefix || ''; q('tgid').value = shop.admin_tg_id || '';
-        q('card').value = shop.card_text || ''; q('welcome').value = shop.welcome_text || '';
+        botextCache = {card: shop.card_text || '', welcome: shop.welcome_text || '',
+          thanks: shop.thank_you_text || '', approved: shop.approved_text || '',
+          denied: shop.denied_text || '', referral: shop.referral_text || '',
+          support: shop.support_text || ''};
+        q('bosel').value = 'card'; q('bosel').dataset.cur = 'card'; botextShow('card');
         q('currency').value = shop.currency_label || ''; q('rate').value = shop.unit_rate || '';
-        q('thanks').value = shop.thank_you_text || ''; q('approved').value = shop.approved_text || '';
-        q('denied').value = shop.denied_text || '';
         q('teston').checked = !!shop.test_enabled;
-        q('referral').value = shop.referral_text || ''; q('support').value = shop.support_text || '';
         q('refpct').value = shop.referral_percent || 0;
         q('naghours').value = shop.pending_nag_hours == null ? 6 : shop.pending_nag_hours;
         q('lang').value = ['en', 'fa', 'ru', 'zh'].includes(shop.lang) ? shop.lang : 'en';
-        q('sec').textContent = 'Bot endpoint: POST ' + api + '/tg/' + shop.id + ' — press Connect bot to point Telegram at it.';
+        q('sec').textContent = (shop.has_token ? '' : 'No bot connected — paste a token, Save, then Connect. ')
+          + 'Bot endpoint: POST ' + api + '/tg/' + shop.id;
         loadTiers(); loadScats();
       }).catch(() => {});
+      loadMine();
       q('connect').onclick = async () => {
         q('sec').textContent = 'Connecting…';
         try {
@@ -253,15 +280,27 @@ window.rwaPluginUI['pershop'] = {
           q('sec').textContent = w.ok ? ('Connected ✓ ' + w.url + (s.pending ? ' · ' + s.pending + ' queued' : '')
             + (s.last_error ? ' · last error: ' + s.last_error : ''))
             : ('Connect failed: ' + (w.error || 'unknown') + ' — ask superadmin to set the panel public URL, or enable polling mode.');
+          loadMine();
         } catch (e) { q('sec').textContent = 'Connect failed: ' + e.message; }
+      };
+      q('disconnect').onclick = async () => {
+        if (!confirm('Disconnect the bot from this shop? Texts, catalog, buyers and credit stay. The bot stops responding until you connect a token again.')) return;
+        q('sec').textContent = 'Disconnecting…';
+        try {
+          const r = await j(api + '/shops/mine/disconnect', {method: 'POST'});
+          q('token').value = '';
+          q('sec').textContent = r.disconnected ? 'Bot disconnected.' : 'No bot was connected.';
+          loadMine();
+        } catch (e) { q('sec').textContent = 'Disconnect failed: ' + e.message; }
       };
       q('save').onclick = async () => {
         try {
+          botextCache[q('bosel').dataset.cur || 'card'] = q('botext').value;
           const body = {prefix: q('prefix').value, admin_tg_id: Number(q('tgid').value), lang: q('lang').value,
-            card_text: q('card').value, welcome_text: q('welcome').value,
+            card_text: botextCache.card, welcome_text: botextCache.welcome,
             currency_label: q('currency').value, unit_rate: q('rate').value ? Number(q('rate').value) : null,
-            thank_you_text: q('thanks').value, approved_text: q('approved').value, denied_text: q('denied').value,
-            test_enabled: q('teston').checked, referral_text: q('referral').value, support_text: q('support').value,
+            thank_you_text: botextCache.thanks, approved_text: botextCache.approved, denied_text: botextCache.denied,
+            test_enabled: q('teston').checked, referral_text: botextCache.referral, support_text: botextCache.support,
             referral_percent: Math.max(0, Math.min(100, Number(q('refpct').value) || 0)),
             pending_nag_hours: Math.max(0, Math.min(168, Number(q('naghours').value) || 0))};
           if (q('token').value) body.bot_token = q('token').value;
@@ -270,7 +309,9 @@ window.rwaPluginUI['pershop'] = {
           q('sec').textContent = w.ok ? 'Saved + bot connected ✓ ' + w.url
             : (w.error ? 'Saved. Bot NOT connected: ' + w.error + ' — press Connect bot to retry.'
               : 'Saved. Webhook secret: ' + r.webhook_secret);
+          q('token').value = '';
           shopCache = Object.assign(shopCache || {}, {currency_label: body.currency_label, unit_rate: body.unit_rate});
+          loadMine();
         } catch (e) { alert('Save failed: ' + e.message); }
       };
       const loadBuyers = async () => {
@@ -397,16 +438,18 @@ window.rwaPluginUI['pershop'] = {
         if (id != null && !service_cats.some((x) => x.id === id)) return;
         const d = q('scatdetail');
         d.innerHTML = '<h4 class="text-sm font-semibold text-white mb-2">' + esc(title) + '</h4>'
-          + (id == null ? '' : '<div class="flex gap-2 flex-wrap items-center mb-3">'
-            + '<input id="cname" class="' + INP + '" style="width:auto" value="' + esc(title) + '">'
-            + '<input id="csort" class="' + INP + '" style="width:5rem" placeholder="sort" value="' + ((service_cats.find((x) => x.id === id) || {}).sort || 0) + '" inputmode="numeric">'
+          + (id == null ? '' : '<div class="grid gap-3 sm:grid-cols-2 mb-3">'
+            + '<div><label class="' + LBL + '" for="cname">Category name</label><input id="cname" class="' + INP + '" value="' + esc(title) + '"><p class="' + HELP + '">First step buyers pick inside Other Services.</p></div>'
+            + '<div><label class="' + LBL + '" for="csort">Sort order</label><input id="csort" class="' + INP + '" value="' + ((service_cats.find((x) => x.id === id) || {}).sort || 0) + '" inputmode="numeric"><p class="' + HELP + '">Lower numbers show first in the bot.</p></div>'
+            + '</div><div class="flex gap-2 items-center mb-3">'
             + '<label class="text-sm text-dark-300"><input type="checkbox" id="cactive" class="h-4 w-4 accent-primary" ' + ((service_cats.find((x) => x.id === id) || {}).active === false ? '' : 'checked') + '> active</label>'
             + '<button id="csave" class="' + BTN_M + '">Save category</button><button id="cdel" class="' + BTN_M + '">Delete category</button></div>')
           + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-400 mb-2">Items</h5><div id="svcs" class="space-y-1.5">' + (items.map((s) =>
             '<div class="' + ROW + '" data-s="' + s.id + '"><span>' + esc(s.name) + ' · ' + fmtU(s.price_units)
             + (s.active ? '' : ' (off)') + '</span><span class="flex gap-1.5"><button data-se="1" class="' + BTN_M + '">Edit</button> <button data-sd="1" class="' + BTN_M + '">Del</button></span></div>').join('') || '<i class="text-sm text-dark-400">none</i>') + '</div>'
-          + '<div class="grid gap-2 mt-3 sm:grid-cols-2">'
-          + '<input id="sname" class="' + INP + '" placeholder="item name"><input id="sunits" class="' + INP + '" placeholder="price (units)" value="1" inputmode="decimal">'
+          + '<div class="grid gap-3 mt-3 sm:grid-cols-2">'
+          + '<div><label class="' + LBL + '" for="sname">Item name</label><input id="sname" class="' + INP + '"><p class="' + HELP + '">Shown to buyers inside this category.</p></div>'
+          + '<div><label class="' + LBL + '" for="sunits">Price (units)</label><input id="sunits" class="' + INP + '" value="1" inputmode="decimal"><p class="' + HELP + '">Multiplied by your currency rate for the buyer price.</p></div>'
           + '<div><label class="' + LBL + '" for="sdesc">Description (shown before buy)</label>' + fmtBar('sdesc') + '<textarea id="sdesc" rows="2" class="' + TA + '"></textarea></div>'
           + '<div><label class="' + LBL + '" for="sdone">Message sent to buyer on approval</label>' + fmtBar('sdone') + '<textarea id="sdone" rows="2" class="' + TA + '"></textarea></div>'
           + '</div><div class="flex gap-2 items-center mt-3"><label class="text-sm text-dark-300 self-center"><input type="checkbox" id="sactive" class="h-4 w-4 accent-primary" checked> active</label>'
@@ -476,11 +519,12 @@ window.rwaPluginUI['pershop'] = {
         const pkgs = packages.filter((p) => p.tier_id === id);
         const d = q('tierdetail');
         d.innerHTML = '<h4 class="text-sm font-semibold text-white mb-2">' + esc(t.name) + '</h4>'
-          + '<div class="flex gap-2 flex-wrap items-center mb-3">'
-          + '<input id="tname" class="' + INP + '" style="width:10rem" value="' + esc(t.name) + '">'
-          + '<span id="tsquadwrap"><select id="tsquad" class="' + INP + '"><option value="">loading squads…</option></select></span>'
-          + '<input id="thwid" class="' + INP + '" style="width:11rem" placeholder="hwid default (blank=none)" value="' + (t.hwid_default == null ? '' : t.hwid_default) + '" inputmode="numeric">'
-          + '<input id="tsort" class="' + INP + '" style="width:5rem" placeholder="sort" value="' + t.sort + '" inputmode="numeric">'
+          + '<div class="grid gap-3 sm:grid-cols-2 mb-3">'
+          + '<div><label class="' + LBL + '" for="tname">Tier name</label><input id="tname" class="' + INP + '" value="' + esc(t.name) + '"><p class="' + HELP + '">Shown to buyers as the first step of the buy flow.</p></div>'
+          + '<div><label class="' + LBL + '" for="tsquad">Internal squad</label><span id="tsquadwrap"><select id="tsquad" class="' + INP + '"><option value="">loading squads…</option></select></span><p class="' + HELP + '">Sold accounts join this squad. Lists the squads you can see.</p></div>'
+          + '<div><label class="' + LBL + '" for="thwid">HWID default</label><input id="thwid" class="' + INP + '" placeholder="blank = panel default" value="' + (t.hwid_default == null ? '' : t.hwid_default) + '" inputmode="numeric"><p class="' + HELP + '">Fallback device limit for packages set to panel default.</p></div>'
+          + '<div><label class="' + LBL + '" for="tsort">Sort order</label><input id="tsort" class="' + INP + '" value="' + t.sort + '" inputmode="numeric"><p class="' + HELP + '">Lower numbers show first in the bot.</p></div>'
+          + '</div><div class="flex gap-2 items-center mb-3">'
           + '<label class="text-sm text-dark-300"><input type="checkbox" id="tactive" class="h-4 w-4 accent-primary" ' + (t.active ? 'checked' : '') + '> active</label>'
           + '<button id="tsave" class="' + BTN_M + '">Save tier</button><button id="tdel" class="' + BTN_M + '">Delete tier</button></div>'
           + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-400 mb-2">Packages</h5><div id="pkgs" class="space-y-1.5">' + (pkgs.map((p) =>
@@ -492,20 +536,34 @@ window.rwaPluginUI['pershop'] = {
             + (p.scope_tier_id ? ' · only ' + esc((tiers.find((x) => x.id === p.scope_tier_id) || {}).name || ('tier ' + p.scope_tier_id)) : '')
             + (p.traffic_reset === false ? ' · topup' : '') + (p.active ? '' : ' (off)')
             + '</span><span class="flex gap-1.5"><button data-pe="1" class="' + BTN_M + '">Edit</button> <button data-pd="1" class="' + BTN_M + '">Del</button></span></div>').join('') || '<i class="text-sm text-dark-400">none</i>') + '</div>'
-          + '<div class="flex gap-2 flex-wrap mt-3">'
-          + '<input id="pname" class="' + INP + '" style="width:9rem" placeholder="name"><input id="pdays" class="' + INP + '" style="width:7rem" placeholder="days (0=∞)" value="30" inputmode="numeric">'
-          + '<input id="pgb" class="' + INP + '" style="width:9rem" placeholder="GB (blank=∞)" inputmode="decimal">'
-          + '<input id="punits" class="' + INP + '" style="width:8rem" placeholder="price (units)" value="1" inputmode="decimal">'
-          + '<label class="text-sm text-dark-300 self-center"><input type="checkbox" id="pactive" class="h-4 w-4 accent-primary" checked> active</label>'
-          + '<label class="text-sm text-dark-300 self-center" title="ON: renew resets the cap to this package. OFF: leftover rolls over, package traffic is added on top."><input type="checkbox" id="preset" class="h-4 w-4 accent-primary" checked> reset traffic on renew</label></div>'
-          + '<div class="flex gap-2 flex-wrap mt-2 items-center">'
-          + '<select id="peffect" class="' + INP + '" style="width:auto" title="full plan: time+traffic. time top-up: +days only, needs days>0. traffic top-up: +GB only, needs a cap."><option value="full">full plan</option><option value="time_only">time top-up (+days)</option><option value="traffic_only">traffic top-up (+GB)</option></select> '
-          + '<select id="pscope" class="' + INP + '" style="width:auto" title="top-up offers: which tier\u2019s subs see this offer. All tiers = everyone."><option value="">scope: all tiers</option>'
+          + '<div class="grid gap-3 sm:grid-cols-2 mt-3">'
+          + '<div><label class="' + LBL + '" for="pname">Package name</label><input id="pname" class="' + INP + '"><p class="' + HELP + '">Shown to buyers inside this tier.</p></div>'
+          + '<div><label class="' + LBL + '" for="pdays">Duration (days)</label><input id="pdays" class="' + INP + '" value="30" inputmode="numeric"><p class="' + HELP + '">0 = never expires (∞).</p></div>'
+          + '<div><label class="' + LBL + '" for="pgb">Traffic cap (GB)</label><input id="pgb" class="' + INP + '" inputmode="decimal"><p class="' + HELP + '">Blank = unlimited.</p></div>'
+          + '<div><label class="' + LBL + '" for="punits">Price (units)</label><input id="punits" class="' + INP + '" value="1" inputmode="decimal"><p class="' + HELP + '">Multiplied by your currency rate for the buyer price.</p></div>'
+          + '<div><label class="' + LBL + '" for="peffect">Package type</label>'
+          + '<select id="peffect" class="' + INP + '"><option value="full">full plan</option><option value="time_only">time top-up (+days)</option><option value="traffic_only">traffic top-up (+GB)</option></select>'
+          + '<p class="' + HELP + '">Full plan: time + traffic. Time top-up adds days only (needs days &gt; 0). Traffic top-up adds GB only (needs a cap).</p></div>'
+          + '<div><label class="' + LBL + '" for="pscope">Offer scope</label>'
+          + '<select id="pscope" class="' + INP + '"><option value="">scope: all tiers</option>'
           + tiers.map((x) => '<option value="' + x.id + '"' + (x.id === id ? ' selected' : '') + '>scope: ' + esc(x.name) + ' only</option>').join('')
-          + '</select> '
+          + '</select><p class="' + HELP + '">Top-up offers: which tier\u2019s subs see this offer. Full plans ignore scope.</p></div>'
+          + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="pactive" class="h-4 w-4 accent-primary" checked> active</label><p class="' + HELP + '">Off hides the package from the bot.</p></div>'
+          + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="preset" class="h-4 w-4 accent-primary" checked> reset traffic on renew</label><p class="' + HELP + '">ON: renew resets the cap to this package. OFF: leftover rolls over, package traffic is added on top.</p></div>'
+          + '</div>'
+          + '<div class="mt-3"><label class="' + LBL + '" for="phmode">Device limit (HWID)</label>'
           + '<select id="phmode" class="' + INP + '" style="width:auto"><option value="default">hwid: panel default</option><option value="input">hwid: buyer input</option><option value="fixed">hwid: fixed by admin</option><option value="unlimited">hwid: unlimited</option></select> '
-          + '<input id="phnums" class="' + INP + '" style="width:16rem" placeholder="min,default,max,free,percent[,fixed]" value="1,1,10,1,50">'
-          + '<button id="padd" class="' + BTN_P + '">Add package</button></div>';
+          + '<p class="' + HELP + '">Panel default: leave to the panel. Buyer input: the buyer picks the device count, extra devices cost extra. Fixed: every buyer gets the same count. Unlimited: no device limit.</p>'
+          + '<div id="phinput" class="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-2">'
+          + '<div><label class="' + LBL + '" for="phmin">Min</label><input id="phmin" class="' + INP + '" value="1" inputmode="numeric"></div>'
+          + '<div><label class="' + LBL + '" for="phstart">Start value</label><input id="phstart" class="' + INP + '" value="1" inputmode="numeric"></div>'
+          + '<div><label class="' + LBL + '" for="phmax">Max</label><input id="phmax" class="' + INP + '" value="10" inputmode="numeric"></div>'
+          + '<div><label class="' + LBL + '" for="phfree">Free incl.</label><input id="phfree" class="' + INP + '" value="1" inputmode="numeric"></div>'
+          + '<div><label class="' + LBL + '" for="phpct">Extra %</label><input id="phpct" class="' + INP + '" value="50" inputmode="numeric"></div>'
+          + '</div>'
+          + '<div id="phfixed" class="mt-2" style="display:none"><label class="' + LBL + '" for="phfixedn">Fixed device count</label><input id="phfixedn" class="' + INP + '" style="width:8rem" value="1" inputmode="numeric"></div>'
+          + '</div>'
+          + '<button id="padd" class="' + BTN_P + ' mt-3">Add package</button>';
         q('tsave').onclick = async () => {
           await j(api + '/tiers/' + id, {method: 'PUT', body: JSON.stringify({name: q('tname').value,
             squad_uuid: q('tsquad').value.trim() || null,
@@ -540,11 +598,19 @@ window.rwaPluginUI['pershop'] = {
           catch (e) { alert('Delete failed: ' + e.message); }
         };
         const GB = 1073741824;
+        const gv = (id, fb) => { const v = q(id).value.trim(); return v === '' ? fb : (Number(v) || 0); };
         const hwidBody = () => {
-          const n = q('phnums').value.split(',').map((s) => Number(s.trim()));
-          return {hwid_mode: q('phmode').value, hwid_min: n[0] || 0, hwid_default: n[1] || 0,
-            hwid_max: n[2] || 0, hwid_free: n[3] || 0, hwid_percent: n[4] || 0,
-            hwid_fixed: q('phmode').value === 'fixed' ? (n[5] || 0) : null}; };
+          const mode = q('phmode').value;
+          const b = {hwid_mode: mode, hwid_min: 0, hwid_default: 0,
+            hwid_max: 0, hwid_free: 0, hwid_percent: 0, hwid_fixed: null};
+          if (mode === 'input') { b.hwid_min = gv('phmin', 1); b.hwid_default = gv('phstart', 1);
+            b.hwid_max = gv('phmax', 10); b.hwid_free = gv('phfree', 1); b.hwid_percent = gv('phpct', 50); }
+          else if (mode === 'fixed') { b.hwid_fixed = gv('phfixedn', 1); }
+          return b; };
+        const syncHwid = () => { const m = q('phmode').value;
+          q('phinput').style.display = m === 'input' ? '' : 'none';
+          q('phfixed').style.display = m === 'fixed' ? '' : 'none'; };
+        q('phmode').onchange = syncHwid;
         q('padd').onclick = async () => {
           await j(api + '/packages', {method: 'POST', body: JSON.stringify(Object.assign({name: q('pname').value,
             tier_id: id, duration_days: Math.max(0, Number(q('pdays').value) || 0),
@@ -567,7 +633,13 @@ window.rwaPluginUI['pershop'] = {
           q('peffect').value = p.effect || 'full';
           q('pscope').value = p.scope_tier_id || '';
           q('phmode').value = p.hwid_mode || 'default';
-          q('phnums').value = [p.hwid_min, p.hwid_default, p.hwid_max, p.hwid_free, p.hwid_percent, p.hwid_fixed || 0].join(',');
+          q('phmin').value = p.hwid_min == null ? 1 : p.hwid_min;
+          q('phstart').value = p.hwid_default == null ? 1 : p.hwid_default;
+          q('phmax').value = p.hwid_max == null ? 10 : p.hwid_max;
+          q('phfree').value = p.hwid_free == null ? 1 : p.hwid_free;
+          q('phpct').value = p.hwid_percent == null ? 50 : p.hwid_percent;
+          q('phfixedn').value = p.hwid_fixed || 1;
+          syncHwid();
           q('padd').textContent = 'Save as new (delete old to replace)';
         }; });
       };
