@@ -12,27 +12,47 @@ async def handle_update(ctx, shop: dict, update: dict) -> None:
     from rwa_plugin_pershop.crypto import decrypt_token
     from rwa_plugin_pershop.telegram import TgClient
 
-    tg = TgClient(await decrypt_token(ctx, shop["bot_token_enc"]))
     msg = update.get("message") or update.get("edited_message") or {}
     cb = update.get("callback_query") or {}
+    sender = ((cb.get("from") or {}).get("id")
+              if cb else (msg.get("from") or {}).get("id"))
+    what = (cb.get("data") or "") if cb else (msg.get("text") or "")[:60]
+    try:
+        ctx.logger.info("shop.update_in",
+                        extra={"shop": (shop or {}).get("prefix"), "sender": sender,
+                               "kind": "cb" if cb else "msg", "what": what})
+    except Exception:
+        pass
+    try:
+        tg = TgClient(await decrypt_token(ctx, shop["bot_token_enc"]))
+        if cb:
+            sender = (cb.get("from") or {}).get("id")
+            if sender and sender != shop.get("admin_tg_id"):
+                shop = await _with_buyer_lang(ctx, shop, sender)
+            await _on_callback(ctx, shop, tg, cb)
+            return
+        if not msg:
+            return
+        from_id = (msg.get("from") or {}).get("id")
+        text = (msg.get("text") or "").strip()
+        if not from_id:
+            return
+        if from_id == shop["admin_tg_id"]:
+            await _on_admin_message(ctx, shop, tg, msg, text)
+        else:
+            shop = await _with_buyer_lang(ctx, shop, from_id)
+            await _on_buyer_message(ctx, shop, tg, msg, text)
+    except Exception as e:
+        try:
+            import traceback as _tb
 
-    if cb:
-        sender = (cb.get("from") or {}).get("id")
-        if sender and sender != shop.get("admin_tg_id"):
-            shop = await _with_buyer_lang(ctx, shop, sender)
-        await _on_callback(ctx, shop, tg, cb)
-        return
-    if not msg:
-        return
-    from_id = (msg.get("from") or {}).get("id")
-    text = (msg.get("text") or "").strip()
-    if not from_id:
-        return
-    if from_id == shop["admin_tg_id"]:
-        await _on_admin_message(ctx, shop, tg, msg, text)
-    else:
-        shop = await _with_buyer_lang(ctx, shop, from_id)
-        await _on_buyer_message(ctx, shop, tg, msg, text)
+            ctx.logger.error("shop.update_failed",
+                             extra={"shop": (shop or {}).get("prefix"), "sender": sender,
+                                    "kind": "cb" if cb else "msg", "what": what,
+                                    "err": f"{type(e).__name__}: {e}",
+                                    "trace": _tb.format_exc(limit=8)})
+        except Exception:
+            pass
 
 
 async def _with_buyer_lang(ctx, shop: dict, tg_id: int) -> dict:
@@ -112,6 +132,12 @@ async def _show(ctx, shop, tg, chat_id: int, mid: int | None, text: str,
     # be intentional, so fall back to the menu title instead of sending "".
     if not (text or "").strip():
         try:
+            ctx.logger.warning("shop.empty_screen",
+                               extra={"shop": shop.get("prefix") if isinstance(shop, dict) else None,
+                                      "chat": chat_id})
+        except Exception:
+            pass
+        try:
             from rwa_plugin_pershop.lang import L as _LG
 
             text = _LG(shop, "menu_title") or "Main menu"
@@ -140,7 +166,15 @@ async def _show(ctx, shop, tg, chat_id: int, mid: int | None, text: str,
                 pass
     try:
         new_mid = await tg.send_message(chat_id, text, reply_markup=reply_markup)
-    except Exception:
+    except Exception as e:
+        try:
+            ctx.logger.error("shop.send_failed",
+                             extra={"shop": shop.get("prefix") if isinstance(shop, dict) else None,
+                                    "chat": chat_id, "len": len(text or ""),
+                                    "preview": (text or "")[:160],
+                                    "err": f"{type(e).__name__}: {e}"})
+        except Exception:
+            pass
         return None
     await set_last_mid(ctx, sid, chat_id, new_mid)
     return new_mid
