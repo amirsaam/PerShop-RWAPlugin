@@ -96,6 +96,15 @@ async def register_webhook(ctx, shop: dict) -> dict:
         return {"ok": False, "error": f"Telegram unreachable: {e}"}
     if not data.get("ok"):
         return {"ok": False, "error": str(data.get("description") or data)[:200]}
+    try:
+        me = await TgClient(token).call("getMe", {})
+        uname = ((me.get("result") or {}).get("username") or "").strip().lstrip("@")
+        if uname:
+            await ctx.db.execute(
+                "UPDATE plugin_pershop_shops SET bot_username=$1 WHERE id=$2",
+                uname, shop["id"])
+    except Exception:
+        pass
     return {"ok": True, "url": url}
 
 
@@ -108,6 +117,15 @@ async def webhook_status(ctx, shop: dict) -> dict:
         token = await decrypt_token(ctx, shop["bot_token_enc"])
         data = await TgClient(token).call("getWebhookInfo", {})
         info = data.get("result", {}) if data.get("ok") else {}
+        try:
+            me = await TgClient(token).call("getMe", {})
+            uname = ((me.get("result") or {}).get("username") or "").strip().lstrip("@")
+            if uname:
+                await ctx.db.execute(
+                    "UPDATE plugin_pershop_shops SET bot_username=$1 WHERE id=$2",
+                    uname, shop["id"])
+        except Exception:
+            pass
         return {"ok": True, "url": info.get("url") or "",
                 "pending": info.get("pending_update_count", 0),
                 "last_error": info.get("last_error_message") or ""}

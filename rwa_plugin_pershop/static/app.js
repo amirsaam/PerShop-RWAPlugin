@@ -82,6 +82,34 @@ window.rwaPluginUI['pershop'] = {
         t.selectionStart = t.selectionEnd = s + ins.length;
       }; });
     };
+    // ---- Modal, copied from the panel create-user dialog: overlay + glass-heavy
+    // content, icon title + description, sectioned body, Cancel/Save footer.
+    const openModal = (title, desc, bodyHTML, onSave, saveLabel) => {
+      const ov = document.createElement('div');
+      ov.className = 'fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center';
+      ov.innerHTML = '<div class="glass-heavy rounded-t-xl sm:rounded-lg p-4 sm:p-6 w-full sm:max-w-[520px] max-h-[85dvh] sm:max-h-[90vh] overflow-y-auto shadow-deep">'
+        + '<div class="flex items-start justify-between gap-3 mb-1"><h2 class="text-lg font-semibold text-white flex items-center gap-2">'
+        + '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 text-primary-400"><path d="M5 12h14"/><path d="M12 5v14"/></svg>'
+        + esc(title) + '</h2><button data-mclose class="rounded-sm opacity-70 hover:opacity-100 text-dark-200 text-xl leading-none px-1">×</button></div>'
+        + '<p class="text-sm text-dark-300 mb-5">' + esc(desc) + '</p>'
+        + '<div id="merr"></div><div class="space-y-5">' + bodyHTML + '</div>'
+        + '<div class="flex justify-end gap-2 mt-6"><button data-mclose class="' + BTN_S + '">Cancel</button>'
+        + '<button data-msave class="' + BTN_P + '">' + esc(saveLabel || 'Save') + '</button></div></div>';
+      el.appendChild(ov);
+      const close = () => ov.remove();
+      ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(); });
+      ov.querySelectorAll('[data-mclose]').forEach((b) => { b.onclick = close; });
+      const saveBtn = ov.querySelector('[data-msave]');
+      saveBtn.onclick = async () => {
+        saveBtn.disabled = true;
+        try { await onSave(ov); close(); }
+        catch (e) {
+          ov.querySelector('#merr').innerHTML = '<div class="p-3 mb-4 bg-red-500/10 border border-red-500/20 rounded-lg text-sm text-red-400">' + esc(e.message) + '</div>';
+          saveBtn.disabled = false;
+        }
+      };
+      return ov;
+    };
     const ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 text-primary-400 shrink-0"><path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/><path d="M2 7h20"/></svg>';
 
     // Panel 5.x mounts this module once on the single route /plugins/:pluginId,
@@ -196,7 +224,8 @@ window.rwaPluginUI['pershop'] = {
         + fmtBar('botext') + '<div id="bovars"></div><textarea id="botext" rows="4" class="' + TA + '"></textarea></div>'
         + '<div class="sm:col-span-2 flex items-start gap-3"><input type="checkbox" id="teston" class="h-4 w-4 mt-1 accent-primary"><div><label for="teston" class="text-sm text-white">Test subscription enabled</label><p class="' + HELP + '">Free trial, one per person across all shops.</p></div></div>'
         + '</div><div class="flex flex-wrap items-center gap-2 mt-4"><button id="save" class="' + BTN_P + '">Save shop</button><button id="connect" class="' + BTN_S + '">Connect bot</button><button id="disconnect" class="' + BTN_M + '">Disconnect bot</button><span id="sec" class="text-xs text-dark-300"></span></div></div>'
-        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Catalog — tiers → packages</h2><div id="tiers" class="flex flex-wrap gap-2"></div><div id="tierdetail" class="mt-4"></div></div>'
+        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Tiers</h2><p class="text-xs text-dark-300 mb-3">Buyer groups — each tier puts sold accounts in one squad. Packages live on their own below and can move between tiers any time.</p><div id="tiers" class="space-y-1.5"></div><button id="addtier" class="' + BTN_M + ' mt-3">Add tier</button></div>'
+        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Packages</h2><p class="text-xs text-dark-300 mb-3">Standalone sellables. The tier dropdown decides which tier sells it — change it any time to move the package. Empty tier = sold alongside the tier buttons.</p><div id="pkgs" class="space-y-1.5"></div><button id="addpkg" class="' + BTN_M + ' mt-3">Add package</button></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Other Services — categories → items</h2><p class="text-xs text-dark-300 mb-3">Non-VPN sellables. No duration, traffic or device limits.</p><div id="scats" class="flex flex-wrap gap-2"></div><div id="scatdetail" class="mt-4"></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Plan matching — users without a plan</h2><div id="unmapped"><button id="uload" class="' + BTN_M + '">Load users</button></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Broadcast — send to all buyers</h2><div class="grid gap-3 max-w-xl">'
@@ -277,7 +306,7 @@ window.rwaPluginUI['pershop'] = {
         q('lang').value = ['en', 'fa', 'ru', 'zh'].includes(shop.lang) ? shop.lang : 'en';
         q('sec').textContent = (shop.has_token ? '' : 'No bot connected — paste a token, Save, then Connect. ')
           + 'Bot endpoint: POST ' + api + '/tg/' + shop.id;
-        loadTiers(); loadScats();
+        loadCatalog().catch(()=>{}); loadScats();
       }).catch(() => {});
       loadMine();
       q('connect').onclick = async () => {
@@ -409,21 +438,137 @@ window.rwaPluginUI['pershop'] = {
         try { xrender(await j(api + '/shops/mine/apikey')); }
         catch (e) { q('xout').textContent = 'Create and save your shop first.'; }
       };
-      const loadTiers = async () => {
-        const {tiers} = await j(api + '/tiers');
+      const squadNames = async () => {
         let names = {};
         try { const r = await j(api + '/squads'); (r.squads || []).forEach((s) => { names[s.uuid] = s.name; }); } catch (e) {}
-        q('tiers').innerHTML = tiers.map((t) =>
-          '<button data-t="' + t.id + '" class="' + BTN_M + '">' + esc(t.name) + (t.active ? '' : ' (off)')
-          + (t.squad_uuid ? ' · ' + esc(names[t.squad_uuid] || t.squad_uuid.slice(0, 8)) : ' · no squad') + '</button>').join('')
-          + '<span class="flex gap-2"><input id="newtier" class="' + INP + '" style="width:auto" placeholder="new tier name"> <button id="addtier" class="' + BTN_M + '">Add tier</button></span>';
-        q('tiers').querySelectorAll('[data-t]').forEach((b) => { b.onclick = () => showTier(Number(b.dataset.t)); });
-        q('addtier').onclick = async () => {
-          if (!q('newtier').value.trim()) return;
-          const r = await j(api + '/tiers', {method: 'POST', body: JSON.stringify({name: q('newtier').value.trim()})});
-          loadTiers(); showTier(r.id);
-        };
+        return names;
       };
+      const squadOpts = async (cur) => {
+        let sq = [];
+        try { sq = (await j(api + '/squads')).squads || []; } catch (e) {}
+        if (!sq.length) return '<input id="m_squad" class="' + INP + '" placeholder="squad uuid" value="' + esc(cur || '') + '">';
+        return '<select id="m_squad" class="' + INP + '">'
+          + (cur && !sq.some((s) => s.uuid === cur) ? '<option value="' + esc(cur) + '">current: ' + esc(cur.slice(0, 8)) + '…</option>' : '')
+          + '<option value="">— pick a squad —</option>'
+          + sq.map((s) => '<option value="' + esc(s.uuid) + '"' + (s.uuid === cur ? ' selected' : '') + '>' + esc(s.name) + '</option>').join('')
+          + '</select>';
+      };
+      const tierModal = (t, names) => {
+        const isNew = !t;
+        t = t || {name: '', squad_uuid: '', hwid_default: null, sort: 0, active: true};
+        openModal(isNew ? 'Add tier' : 'Edit tier', 'Buyer groups. Each tier puts sold accounts in one squad.',
+          '<div><label class="' + LBL + '">Tier name</label><input id="m_name" class="' + INP + '" value="' + esc(t.name) + '"><p class="' + HELP + '">Shown to buyers as the first step of the buy flow.</p></div>'
+          + '<div><label class="' + LBL + '">Internal squad</label><span id="m_squadwrap">loading…</span><p class="' + HELP + '">Sold accounts join this squad. Lists the squads you can see.</p></div>'
+          + '<div class="grid grid-cols-2 gap-3"><div><label class="' + LBL + '">HWID default</label><input id="m_hwid" class="' + INP + '" inputmode="numeric" placeholder="blank = panel default" value="' + (t.hwid_default == null ? '' : t.hwid_default) + '"></div>'
+          + '<div><label class="' + LBL + '">Sort order</label><input id="m_sort" class="' + INP + '" inputmode="numeric" value="' + (t.sort || 0) + '"></div></div>'
+          + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="m_active" class="h-4 w-4 accent-primary"' + (t.active === false ? '' : ' checked') + '> active</label></div>',
+          async (ov) => {
+            const body = {name: ov.querySelector('#m_name').value.trim(),
+              squad_uuid: ov.querySelector('#m_squad').value.trim() || null,
+              hwid_default: ov.querySelector('#m_hwid').value.trim() === '' ? null : Number(ov.querySelector('#m_hwid').value),
+              sort: Number(ov.querySelector('#m_sort').value) || 0,
+              active: ov.querySelector('#m_active').checked};
+            if (!body.name) throw new Error('Tier name is required.');
+            if (isNew) await j(api + '/tiers', {method: 'POST', body: JSON.stringify(body)});
+            else await j(api + '/tiers/' + t.id, {method: 'PUT', body: JSON.stringify(body)});
+            loadCatalog();
+          }, isNew ? 'Add tier' : 'Save tier');
+        squadOpts(t.squad_uuid).then((h) => { const w = el.querySelector('#m_squadwrap'); if (w) w.innerHTML = h; });
+      };
+      const EFFLBL = {full: 'full plan', time_only: 'time top-up', traffic_only: 'traffic top-up'};
+      const pkgBadges = (p, tiers) => {
+        const tn = p.tier_id ? ((tiers.find((x) => x.id === p.tier_id) || {}).name || ('tier ' + p.tier_id)) : 'no tier';
+        return '<span class="' + pillFor('pending') + '">' + esc(tn) + '</span> '
+          + '<span>' + esc(p.name) + ' · ' + (Number(p.duration_days) === 0 ? 'never expires' : p.duration_days + 'd') + ' · '
+          + (p.traffic_limit_bytes ? (p.traffic_limit_bytes / 1073741824) + 'GB' : 'unlimited') + ' · ' + fmtU(p.price_units)
+          + ' · ' + esc(EFFLBL[p.effect] || 'full plan') + (p.active ? '' : ' · off') + '</span>';
+      };
+      const hwidFields = (p) => {
+        p = p || {};
+        const m = p.hwid_mode || 'default';
+        return '<div><label class="' + LBL + '">Tier</label><select id="m_tier" class="' + INP + '"><option value="">No tier — sold alongside tiers</option></select>'
+          + '<p class="' + HELP + '">Change this any time to move the package between tiers.</p></div>'
+          + '<div><label class="' + LBL + '">Device limit (HWID)</label>'
+          + '<select id="m_hmode" class="' + INP + '"><option value="default"' + (m === 'default' ? ' selected' : '') + '>hwid: panel default</option><option value="input"' + (m === 'input' ? ' selected' : '') + '>hwid: buyer input</option><option value="fixed"' + (m === 'fixed' ? ' selected' : '') + '>hwid: fixed by admin</option><option value="unlimited"' + (m === 'unlimited' ? ' selected' : '') + '>hwid: unlimited</option></select></div>'
+          + '<div id="m_hinput" class="grid grid-cols-2 sm:grid-cols-5 gap-2"' + (m === 'input' ? '' : ' style="display:none"') + '>'
+          + '<div><label class="' + LBL + '">Min</label><input id="m_hmin" class="' + INP + '" inputmode="numeric" value="' + (p.hwid_min == null ? 1 : p.hwid_min) + '"></div>'
+          + '<div><label class="' + LBL + '">Start value</label><input id="m_hstart" class="' + INP + '" inputmode="numeric" value="' + (p.hwid_default == null ? 1 : p.hwid_default) + '"></div>'
+          + '<div><label class="' + LBL + '">Max</label><input id="m_hmax" class="' + INP + '" inputmode="numeric" value="' + (p.hwid_max == null ? 10 : p.hwid_max) + '"></div>'
+          + '<div><label class="' + LBL + '">Free incl.</label><input id="m_hfree" class="' + INP + '" inputmode="numeric" value="' + (p.hwid_free == null ? 1 : p.hwid_free) + '"></div>'
+          + '<div><label class="' + LBL + '">Extra %</label><input id="m_hpct" class="' + INP + '" inputmode="numeric" value="' + (p.hwid_percent == null ? 50 : p.hwid_percent) + '"></div></div>'
+          + '<div id="m_hfixed"' + (m === 'fixed' ? '' : ' style="display:none"') + '><label class="' + LBL + '">Fixed device count</label><input id="m_hfixedn" class="' + INP + '" style="width:8rem" inputmode="numeric" value="' + (p.hwid_fixed || 1) + '"></div>';
+      };
+      const pkgModal = (p, tiers) => {
+        const isNew = !p;
+        p = p || {name: '', duration_days: 30, traffic_limit_bytes: null, price_units: 1, effect: 'full', scope_tier_id: null, tier_id: null, active: true, traffic_reset: true};
+        const GB = 1073741824;
+        const ov = openModal(isNew ? 'Add package' : 'Edit package', 'Standalone sellable. Pick a tier to decide where buyers find it.',
+          '<div class="grid gap-3 sm:grid-cols-2">'
+          + '<div><label class="' + LBL + '">Package name</label><input id="m_pname" class="' + INP + '" value="' + esc(p.name) + '"></div>'
+          + '<div><label class="' + LBL + '">Duration (days)</label><input id="m_pdays" class="' + INP + '" inputmode="numeric" value="' + (p.duration_days == null ? 30 : p.duration_days) + '"><p class="' + HELP + '">0 = never expires (∞).</p></div>'
+          + '<div><label class="' + LBL + '">Traffic cap (GB)</label><input id="m_pgb" class="' + INP + '" inputmode="decimal" value="' + (p.traffic_limit_bytes ? p.traffic_limit_bytes / GB : '') + '"><p class="' + HELP + '">Blank = unlimited.</p></div>'
+          + '<div><label class="' + LBL + '">Price (units)</label><input id="m_punits" class="' + INP + '" inputmode="decimal" value="' + (p.price_units || 0) + '"></div>'
+          + '<div><label class="' + LBL + '">Package type</label><select id="m_peffect" class="' + INP + '"><option value="full"' + (p.effect === 'full' ? ' selected' : '') + '>full plan</option><option value="time_only"' + (p.effect === 'time_only' ? ' selected' : '') + '>time top-up (+days)</option><option value="traffic_only"' + (p.effect === 'traffic_only' ? ' selected' : '') + '>traffic top-up (+GB)</option></select></div>'
+          + '<div><label class="' + LBL + '">Offer scope</label><select id="m_pscope" class="' + INP + '"><option value="">scope: all tiers</option>'
+          + tiers.map((x) => '<option value="' + x.id + '"' + (x.id === p.scope_tier_id ? ' selected' : '') + '>scope: ' + esc(x.name) + ' only</option>').join('') + '</select></div>'
+          + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="m_pactive" class="h-4 w-4 accent-primary"' + (p.active === false ? '' : ' checked') + '> active</label></div>'
+          + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="m_preset" class="h-4 w-4 accent-primary"' + (p.traffic_reset === false ? '' : ' checked') + '> reset traffic on renew</label></div>'
+          + '</div>' + hwidFields(p),
+          async (ov) => {
+            const gv = (id, fb) => { const v = ov.querySelector(id).value.trim(); return v === '' ? fb : (Number(v) || 0); };
+            const mode = ov.querySelector('#m_hmode').value;
+            const body = {name: ov.querySelector('#m_pname').value.trim(),
+              tier_id: ov.querySelector('#m_tier').value ? Number(ov.querySelector('#m_tier').value) : null,
+              duration_days: Math.max(0, Number(ov.querySelector('#m_pdays').value) || 0),
+              traffic_limit_bytes: ov.querySelector('#m_pgb').value.trim() === '' ? null : Math.round(Number(ov.querySelector('#m_pgb').value) * GB),
+              price_units: Number(ov.querySelector('#m_punits').value) || 0,
+              traffic_reset: ov.querySelector('#m_preset').checked,
+              effect: ov.querySelector('#m_peffect').value,
+              scope_tier_id: ov.querySelector('#m_pscope').value ? Number(ov.querySelector('#m_pscope').value) : null,
+              active: ov.querySelector('#m_pactive').checked,
+              hwid_mode: mode, hwid_min: 0, hwid_default: 0, hwid_max: 0, hwid_free: 0, hwid_percent: 0, hwid_fixed: null};
+            if (!body.name) throw new Error('Package name is required.');
+            if (mode === 'input') { body.hwid_min = gv('#m_hmin', 1); body.hwid_default = gv('#m_hstart', 1);
+              body.hwid_max = gv('#m_hmax', 10); body.hwid_free = gv('#m_hfree', 1); body.hwid_percent = gv('#m_hpct', 50); }
+            else if (mode === 'fixed') { body.hwid_fixed = gv('#m_hfixedn', 1); }
+            if (isNew) await j(api + '/packages', {method: 'POST', body: JSON.stringify(body)});
+            else await j(api + '/packages/' + p.id, {method: 'PUT', body: JSON.stringify(body)});
+            loadCatalog();
+          }, isNew ? 'Add package' : 'Save package');
+        const tsel = ov.querySelector('#m_tier');
+        tsel.innerHTML += tiers.map((x) => '<option value="' + x.id + '"' + (x.id === (p.tier_id || null) ? ' selected' : '') + '>' + esc(x.name) + '</option>').join('');
+        const hm = ov.querySelector('#m_hmode');
+        hm.onchange = () => { ov.querySelector('#m_hinput').style.display = hm.value === 'input' ? '' : 'none';
+          ov.querySelector('#m_hfixed').style.display = hm.value === 'fixed' ? '' : 'none'; };
+      };
+      const loadCatalog = async () => {
+        const {tiers} = await j(api + '/tiers');
+        const {packages} = await j(api + '/packages');
+        const names = await squadNames();
+        q('tiers').innerHTML = (tiers.map((t) =>
+          '<div class="' + ROW + '" data-t="' + t.id + '"><span>' + esc(t.name)
+          + (t.squad_uuid ? ' · ' + esc(names[t.squad_uuid] || t.squad_uuid.slice(0, 8)) : ' · no squad')
+          + (t.active ? '' : ' · off') + '</span><span class="flex gap-1.5"><button data-te="1" class="' + BTN_M + '">Edit</button> <button data-td="1" class="' + BTN_M + '">Del</button></span></div>').join('')
+          || '<i class="text-sm text-dark-300">none</i>');
+        q('pkgs').innerHTML = (packages.map((p) =>
+          '<div class="' + ROW + '" data-p="' + p.id + '">' + pkgBadges(p, tiers)
+          + '<span class="flex gap-1.5"><button data-pe="1" class="' + BTN_M + '">Edit</button> <button data-pd="1" class="' + BTN_M + '">Del</button></span></div>').join('')
+          || '<i class="text-sm text-dark-300">none</i>');
+        q('tiers').querySelectorAll('[data-te]').forEach((b) => { b.onclick = () => {
+          const t = tiers.find((x) => x.id === Number(b.closest('[data-t]').dataset.t)); tierModal(t); }; });
+        q('tiers').querySelectorAll('[data-td]').forEach((b) => { b.onclick = async () => {
+          const t = tiers.find((x) => x.id === Number(b.closest('[data-t]').dataset.t));
+          if (!confirm('Delete tier ' + t.name + '? Packages inside must be moved out first.')) return;
+          try { await j(api + '/tiers/' + t.id, {method: 'DELETE'}); loadCatalog(); }
+          catch (e) { alert('Delete failed: ' + e.message); } }; });
+        q('pkgs').querySelectorAll('[data-pe]').forEach((b) => { b.onclick = () => {
+          const p = packages.find((x) => x.id === Number(b.closest('[data-p]').dataset.p)); pkgModal(p, tiers); }; });
+        q('pkgs').querySelectorAll('[data-pd]').forEach((b) => { b.onclick = async () => {
+          if (!confirm('Delete this package?')) return;
+          await j(api + '/packages/' + b.closest('[data-p]').dataset.p, {method: 'DELETE'}); loadCatalog(); }; });
+      };
+      q('addtier').onclick = () => tierModal(null);
+      q('addpkg').onclick = async () => { const {tiers} = await j(api + '/tiers'); pkgModal(null, tiers || []); };
       const loadScats = async () => {
         const {service_cats} = await j(api + '/service-cats');
         q('scats').innerHTML = (service_cats || []).map((c) =>
@@ -519,138 +664,6 @@ window.rwaPluginUI['pershop'] = {
         }; });
       };
       q('uload').onclick = () => { loadUnmapped().catch((e) => alert('Load failed: ' + e.message)); };
-      const showTier = async (id) => {
-        const {tiers} = await j(api + '/tiers');
-        const t = tiers.find((x) => x.id === id);
-        if (!t) return;
-        const {packages} = await j(api + '/packages');
-        const pkgs = packages.filter((p) => p.tier_id === id);
-        const d = q('tierdetail');
-        d.innerHTML = '<h4 class="text-sm font-semibold text-white mb-2">' + esc(t.name) + '</h4>'
-          + '<div class="grid gap-3 sm:grid-cols-2 mb-3">'
-          + '<div><label class="' + LBL + '" for="tname">Tier name</label><input id="tname" class="' + INP + '" value="' + esc(t.name) + '"><p class="' + HELP + '">Shown to buyers as the first step of the buy flow.</p></div>'
-          + '<div><label class="' + LBL + '" for="tsquad">Internal squad</label><span id="tsquadwrap"><select id="tsquad" class="' + INP + '"><option value="">loading squads…</option></select></span><p class="' + HELP + '">Sold accounts join this squad. Lists the squads you can see.</p></div>'
-          + '<div><label class="' + LBL + '" for="thwid">HWID default</label><input id="thwid" class="' + INP + '" placeholder="blank = panel default" value="' + (t.hwid_default == null ? '' : t.hwid_default) + '" inputmode="numeric"><p class="' + HELP + '">Fallback device limit for packages set to panel default.</p></div>'
-          + '<div><label class="' + LBL + '" for="tsort">Sort order</label><input id="tsort" class="' + INP + '" value="' + t.sort + '" inputmode="numeric"><p class="' + HELP + '">Lower numbers show first in the bot.</p></div>'
-          + '</div><div class="flex gap-2 items-center mb-3">'
-          + '<label class="text-sm text-dark-300"><input type="checkbox" id="tactive" class="h-4 w-4 accent-primary" ' + (t.active ? 'checked' : '') + '> active</label>'
-          + '<button id="tsave" class="' + BTN_M + '">Save tier</button><button id="tdel" class="' + BTN_M + '">Delete tier</button></div>'
-          + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Packages</h5><div id="pkgs" class="space-y-1.5">' + (pkgs.map((p) =>
-            '<div class="' + ROW + '" data-p="' + p.id + '"><span>' + esc(p.name) + ' · '
-            + (Number(p.duration_days) === 0 ? 'never expires · ' : p.duration_days + 'd · ')
-            + (p.traffic_limit_bytes ? (p.traffic_limit_bytes / 1073741824) + 'GB · ' : 'unlimited · ')
-            + fmtU(p.price_units) + ' · hwid:' + esc(p.hwid_mode || 'default')
-            + ' · ' + esc({full: 'full plan', time_only: 'time top-up', traffic_only: 'traffic top-up'}[p.effect] || 'full plan')
-            + (p.scope_tier_id ? ' · only ' + esc((tiers.find((x) => x.id === p.scope_tier_id) || {}).name || ('tier ' + p.scope_tier_id)) : '')
-            + (p.traffic_reset === false ? ' · topup' : '') + (p.active ? '' : ' (off)')
-            + '</span><span class="flex gap-1.5"><button data-pe="1" class="' + BTN_M + '">Edit</button> <button data-pd="1" class="' + BTN_M + '">Del</button></span></div>').join('') || '<i class="text-sm text-dark-300">none</i>') + '</div>'
-          + '<div class="grid gap-3 sm:grid-cols-2 mt-3">'
-          + '<div><label class="' + LBL + '" for="pname">Package name</label><input id="pname" class="' + INP + '"><p class="' + HELP + '">Shown to buyers inside this tier.</p></div>'
-          + '<div><label class="' + LBL + '" for="pdays">Duration (days)</label><input id="pdays" class="' + INP + '" value="30" inputmode="numeric"><p class="' + HELP + '">0 = never expires (∞).</p></div>'
-          + '<div><label class="' + LBL + '" for="pgb">Traffic cap (GB)</label><input id="pgb" class="' + INP + '" inputmode="decimal"><p class="' + HELP + '">Blank = unlimited.</p></div>'
-          + '<div><label class="' + LBL + '" for="punits">Price (units)</label><input id="punits" class="' + INP + '" value="1" inputmode="decimal"><p class="' + HELP + '">Multiplied by your currency rate for the buyer price.</p></div>'
-          + '<div><label class="' + LBL + '" for="peffect">Package type</label>'
-          + '<select id="peffect" class="' + INP + '"><option value="full">full plan</option><option value="time_only">time top-up (+days)</option><option value="traffic_only">traffic top-up (+GB)</option></select>'
-          + '<p class="' + HELP + '">Full plan: time + traffic. Time top-up adds days only (needs days &gt; 0). Traffic top-up adds GB only (needs a cap).</p></div>'
-          + '<div><label class="' + LBL + '" for="pscope">Offer scope</label>'
-          + '<select id="pscope" class="' + INP + '"><option value="">scope: all tiers</option>'
-          + tiers.map((x) => '<option value="' + x.id + '"' + (x.id === id ? ' selected' : '') + '>scope: ' + esc(x.name) + ' only</option>').join('')
-          + '</select><p class="' + HELP + '">Top-up offers: which tier\u2019s subs see this offer. Full plans ignore scope.</p></div>'
-          + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="pactive" class="h-4 w-4 accent-primary" checked> active</label><p class="' + HELP + '">Off hides the package from the bot.</p></div>'
-          + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="preset" class="h-4 w-4 accent-primary" checked> reset traffic on renew</label><p class="' + HELP + '">ON: renew resets the cap to this package. OFF: leftover rolls over, package traffic is added on top.</p></div>'
-          + '</div>'
-          + '<div class="mt-3"><label class="' + LBL + '" for="phmode">Device limit (HWID)</label>'
-          + '<select id="phmode" class="' + INP + '" style="width:auto"><option value="default">hwid: panel default</option><option value="input">hwid: buyer input</option><option value="fixed">hwid: fixed by admin</option><option value="unlimited">hwid: unlimited</option></select> '
-          + '<p class="' + HELP + '">Panel default: leave to the panel. Buyer input: the buyer picks the device count, extra devices cost extra. Fixed: every buyer gets the same count. Unlimited: no device limit.</p>'
-          + '<div id="phinput" class="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-2">'
-          + '<div><label class="' + LBL + '" for="phmin">Min</label><input id="phmin" class="' + INP + '" value="1" inputmode="numeric"></div>'
-          + '<div><label class="' + LBL + '" for="phstart">Start value</label><input id="phstart" class="' + INP + '" value="1" inputmode="numeric"></div>'
-          + '<div><label class="' + LBL + '" for="phmax">Max</label><input id="phmax" class="' + INP + '" value="10" inputmode="numeric"></div>'
-          + '<div><label class="' + LBL + '" for="phfree">Free incl.</label><input id="phfree" class="' + INP + '" value="1" inputmode="numeric"></div>'
-          + '<div><label class="' + LBL + '" for="phpct">Extra %</label><input id="phpct" class="' + INP + '" value="50" inputmode="numeric"></div>'
-          + '</div>'
-          + '<div id="phfixed" class="mt-2" style="display:none"><label class="' + LBL + '" for="phfixedn">Fixed device count</label><input id="phfixedn" class="' + INP + '" style="width:8rem" value="1" inputmode="numeric"></div>'
-          + '</div>'
-          + '<button id="padd" class="' + BTN_P + ' mt-3">Add package</button>';
-        q('tsave').onclick = async () => {
-          await j(api + '/tiers/' + id, {method: 'PUT', body: JSON.stringify({name: q('tname').value,
-            squad_uuid: q('tsquad').value.trim() || null,
-            hwid_default: q('thwid').value === '' ? null : Number(q('thwid').value),
-            sort: Number(q('tsort').value) || 0, active: q('tactive').checked})});
-          loadTiers();
-        };
-        try {
-          const {squads} = await j(api + '/squads');
-          const wrap = el.querySelector('#tsquadwrap');
-          if (wrap && squads && squads.length) {
-            const cur = t.squad_uuid || '';
-            wrap.innerHTML = '<select id="tsquad" class="' + INP + '">'
-              + (cur && !squads.some((s) => s.uuid === cur)
-                ? '<option value="' + esc(cur) + '">current: ' + esc(cur.slice(0, 8)) + '…</option>' : '')
-              + '<option value="">— pick a squad —</option>'
-              + squads.map((s) => '<option value="' + esc(s.uuid) + '"'
-                + (s.uuid === cur ? ' selected' : '') + '>' + esc(s.name) + '</option>').join('')
-              + '</select>';
-          } else if (wrap) {
-            wrap.innerHTML = '<input id="tsquad" class="' + INP + '" placeholder="squad uuid" value="'
-              + esc(t.squad_uuid || '') + '">';
-          }
-        } catch (e) {
-          const wrap = el.querySelector('#tsquadwrap');
-          if (wrap) wrap.innerHTML = '<input id="tsquad" class="' + INP + '" placeholder="squad uuid" value="'
-            + esc(t.squad_uuid || '') + '">';
-        }
-        q('tdel').onclick = async () => {
-          if (!confirm('Delete tier ' + t.name + '?')) return;
-          try { await j(api + '/tiers/' + id, {method: 'DELETE'}); q('tierdetail').innerHTML = ''; loadTiers(); }
-          catch (e) { alert('Delete failed: ' + e.message); }
-        };
-        const GB = 1073741824;
-        const gv = (id, fb) => { const v = q(id).value.trim(); return v === '' ? fb : (Number(v) || 0); };
-        const hwidBody = () => {
-          const mode = q('phmode').value;
-          const b = {hwid_mode: mode, hwid_min: 0, hwid_default: 0,
-            hwid_max: 0, hwid_free: 0, hwid_percent: 0, hwid_fixed: null};
-          if (mode === 'input') { b.hwid_min = gv('phmin', 1); b.hwid_default = gv('phstart', 1);
-            b.hwid_max = gv('phmax', 10); b.hwid_free = gv('phfree', 1); b.hwid_percent = gv('phpct', 50); }
-          else if (mode === 'fixed') { b.hwid_fixed = gv('phfixedn', 1); }
-          return b; };
-        const syncHwid = () => { const m = q('phmode').value;
-          q('phinput').style.display = m === 'input' ? '' : 'none';
-          q('phfixed').style.display = m === 'fixed' ? '' : 'none'; };
-        q('phmode').onchange = syncHwid;
-        q('padd').onclick = async () => {
-          await j(api + '/packages', {method: 'POST', body: JSON.stringify(Object.assign({name: q('pname').value,
-            tier_id: id, duration_days: Math.max(0, Number(q('pdays').value) || 0),
-            traffic_limit_bytes: q('pgb').value === '' ? null : Math.round(Number(q('pgb').value) * GB),
-            price_units: Number(q('punits').value) || 0, traffic_reset: q('preset').checked,
-            effect: q('peffect').value,
-            scope_tier_id: q('pscope').value ? Number(q('pscope').value) : null,
-            active: q('pactive').checked}, hwidBody()))});
-          showTier(id);
-        };
-        d.querySelectorAll('[data-pd]').forEach((b) => { b.onclick = async () => {
-          await j(api + '/packages/' + b.closest('[data-p]').dataset.p, {method: 'DELETE'}); showTier(id); }; });
-        d.querySelectorAll('[data-pe]').forEach((b) => { b.onclick = async () => {
-          const p = pkgs.find((x) => x.id === Number(b.closest('[data-p]').dataset.p));
-          q('pname').value = p.name; q('pdays').value = p.duration_days;
-          q('pgb').value = p.traffic_limit_bytes ? p.traffic_limit_bytes / GB : '';
-          q('punits').value = p.price_units || 0;
-          q('pactive').checked = p.active;
-          q('preset').checked = p.traffic_reset !== false;
-          q('peffect').value = p.effect || 'full';
-          q('pscope').value = p.scope_tier_id || '';
-          q('phmode').value = p.hwid_mode || 'default';
-          q('phmin').value = p.hwid_min == null ? 1 : p.hwid_min;
-          q('phstart').value = p.hwid_default == null ? 1 : p.hwid_default;
-          q('phmax').value = p.hwid_max == null ? 10 : p.hwid_max;
-          q('phfree').value = p.hwid_free == null ? 1 : p.hwid_free;
-          q('phpct').value = p.hwid_percent == null ? 50 : p.hwid_percent;
-          q('phfixedn').value = p.hwid_fixed || 1;
-          syncHwid();
-          q('padd').textContent = 'Save as new (delete old to replace)';
-        }; });
-      };
     };
 
     const renderOrders = () => {

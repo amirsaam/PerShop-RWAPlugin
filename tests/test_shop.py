@@ -402,6 +402,9 @@ class FakeDB:
         raise AssertionError(f"unhandled fetchval: {q}")
 
     async def execute(self, q, *a):
+        if "SET bot_username=$1" in q:
+            self.shops[a[1]]["bot_username"] = a[0]
+            return
         if "INSERT INTO plugin_pershop_sessions" in q:
             self.sessions[(a[0], a[1], a[2])] = {"shop_id": a[0], "tg_id": a[1], "role": a[2],
                                                 "state": a[3], "data": a[4]}
@@ -670,6 +673,8 @@ class FakeTg:
 
     async def call(self, method, payload):
         self.sent.append((method, payload))
+        if method == "getMe":
+            return {"ok": True, "result": {"username": "vipshopbot"}}
         if method == "getWebhookInfo":
             return {"ok": True, "result": {"url": "https://panel.example.com/api/v2/plugins/pershop/tg/1",
                                            "pending_update_count": 0}}
@@ -1426,6 +1431,7 @@ async def _webhook_flow():
     assert calls[0]["url"] == res["url"] and calls[0]["secret_token"] == "s3cr3t", calls
     st = await svc.webhook_status(ctx, shop)
     assert st["ok"] is True and st["url"].endswith(f"/tg/1") and st["pending"] == 0, st
+    assert db.shops[sid]["bot_username"] == "vipshopbot", db.shops[sid]
     await ctx.settings.set("public_base_url", "")
     res = await svc.register_webhook(ctx, shop)
     assert res["ok"] is False and "public URL" in res["error"], res
@@ -1437,6 +1443,68 @@ async def _webhook_flow():
 
 def test_webhook_flow():
     asyncio.run(_webhook_flow())
+
+
+async def _loose_pkg_flow():
+    """Decoupled catalog: tier-less packages show next to tiers; referral sends a usable link."""
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _legacy = make_shop(db)
+    tid, _tied = make_stepped(db, sid)
+    loose = db._next("pkg")
+    db.pkgs[loose] = {"id": loose, "shop_id": sid, "tier_id": None, "name": "Loose",
+                       "traffic_limit_bytes": None, "duration_days": 30,
+                       "price_text": "", "price_units": 1.0, "squad_uuid": None, "active": True,
+                       "effect": "full", "hwid_mode": "default"}
+    shop = db.shops[sid]
+    shop.update({"referral_text": "Invite!", "bot_username": "vipshopbot"})
+    FakeTg.instances.clear()
+
+    async def cb(data, cid, uid=111, un="alice"):
+        await handle_update(ctx, shop, {"update_id": 300, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    async def txt(text, uid=111, un="alice"):
+        await handle_update(ctx, shop, {"update_id": 301, "message": {
+            "message_id": 9, "from": {"id": uid, "username": un},
+            "chat": {"id": uid}, "text": text}})
+
+    def rms():
+        return [p["rm"] for inst in FakeTg.instances for m, p in inst.sent
+                if m == "sendMessage" and p["rm"]]
+
+    def texts():
+        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent if m == "sendMessage"]
+
+    # buy list: tier button AND the tier-less package side by side
+    await txt("🛒 Buy Subscription")
+    flat = str(rms()[-1])
+    assert f"tiers:{tid}" in flat and f"buy:{loose}" in flat, flat
+    # renew tiers: same shape with renewpkg: for the loose package
+    db.subs[1] = {"id": 1, "shop_id": sid, "buyer_tg_id": 111, "user_uuid": "uu-9",
+                  "username": "vip-alice", "package_id": None, "expire_at": None,
+                  "traffic_limit_bytes": None, "is_test": False, "is_linked": True,
+                  "cancelled": False}
+    await cb("renew:1", "l2")
+    flat = str(rms()[-1])
+    assert f"renewtier:1:{tid}" in flat and f"renewpkg:1:{loose}" in flat, flat
+    # referral: usable t.me link, not a bare code
+    await txt("👥 Referral Program")
+    assert "t.me/vipshopbot?start=r_111" in texts()[-1], texts()[-1]
+    print("LOOSE PKG FLOW PASSED")
+
+
+def test_loose_pkg_flow():
+    asyncio.run(_loose_pkg_flow())
 
 
 def test_effects_flow():
@@ -3305,6 +3373,7 @@ if __name__ == "__main__":
     test_renew_tier_flow()
     test_match_topup_flow()
     test_webhook_flow()
+    test_loose_pkg_flow()
     test_effects_flow()
     test_menu_flow()
     test_tier_squad_flow()

@@ -266,6 +266,8 @@ async def _send_buy_list(ctx, shop, tg, chat_id, edit=None) -> None:
         "SELECT * FROM plugin_pershop_tiers WHERE shop_id=$1 AND active ORDER BY sort, id", shop["id"])
     if tiers:
         rows = [[{"text": t["name"], "callback_data": f"tiers:{t['id']}"}] for t in tiers]
+        loose = [p for p in _full_only(await _packages(ctx, shop["id"])) if not p.get("tier_id")]
+        rows += [[{"text": _pkg_label(shop, p), "callback_data": f"buy:{p['id']}"}] for p in loose]
         rows += _back_row(shop)
         await _show(tg, chat_id, edit, L(shop, "choose_tier"), kb(rows))
         return
@@ -1097,6 +1099,8 @@ async def _send_renew_tiers(ctx, shop, tg, sender, sub, edit=None) -> None:
         await _send_renew_picker(ctx, shop, tg, sender, sub, edit=edit)
         return
     rows = [[{"text": t["name"], "callback_data": f"renewtier:{sub['id']}:{t['id']}"}] for t in tiers]
+    loose = [p for p in _full_only(await _packages(ctx, shop["id"])) if not p.get("tier_id")]
+    rows += [[{"text": _pkg_label(shop, p), "callback_data": f"renewpkg:{sub['id']}:{p['id']}"}] for p in loose]
     rows.append([{"text": L(shop, "back_btn"), "callback_data": f"sub:{sub['id']}"}])
     await _show(tg, sender, edit, L(shop, "choose_tier"), kb(rows))
 
