@@ -3506,6 +3506,84 @@ def test_shop_admin_flow():
     asyncio.run(_shop_admin_flow())
 
 
+async def _admin_preview_flow():
+    """Owner testing from their own Telegram account: panel-label taps must
+    answer (buyer preview, keyed by the owner's id), and a full self-buy
+    approves end to end. Guards the Persian-silence report."""
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.service as svc
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.lang import LOCALES
+    from rwa_plugin_pershop.routes_telegram import _clear_session, _set_session, handle_update
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _legacy = make_shop(db)  # admin_tg=999
+    tid, pid = make_stepped(db, sid)
+    shop = db.shops[sid]
+    shop["lang"] = "fa"
+    panel = FakePanel()
+    svc._panel_client = lambda: panel
+    FakeTg.instances.clear()
+
+    async def txt(text, uid=999, un="owner"):
+        await handle_update(ctx, shop, {"update_id": 400, "message": {
+            "message_id": 9, "from": {"id": uid, "username": un},
+            "chat": {"id": uid}, "text": text}})
+
+    async def cb(data, cid, uid=999, un="owner"):
+        await handle_update(ctx, shop, {"update_id": 401, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    def texts():
+        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText")]
+
+    def rms():
+        return [p["rm"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText") and p.get("rm")]
+
+    fa = LOCALES["fa"]
+    # admin /start still shows the owner panel, not the buyer menu
+    await txt("/start")
+    assert texts(), "admin /start answered"
+    # panel-label taps answer as buyer preview instead of silence
+    n0 = len(texts())
+    await txt(fa["buy_subs_btn"])
+    assert len(texts()) > n0, "admin buy tap answered"
+    assert any(f"tiers:{tid}" in str(rm) for rm in rms()), rms()
+    await txt(fa["my_subs_btn"])
+    assert len(texts()) > n0, "admin my-subs tap answered"
+    # guard: while an admin input session is open, free text is NOT hijacked
+    # into the buyer flow (deny path reports the missing order instead).
+    await _set_session(ctx, sid, 999, "admin", "await_reason:4242", {"order_id": 4242})
+    n1 = len(rms())
+    await txt(fa["buy_subs_btn"])
+    assert not any(f"tiers:{tid}" in str(rm) for rm in rms()[n1:]), rms()[n1:]
+    await _clear_session(ctx, sid, 999, "admin")
+    # full self-buy: tier -> package -> contract -> receipt -> self-approve
+    await cb(f"tiers:{tid}", "p1")
+    await cb(f"buy:{pid}", "p2")
+    await cb("hnext", "p3")
+    await cb("stconfirm", "p4")
+    await txt("owner-test-receipt")
+    o = max(db.orders.values(), key=lambda x: x["id"])
+    assert o["buyer_tg_id"] == 999 and o["status"] == "pending", o
+    await cb(f"approve:{o['id']}", "p5")
+    assert db.orders[o["id"]]["status"] == "approved", db.orders[o["id"]]
+    assert any("vip-owner" in t for t in texts()), texts()
+    print("ADMIN PREVIEW FLOW PASSED")
+
+
+def test_admin_preview_flow():
+    asyncio.run(_admin_preview_flow())
+
+
 if __name__ == "__main__":
     test_naming()
     test_templates()
@@ -3543,3 +3621,4 @@ if __name__ == "__main__":
     test_credit_auto_flow()
     test_edit_place_flow()
     test_shop_admin_flow()
+    test_admin_preview_flow()

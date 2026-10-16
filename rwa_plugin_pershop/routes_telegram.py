@@ -1642,6 +1642,28 @@ async def _on_admin_message(ctx, shop, tg, msg, text) -> None:
         await tg.send_message(chat_id, L(shop, "admin_cancelled"))
         return
 
+    # Owner preview: the persistent buyer panel stays in the owner's client
+    # (e.g. from before admin_tg_id was set), so its label taps would land
+    # here and die silently. When no admin input session is consuming free
+    # text (deny reason / refund receipt), answer them as buyer actions keyed
+    # by the owner's own id — the owner can walk the whole buyer flow, and
+    # any test order simply arrives back in this same DM for approval.
+    _admin_busy = bool(ses and (ses["state"] or "").startswith(("await_refund:", "await_reason:")))
+    if not _admin_busy:
+        from rwa_plugin_pershop.lang import menu_action_for_text as _maft
+
+        _preview = _maft(text)
+        if _preview:
+            await _on_menu_action(ctx, shop, tg, chat_id, shop["admin_tg_id"],
+                                  f"owner{shop['admin_tg_id']}", _preview)
+            return
+        # Preview purchase in progress: the receipt the owner sends for their
+        # own test order belongs to the buyer flow (role "buyer" session).
+        _bses = await _get_session(ctx, shop["id"], shop["admin_tg_id"], "buyer")
+        if _bses and (_bses["state"] or "").startswith("await_receipt:"):
+            await _on_buyer_message(ctx, shop, tg, msg, text)
+            return
+
     if ses and (ses["state"] or "").startswith("await_refund:"):
         import json
 

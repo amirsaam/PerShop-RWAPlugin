@@ -227,7 +227,7 @@ window.rwaPluginUI['pershop'] = {
         + '</div><div class="flex flex-wrap items-center gap-2 mt-4"><button id="save" class="' + BTN_P + '">Save shop</button><button id="connect" class="' + BTN_S + '">Connect bot</button><button id="disconnect" class="' + BTN_M + '">Disconnect bot</button><span id="sec" class="text-xs text-dark-300"></span></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Tiers</h2><p class="text-xs text-dark-300 mb-3">Buyer groups — each tier puts sold accounts in one squad. Packages live on their own below and can move between tiers any time.</p><div id="tiers" class="space-y-1.5"></div><button id="addtier" class="' + BTN_M + ' mt-3">Add tier</button></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Packages</h2><p class="text-xs text-dark-300 mb-3">Standalone sellables, sorted by Sort order. Each package belongs to a tier (that decides its squad); change the tier any time to move it.</p><div id="pkgs" class="space-y-1.5"></div><button id="addpkg" class="' + BTN_M + ' mt-3">Add package</button></div>'
-        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Other Services — categories → items</h2><p class="text-xs text-dark-300 mb-3">Non-VPN sellables. No duration, traffic or device limits.</p><div id="scats" class="flex flex-wrap gap-2"></div><div id="scatdetail" class="mt-4"></div></div>'
+        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Other Services — categories → items</h2><p class="text-xs text-dark-300 mb-3">Non-VPN sellables. No duration, traffic or device limits. Categories group items for buyers; items live on their own and can move between categories any time.</p><h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Categories</h5><div id="scats" class="space-y-1.5"></div><button id="addscat" class="' + BTN_M + ' mt-3">Add category</button><h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2 mt-5">Items</h5><div id="svcs" class="space-y-1.5"></div><button id="addsvc" class="' + BTN_M + ' mt-3">Add item</button></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Plan matching — users without a plan</h2><div id="unmapped"><button id="uload" class="' + BTN_M + '">Load users</button></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Broadcast — send to all buyers</h2><div class="grid gap-3 max-w-xl">'
         + fmtBar('bctext')
@@ -320,7 +320,7 @@ window.rwaPluginUI['pershop'] = {
         q('lang').value = ['en', 'fa', 'ru', 'zh'].includes(shop.lang) ? shop.lang : 'en';
         q('sec').textContent = (shop.has_token ? '' : 'No bot connected — paste a token, Save, then Connect. ')
           + 'Bot endpoint: POST ' + api + '/tg/' + shop.id;
-        loadCatalog().catch(()=>{}); loadScats();
+        loadCatalog().catch(()=>{}); loadServices();
       }).catch(() => {});
       loadMine();
       q('connect').onclick = async () => {
@@ -587,75 +587,81 @@ window.rwaPluginUI['pershop'] = {
       };
       q('addtier').onclick = () => tierModal(null);
       q('addpkg').onclick = async () => { const {tiers} = await j(api + '/tiers'); pkgModal(null, tiers || []); };
-      const loadScats = async () => {
-        const {service_cats} = await j(api + '/service-cats');
-        q('scats').innerHTML = (service_cats || []).map((c) =>
-          '<button data-c="' + c.id + '" class="' + BTN_M + '">' + esc(c.name) + (c.active ? '' : ' (off)') + '</button>').join('')
-          + '<span class="flex gap-2"><input id="newscat" class="' + INP + '" style="width:auto" placeholder="new category name"> <button id="addscat" class="' + BTN_M + '">Add category</button>'
-          + '<button id="lensvc" title="Show items with no category" class="' + BTN_M + '">Uncategorized items</button></span>';
-        q('scats').querySelectorAll('[data-c]').forEach((b) => { b.onclick = () => showScat(Number(b.dataset.c)); });
-        q('addscat').onclick = async () => {
-          if (!q('newscat').value.trim()) return;
-          const r = await j(api + '/service-cats', {method: 'POST', body: JSON.stringify({name: q('newscat').value.trim()})});
-          loadScats(); showScat(r.id);
-        };
-        q('lensvc').onclick = () => showScat(null);
+      const scatModal = (c) => {
+        const isNew = !c;
+        c = c || {name: '', sort: 0, active: true};
+        openModal(isNew ? 'Add category' : 'Edit category', 'Buyer groups inside Other Services.',
+          '<div><label class="' + LBL + '">Category name</label><input id="m_cname" class="' + INP + '" value="' + esc(c.name) + '"><p class="' + HELP + '">First step buyers pick inside Other Services.</p></div>'
+          + '<div><label class="' + LBL + '">Sort order</label><input id="m_csort" class="' + INP + '" inputmode="numeric" value="' + (c.sort || 0) + '"><p class="' + HELP + '">Lower numbers show first in the bot.</p></div>'
+          + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="m_cactive" class="h-4 w-4 accent-primary"' + (c.active === false ? '' : ' checked') + '> active</label></div>',
+          async (ov) => {
+            const body = {name: ov.querySelector('#m_cname').value.trim(),
+              sort: Number(ov.querySelector('#m_csort').value) || 0,
+              active: ov.querySelector('#m_cactive').checked};
+            if (!body.name) throw new Error('Category name is required.');
+            if (isNew) await j(api + '/service-cats', {method: 'POST', body: JSON.stringify(body)});
+            else await j(api + '/service-cats/' + c.id, {method: 'PUT', body: JSON.stringify(body)});
+            loadServices();
+          }, isNew ? 'Add category' : 'Save category');
       };
-      const showScat = async (id) => {
+      const svcModal = (s, cats) => {
+        const isNew = !s;
+        s = s || {name: '', cat_id: null, price_units: 1, sort: 0, active: true, description: '', done_text: ''};
+        const ov = openModal(isNew ? 'Add item' : 'Edit item', 'Standalone non-VPN sellable. Pick a category to decide where buyers find it.',
+          '<div class="grid gap-3 sm:grid-cols-2">'
+          + '<div><label class="' + LBL + '">Item name</label><input id="m_sname" class="' + INP + '" value="' + esc(s.name) + '"></div>'
+          + '<div><label class="' + LBL + '">Price (units)</label><input id="m_sunits" class="' + INP + '" inputmode="decimal" value="' + (s.price_units || 0) + '"><p class="' + HELP + '">Multiplied by your currency rate for the buyer price.</p></div>'
+          + '<div><label class="' + LBL + '">Category</label><select id="m_scat" class="' + INP + '"><option value="">No category (shows under Other)</option>'
+          + cats.map((x) => '<option value="' + x.id + '"' + (x.id === s.cat_id ? ' selected' : '') + '>' + esc(x.name) + '</option>').join('') + '</select><p class="' + HELP + '">Change any time to move the item.</p></div>'
+          + '<div><label class="' + LBL + '">Sort order</label><input id="m_ssort" class="' + INP + '" inputmode="numeric" value="' + (s.sort || 0) + '"><p class="' + HELP + '">Lower numbers show first in the bot.</p></div>'
+          + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="m_sactive" class="h-4 w-4 accent-primary"' + (s.active === false ? '' : ' checked') + '> active</label></div>'
+          + '</div>'
+          + '<div><label class="' + LBL + '">Description (shown before buy)</label>' + fmtBar('m_sdesc') + '<textarea id="m_sdesc" rows="2" class="' + TA + '">' + esc(s.description || '') + '</textarea></div>'
+          + '<div><label class="' + LBL + '">Message sent to buyer on approval</label>' + fmtBar('m_sdone') + '<textarea id="m_sdone" rows="2" class="' + TA + '">' + esc(s.done_text || '') + '</textarea></div>',
+          async (ov2) => {
+            const body = {name: ov2.querySelector('#m_sname').value.trim(),
+              cat_id: ov2.querySelector('#m_scat').value ? Number(ov2.querySelector('#m_scat').value) : null,
+              price_units: Number(ov2.querySelector('#m_sunits').value) || 0,
+              sort: Math.max(0, Number(ov2.querySelector('#m_ssort').value) || 0),
+              description: ov2.querySelector('#m_sdesc').value,
+              done_text: ov2.querySelector('#m_sdone').value,
+              active: ov2.querySelector('#m_sactive').checked};
+            if (!body.name) throw new Error('Item name is required.');
+            if (isNew) await j(api + '/services', {method: 'POST', body: JSON.stringify(body)});
+            else await j(api + '/services/' + s.id, {method: 'PUT', body: JSON.stringify(body)});
+            loadServices();
+          }, isNew ? 'Add item' : 'Save item');
+        wireFmt(ov);
+      };
+      const loadServices = async () => {
         const {service_cats} = await j(api + '/service-cats');
         const {services} = await j(api + '/services');
-        const items = services.filter((s) => (s.cat_id || null) === (id || null));
-        const title = id == null ? 'Uncategorized' : ((service_cats.find((x) => x.id === id) || {}).name || '');
-        if (id != null && !service_cats.some((x) => x.id === id)) return;
-        const d = q('scatdetail');
-        d.innerHTML = '<h4 class="text-sm font-semibold text-white mb-2">' + esc(title) + '</h4>'
-          + (id == null ? '' : '<div class="grid gap-3 sm:grid-cols-2 mb-3">'
-            + '<div><label class="' + LBL + '" for="cname">Category name</label><input id="cname" class="' + INP + '" value="' + esc(title) + '"><p class="' + HELP + '">First step buyers pick inside Other Services.</p></div>'
-            + '<div><label class="' + LBL + '" for="csort">Sort order</label><input id="csort" class="' + INP + '" value="' + ((service_cats.find((x) => x.id === id) || {}).sort || 0) + '" inputmode="numeric"><p class="' + HELP + '">Lower numbers show first in the bot.</p></div>'
-            + '</div><div class="flex gap-2 items-center mb-3">'
-            + '<label class="text-sm text-dark-300"><input type="checkbox" id="cactive" class="h-4 w-4 accent-primary" ' + ((service_cats.find((x) => x.id === id) || {}).active === false ? '' : 'checked') + '> active</label>'
-            + '<button id="csave" class="' + BTN_M + '">Save category</button><button id="cdel" class="' + BTN_M + '">Delete category</button></div>')
-          + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Items</h5><div id="svcs" class="space-y-1.5">' + (items.map((s) =>
-            '<div class="' + ROW + '" data-s="' + s.id + '"><span>' + esc(s.name) + ' · ' + fmtU(s.price_units)
-            + (s.active ? '' : ' (off)') + '</span><span class="flex gap-1.5"><button data-se="1" class="' + BTN_M + '">Edit</button> <button data-sd="1" class="' + BTN_M + '">Del</button></span></div>').join('') || '<i class="text-sm text-dark-300">none</i>') + '</div>'
-          + '<div class="grid gap-3 mt-3 sm:grid-cols-2">'
-          + '<div><label class="' + LBL + '" for="sname">Item name</label><input id="sname" class="' + INP + '"><p class="' + HELP + '">Shown to buyers inside this category.</p></div>'
-          + '<div><label class="' + LBL + '" for="sunits">Price (units)</label><input id="sunits" class="' + INP + '" value="1" inputmode="decimal"><p class="' + HELP + '">Multiplied by your currency rate for the buyer price.</p></div>'
-          + '<div><label class="' + LBL + '" for="sdesc">Description (shown before buy)</label>' + fmtBar('sdesc') + '<textarea id="sdesc" rows="2" class="' + TA + '"></textarea></div>'
-          + '<div><label class="' + LBL + '" for="sdone">Message sent to buyer on approval</label>' + fmtBar('sdone') + '<textarea id="sdone" rows="2" class="' + TA + '"></textarea></div>'
-          + '</div><div class="flex gap-2 items-center mt-3"><label class="text-sm text-dark-300 self-center"><input type="checkbox" id="sactive" class="h-4 w-4 accent-primary" checked> active</label>'
-          + '<button id="sadd" class="' + BTN_P + '">Add item</button></div>';
-        if (id != null) {
-          q('csave').onclick = async () => {
-            await j(api + '/service-cats/' + id, {method: 'PUT', body: JSON.stringify({name: q('cname').value,
-              sort: Number(q('csort').value) || 0, active: q('cactive').checked})});
-            loadScats();
-          };
-          q('cdel').onclick = async () => {
-            if (!confirm('Delete category ' + title + '? Items become uncategorized.')) return;
-            try { await j(api + '/service-cats/' + id, {method: 'DELETE'}); q('scatdetail').innerHTML = ''; loadScats(); }
-            catch (e) { alert('Delete failed: ' + e.message); }
-          };
-        }
-        q('sadd').onclick = async () => {
-          await j(api + '/services', {method: 'POST', body: JSON.stringify({name: q('sname').value,
-            cat_id: id, price_units: Number(q('sunits').value) || 0,
-            description: q('sdesc').value, done_text: q('sdone').value, active: q('sactive').checked})});
-          showScat(id);
-        };
-        d.querySelectorAll('[data-sd]').forEach((b) => { b.onclick = async () => {
-          try { await j(api + '/services/' + b.closest('[data-s]').dataset.s, {method: 'DELETE'}); }
-          catch (e) { alert('Delete failed: ' + e.message); }
-          showScat(id); }; });
-        d.querySelectorAll('[data-se]').forEach((b) => { b.onclick = async () => {
-          const s = items.find((x) => x.id === Number(b.closest('[data-s]').dataset.s));
-          q('sname').value = s.name; q('sunits').value = s.price_units || 0;
-          q('sactive').checked = s.active; q('sdesc').value = s.description || '';
-          q('sdone').value = s.done_text || '';
-          q('sadd').textContent = 'Save as new (delete old to replace)';
-        }; });
-        wireFmt(d);
+        const cats = service_cats || [];
+        q('scats').innerHTML = (cats.map((c) =>
+          '<div class="' + ROW + '" data-c="' + c.id + '"><span>' + esc(c.name)
+          + (c.active ? '' : ' · off') + '</span><span class="flex gap-1.5"><button data-ce="1" class="' + BTN_M + '">Edit</button> <button data-cd="1" class="' + BTN_M + '">Del</button></span></div>').join('')
+          || '<i class="text-sm text-dark-300">none</i>');
+        q('svcs').innerHTML = ((services || []).map((s) => {
+          const cn = (cats.find((x) => x.id === s.cat_id) || {}).name || 'Other';
+          return '<div class="' + ROW + '" data-s="' + s.id + '"><span><span class="' + pillFor('pending') + '">' + esc(cn) + '</span> '
+            + esc(s.name) + ' · ' + fmtU(s.price_units) + (s.active ? '' : ' · off') + '</span><span class="flex gap-1.5"><button data-se="1" class="' + BTN_M + '">Edit</button> <button data-sd="1" class="' + BTN_M + '">Del</button></span></div>'; }).join('')
+          || '<i class="text-sm text-dark-300">none</i>');
+        q('scats').querySelectorAll('[data-ce]').forEach((b) => { b.onclick = () => {
+          const c = cats.find((x) => x.id === Number(b.closest('[data-c]').dataset.c)); scatModal(c); }; });
+        q('scats').querySelectorAll('[data-cd]').forEach((b) => { b.onclick = async () => {
+          const c = cats.find((x) => x.id === Number(b.closest('[data-c]').dataset.c));
+          if (!confirm('Delete category ' + c.name + '? Items become uncategorized.')) return;
+          try { await j(api + '/service-cats/' + c.id, {method: 'DELETE'}); loadServices(); }
+          catch (e) { alert('Delete failed: ' + e.message); } }; });
+        q('svcs').querySelectorAll('[data-se]').forEach((b) => { b.onclick = () => {
+          const s = (services || []).find((x) => x.id === Number(b.closest('[data-s]').dataset.s)); svcModal(s, cats); }; });
+        q('svcs').querySelectorAll('[data-sd]').forEach((b) => { b.onclick = async () => {
+          if (!confirm('Delete this item?')) return;
+          try { await j(api + '/services/' + b.closest('[data-s]').dataset.s, {method: 'DELETE'}); loadServices(); }
+          catch (e) { alert('Delete failed: ' + e.message); } }; });
       };
+      q('addscat').onclick = () => scatModal(null);
+      q('addsvc').onclick = async () => { const {service_cats} = await j(api + '/service-cats'); svcModal(null, service_cats || []); };
       const loadUnmapped = async () => {
         const [{orphans, unplanned}, {packages}] = await Promise.all([j(api + '/unmapped'), j(api + '/packages')]);
         const opts = () => '<select data-pick="1" class="' + INP + '" style="width:auto"><option value="">— plan —</option>' + packages.filter((p) =>
