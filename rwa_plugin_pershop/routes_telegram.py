@@ -207,7 +207,11 @@ async def _send_buyer_menu(ctx, shop, tg, chat_id, edit=None) -> None:
             labels.append(L(shop, "services_btn"))
     except Exception:
         pass
-    if (shop.get("referral_text") or "").strip():
+    try:
+        _ref_pct = float(shop.get("referral_percent") or 0)
+    except Exception:
+        _ref_pct = 0
+    if (shop.get("referral_text") or "").strip() or _ref_pct > 0:
         labels.append(L(shop, "referral_btn"))
     tutorial = await ctx.settings.get("tutorial_text", default="")
     if (tutorial or "").strip():
@@ -248,14 +252,12 @@ async def _send_referral(ctx, shop, tg, chat_id, tg_id, edit=None) -> None:
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import ensure_bot_username, fmt_safe
 
-    text = (shop.get("referral_text") or "").strip()
-    if not text:
-        return
     bot_un = await ensure_bot_username(ctx, shop)
     try:
         pct = ("%g" % float(shop.get("referral_percent") or 0))
     except Exception:
         pct = "0"
+    text = (shop.get("referral_text") or "").strip() or L(shop, "referral_default", percent=pct)
     link = f"https://t.me/{bot_un}?start=r_{tg_id}" if bot_un else ""
     text = fmt_safe(text, percent=pct, link=link or f"r_{tg_id}")
     if bot_un:

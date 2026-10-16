@@ -178,14 +178,17 @@ def build_admin_router(ctx):
         return {"shop": row}
 
     @router.get("/shops/default-texts")
-    async def shop_default_texts(_a: AdminUser = Depends(require_permission("pershop", "view"))):
+    async def shop_default_texts(qlang: str = "",
+                                 _a: AdminUser = Depends(require_permission("pershop", "view"))):
         """Builtin defaults for every owner-editable bot text, in the shop's
-        language (or ?lang= override). Powers the ↺ Default buttons."""
-        from rwa_plugin_pershop.lang import L
+        language (or ?lang= override, which is what the UI sends so the
+        dropdown selection wins over the last saved value). Powers the ↺ Default buttons."""
+        from rwa_plugin_pershop.lang import L, normalize_lang
 
         me = owner(_a)
         shop = await shop_for_owner(ctx, me) or {}
-        lang = (shop.get("lang") or "en") if isinstance(shop, dict) else "en"
+        lang = normalize_lang(qlang) if (qlang or "").strip() else ""
+        lang = lang or ((shop.get("lang") or "en") if isinstance(shop, dict) else "en")
         probe = {"lang": lang}
         return {"defaults": {
             "welcome": L(probe, "menu_title"),
@@ -193,7 +196,7 @@ def build_admin_router(ctx):
             "thank_you": L(probe, "tpl_thank_you"),
             "approved": L(probe, "tpl_approved"),
             "denied": L(probe, "tpl_denied"),
-            "referral": "",
+            "referral": L(probe, "referral_default"),
             "support": "",
         }}
 

@@ -287,18 +287,14 @@ window.rwaPluginUI['pershop'] = {
         q('bosel').dataset.cur = k;
         botextShow(k);
       };
-      let defCache = null;
       q('bodef').onclick = () => {
         const map = {welcome: 'welcome', thanks: 'thank_you', approved: 'approved',
           denied: 'denied', referral: 'referral', support: 'support'};
-        const apply = () => {
-          const k = q('bosel').dataset.cur || 'welcome';
-          const v = defCache ? defCache[map[k]] : undefined;
+        const k = q('bosel').dataset.cur || 'welcome';
+        const lng = (q('lang') && q('lang').value) || 'en';
+        j(api + '/shops/default-texts?lang=' + encodeURIComponent(lng)).then(({defaults}) => {
+          const v = defaults ? defaults[map[k]] : undefined;
           if (v !== undefined) { q('botext').value = v; botextCache[k] = v; }
-        };
-        if (defCache) return apply();
-        j(api + '/shops/default-texts').then(({defaults}) => {
-          defCache = defaults || {}; apply();
         }).catch(() => {});
       };
       const loadMine = () => j(api + '/shops/mine').then(({shop}) => {

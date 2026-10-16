@@ -42,9 +42,9 @@ configures the plugin; each admin manages only their own shop.
   (message fan-out), `pershop-poller` every 15 s (active only in polling
   mode).
 - **Database.** A single squashed migration, `pershop_001`, on Alembic branch
-  `plugin_pershop` (see Data model). Post-release schema changes must ship as
-  new revisions (`pershop_002`, …); `pershop_001` must not be edited after
-  installation.
+  `plugin_pershop` (see Data model). It is the only revision: after any
+  installation, further schema changes must ship as new revisions
+  (`pershop_002`, …) instead of editing it.
 
 ---
 
@@ -122,9 +122,11 @@ different currencies coexist on one panel.
    still accepted), denied (`{reason} {username} {plan}`), referral
    (`{percent} {link}`), service descriptions (`{price}`), completion
    texts (`{username}`). Every text has a **↺ Default** button restoring
-   the built-in template in the shop language
-   (`GET /shops/default-texts`). Empty fields fall back to those built-ins
-   automatically.
+   the built-in template in the **currently selected form language**
+   (`GET /shops/default-texts?lang=xx`; no caching, every press refetches).
+   Empty fields fall back to those built-ins automatically — except card
+   details (purely owner data) and the support text (the Request Support
+   button stays hidden until the owner writes contact info).
 6. **Save.** Saving never requires a bot token: texts, currency, catalog,
    and matching can be configured first and the bot connected later (or after
    a disconnect). When a token is supplied, it is stored Fernet-encrypted; the plugin generates the
@@ -291,7 +293,10 @@ use inline buttons on their own message.
   sets a **reward %** on the Shops tab (`0` = off): every approved
   purchase by an invited buyer credits that percentage of the order's
   **cash-paid** units to the inviter's **non-withdrawable balance**,
-  spendable on any package or service. Balance-funded portions earn no
+  spendable on any package or service. The Referral Program button appears
+  as soon as a reward is set, even with no custom pitch: an empty
+  referral text falls back to a builtin pitch carrying `{percent}`,
+  with the invite link appended automatically; custom text overrides it. Balance-funded portions earn no
   reward. Balances display as converted money only. The inviter receives
   a DM per reward; `referral_earned` in the owner stats totals program
   payouts. No reward is minted for denied/withdrawn orders. Credit spent

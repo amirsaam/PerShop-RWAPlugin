@@ -1,9 +1,10 @@
 """Initial shop schema. Own Alembic branch: plugin_pershop.
 
-Squashed pre-release (nothing installed yet): shops, tiers, packages,
-orders, subs, sessions, referrals + notifier/order lookup indexes.
-Post-release changes must go in NEW revisions (pershop_002, ...) for
-compatibility with installed databases.
+Single squashed migration (nothing installed anywhere yet): shops, tiers,
+packages, service cats/items, orders, subs, sessions, referrals, buyers,
+scammers, test claims, broadcasts + lookup indexes.
+Once any server has installed this plugin, pershop_001 must NOT be edited;
+ship further schema changes as new revisions (pershop_002, ...) instead.
 """
 revision = "pershop_001"
 down_revision = None
@@ -37,6 +38,7 @@ def upgrade() -> None:
             support_text TEXT NOT NULL DEFAULT '',
             webhook_secret TEXT,
             pending_nag_hours INT NOT NULL DEFAULT 6,
+            tiers_internal BOOLEAN NOT NULL DEFAULT FALSE,
             public_key_hash TEXT UNIQUE,
             public_key_enc TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -76,6 +78,7 @@ def upgrade() -> None:
             traffic_reset BOOLEAN NOT NULL DEFAULT TRUE,
             effect TEXT NOT NULL DEFAULT 'full',
             scope_tier_id BIGINT REFERENCES plugin_pershop_tiers(id),
+            sort INTEGER NOT NULL DEFAULT 0,
             active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
@@ -183,6 +186,7 @@ def upgrade() -> None:
             lang TEXT NOT NULL DEFAULT 'en',
             scam_noted_at TIMESTAMPTZ,
             credit_units NUMERIC NOT NULL DEFAULT 0,
+            last_mid BIGINT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (shop_id, tg_id)
         )

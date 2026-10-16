@@ -265,7 +265,7 @@ async def reset_all(ctx) -> dict:
                 pass
     try:
         await ctx.db.execute(
-            "DELETE FROM alembic_version WHERE version_num IN ('pershop_001','pershop_002')")
+            "DELETE FROM alembic_version WHERE version_num = 'pershop_001'")
     except Exception:
         pass
     keys = list(_PERSHOP_SETTING_KEYS)

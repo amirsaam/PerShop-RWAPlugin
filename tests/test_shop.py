@@ -55,7 +55,7 @@ class FakeDB:
         self.svc_cats = {}
         self.svcs = {}
         self.bcs = {}
-        self.versions = {"pershop_001", "pershop_002"}  # fake alembic_version rows
+        self.versions = {"pershop_001"}  # fake alembic_version rows
         self.dropped = False
         self.seq = {"shop": 0, "pkg": 0, "order": 0, "sub": 0, "tier": 0,
                     "scat": 0, "svc": 0, "bc": 0}
@@ -1721,7 +1721,8 @@ async def _menu_flow():
     await txt("🆘 Request Support")
     assert "@support" in texts()[-1], texts()[-1]
     # disabled test + unconfigured texts hide their panel buttons
-    shop.update({"test_enabled": False, "referral_text": "", "support_text": ""})
+    shop.update({"test_enabled": False, "referral_text": "", "referral_percent": 0,
+                 "support_text": ""})
     await ctx.settings.set("tutorial_text", "")
     FakeTg.instances.clear()
     await txt("/start")
@@ -1768,6 +1769,10 @@ async def _referral_cards_flow():
         return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
                 if m in ("sendMessage", "editMessageText")]
 
+    def rms():
+        return [p["rm"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText") and p.get("rm")]
+
     await txt("👥 Referral Program")
     assert "t.me/vipshopbot?start=r_111" in texts()[-1], texts()[-1]
     assert "10" in texts()[-1], texts()[-1]
@@ -1795,6 +1800,14 @@ async def _referral_cards_flow():
         assert needle in bought, bought
     renewed = svc.message_text(shop, "renewed", username="vip-alice", **card)
     assert "Expire Date" in renewed and "Monthly" in renewed, renewed
+    # empty owner text + reward % set: builtin default pitch, button still shows
+    shop["referral_text"] = ""
+    FakeTg.instances.clear()
+    await txt("/start")
+    assert "Referral Program" in str(rms()[-1]), str(rms()[-1])
+    await txt("👥 Referral Program")
+    assert "earn 10%" in texts()[-1], texts()[-1]
+    assert "t.me/vipshopbot?start=r_111" in texts()[-1], texts()[-1]
     assert svc.fmt_safe("Thanks {username}!", username="alice") == "Thanks alice!"
     assert "{unknown}" in svc.fmt_safe("Hi {unknown}!", username="alice")
     print("REFERRAL CARDS FLOW PASSED")
