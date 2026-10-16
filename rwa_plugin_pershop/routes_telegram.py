@@ -107,6 +107,17 @@ async def _show(ctx, shop, tg, chat_id: int, mid: int | None, text: str,
     anchors. Returns the message id now showing the screen (or None). Never raises."""
     from rwa_plugin_pershop.service import get_last_mid, set_last_mid
 
+    # Transport-level guarantee: Telegram rejects empty message text, and a
+    # rejected send surfaces as total bot silence. An empty screen can never
+    # be intentional, so fall back to the menu title instead of sending "".
+    if not (text or "").strip():
+        try:
+            from rwa_plugin_pershop.lang import L as _LG
+
+            text = _LG(shop, "menu_title") or "Main menu"
+        except Exception:
+            text = "Main menu"
+
     sid = shop.get("id") if isinstance(shop, dict) else None
     if mid:
         try:

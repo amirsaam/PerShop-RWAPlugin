@@ -3584,6 +3584,67 @@ def test_admin_preview_flow():
     asyncio.run(_admin_preview_flow())
 
 
+async def _empty_texts_flow():
+    """A shop saved with every text blank must still answer every screen:
+    builtin defaults fill in, and no empty message text ever goes out
+    (Telegram rejects those, which surfaces as total bot silence)."""
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.service as svc
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.lang import LOCALES
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _legacy = make_shop(db)
+    tid, pid = make_stepped(db, sid)
+    shop = db.shops[sid]
+    shop["lang"] = "fa"
+    for k in ("card_text", "welcome_text", "thank_you_text", "approved_text",
+              "denied_text", "referral_text", "support_text"):
+        shop[k] = ""
+    shop["referral_percent"] = 0
+    panel = FakePanel()
+    svc._panel_client = lambda: panel
+    FakeTg.instances.clear()
+
+    async def txt(text, uid=111, un="alice"):
+        await handle_update(ctx, shop, {"update_id": 500, "message": {
+            "message_id": 9, "from": {"id": uid, "username": un},
+            "chat": {"id": uid}, "text": text}})
+
+    async def cb(data, cid, uid=111, un="alice"):
+        await handle_update(ctx, shop, {"update_id": 501, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    fa = LOCALES["fa"]
+    await txt("/start")
+    await txt(fa["buy_subs_btn"])
+    await cb(f"tiers:{tid}", "e1")
+    await cb(f"buy:{pid}", "e2")
+    await cb("hnext", "e3")
+    await cb("stconfirm", "e4")
+    await txt("receipt-empty-test")
+    o = max(db.orders.values(), key=lambda x: x["id"])
+    assert o["buyer_tg_id"] == 111 and o["status"] == "pending", o
+    await cb(f"approve:{o['id']}", "e5", uid=999, un="owner")
+    assert db.orders[o["id"]]["status"] == "approved", db.orders[o["id"]]
+    bad = [(m, (p.get("text") or "")[:40]) for inst in FakeTg.instances
+           for m, p in inst.sent
+           if m in ("sendMessage", "editMessageText") and not (p.get("text") or "").strip()]
+    assert not bad, bad
+    print("EMPTY TEXTS FLOW PASSED")
+
+
+def test_empty_texts_flow():
+    asyncio.run(_empty_texts_flow())
+
+
 if __name__ == "__main__":
     test_naming()
     test_templates()
@@ -3622,3 +3683,4 @@ if __name__ == "__main__":
     test_edit_place_flow()
     test_shop_admin_flow()
     test_admin_preview_flow()
+    test_empty_texts_flow()
