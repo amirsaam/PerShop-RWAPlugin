@@ -1364,6 +1364,16 @@ async def is_scammer(ctx, tg_id: int):
         return None
 
 
+async def list_scammers(ctx) -> list:
+    """All network-wide scammer flags, ordered by telegram id. Never raises."""
+    try:
+        rows = await ctx.db.fetch(
+            "SELECT tg_id, marked_by_admin, reason FROM plugin_pershop_scammers ORDER BY tg_id")
+        return [dict(r) for r in (rows or [])]
+    except Exception:
+        return []
+
+
 async def unmark_scammer(ctx, tg_id: int) -> bool:
     """Remove a network-wide scammer flag (second chances). Returns True
     when a flag existed. Never raises."""

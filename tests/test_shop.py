@@ -114,6 +114,8 @@ class FakeDB:
         if "FROM plugin_pershop_packages WHERE id" in q:
             p = self.pkgs.get(a[0])
             return [p] if p else []
+        if "FROM plugin_pershop_scammers ORDER BY" in q:
+            return sorted(self.scammers.values(), key=lambda r: r["tg_id"])
         if "FROM plugin_pershop_scammers WHERE tg_id" in q:
             r = self.scammers.get(a[0])
             return [r] if r else []
@@ -2195,6 +2197,9 @@ async def _followup6_flow():
     oids = [oid for oid, o in db.orders.items() if o["buyer_tg_id"] == 111]
     await svc.mark_scammer(ctx, oids[0], "admin1")
     assert 111 in db.scammers, db.scammers
+    flags = await svc.list_scammers(ctx)
+    assert [f["tg_id"] for f in flags] == [111], flags
+    assert flags[0]["marked_by_admin"] == "admin1", flags
     assert await svc.unmark_scammer(ctx, 111) is True
     assert await svc.unmark_scammer(ctx, 111) is False
     assert 111 not in db.scammers, db.scammers

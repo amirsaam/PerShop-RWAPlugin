@@ -60,7 +60,7 @@ window.rwaPluginUI['pershop'] = {
         + '<div class="grid gap-4 sm:grid-cols-4">'
         + '<div><label class="' + LBL + '" for="tdays">Duration (days)</label><input id="tdays" inputmode="numeric" class="' + INP + '" value="' + esc(d.test_duration_days == null ? 1 : d.test_duration_days) + '"></div>'
         + '<div><label class="' + LBL + '" for="tgb">Traffic GB (0 = unlimited)</label><input id="tgb" inputmode="numeric" class="' + INP + '" value="' + esc(d.test_traffic_gb == null ? 1 : d.test_traffic_gb) + '"></div>'
-        + '<div><label class="' + LBL + '" for="tsquad">Squad UUID (blank = panel default)</label><input id="tsquad" class="' + INP + '" placeholder="internal squad uuid" value="' + esc(d.test_squad_uuid || '') + '"></div>'
+        + '<div><label class="' + LBL + '" for="tsquad">Test squad</label><select id="tsquad" class="' + INP + '"><option value="">panel default</option></select><p class="' + HELP + '">Trial accounts join the selected internal squad.</p></div>'
         + '<div><label class="' + LBL + '" for="thwid">HWID limit (blank = panel default)</label><input id="thwid" inputmode="numeric" class="' + INP + '" value="' + esc(d.test_hwid == null ? '' : d.test_hwid) + '"></div>'
         + '</div></div>'
         + '<div><label class="' + LBL + '" for="base">Panel public URL</label>'
@@ -68,6 +68,20 @@ window.rwaPluginUI['pershop'] = {
         + '<p class="' + HELP + '">HTTPS origin — the plugin points each bot at itself, no manual setWebhook needed.</p></div>'
         + '<div class="flex items-center gap-3"><button id="save" class="' + BTN_P + '">Save settings</button><span id="msg" class="text-sm text-dark-300"></span></div>'
         + '</div>';
+      j(api + '/squads').then(({squads}) => {
+        const sel = q('tsquad');
+        (squads || []).forEach((s) => {
+          const o = document.createElement('option');
+          o.value = s.uuid; o.textContent = s.name || s.uuid;
+          if (s.uuid === (d.test_squad_uuid || '')) o.selected = true;
+          sel.appendChild(o);
+        });
+        if (d.test_squad_uuid && ![...sel.options].some((o) => o.value === d.test_squad_uuid)) {
+          const o = document.createElement('option');
+          o.value = d.test_squad_uuid; o.textContent = d.test_squad_uuid + ' (removed?)'; o.selected = true;
+          sel.appendChild(o);
+        }
+      }).catch(() => {});
       q('save').onclick = async () => {
         try {
           await j(api + '/plugin-settings', {method: 'PUT', body: JSON.stringify({polling_enabled: q('poll').checked,
@@ -108,7 +122,11 @@ window.rwaPluginUI['pershop'] = {
         + '<textarea id="bctext" rows="4" class="' + TA + '" placeholder="Message for EVERY buyer, in your buyers language. HTML tags allowed: <b> <i> <u> <s> <code> <a href=&quot;...&quot;>"></textarea>'
         + '<input id="bcphoto" type="file" accept="image/*" class="text-sm text-dark-300"><div id="bcsize" class="text-xs text-dark-400"></div>'
         + '<div><button id="bcsend" class="' + BTN_P + '">Queue broadcast</button></div><div id="bcstat" class="text-xs text-dark-300"></div></div></div>'
-        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Buyer lookup — balances &amp; flags</h2><p class="text-xs text-dark-400 mb-3">Settles “I had credit!” disputes.</p><div class="flex gap-2 max-w-xl"><input id="bq" inputmode="numeric" class="' + INP + '" placeholder="telegram id (blank = all)"> <button id="bgo" class="' + BTN_S + '">Look up</button></div><div id="bout" class="text-sm text-dark-300 mt-3"></div></div>'
+        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Buyers — scammer flags &amp; credit balances</h2>'
+        + '<p class="text-xs text-dark-400 mb-3">Network-wide scammer flags are shared across all shops on this panel. Credit balances are per-shop.</p>'
+        + '<div class="flex gap-2 max-w-xl mb-4"><input id="bq" inputmode="numeric" class="' + INP + '" placeholder="filter by telegram id"> <button id="bgo" class="' + BTN_S + '">Filter</button></div>'
+        + '<h3 class="text-sm font-semibold text-white mb-2">Flagged as scammer</h3><div id="scamlist" class="text-sm text-dark-300 mb-4"><i>loading…</i></div>'
+        + '<h3 class="text-sm font-semibold text-white mb-2">Credit balances</h3><div id="creditlist" class="text-sm text-dark-300"><i>loading…</i></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">External API — reuse the bot catalog elsewhere</h2><div class="max-w-xl">'
         + '<p class="text-xs text-dark-400 mb-3">Read-only JSON of exactly what buyers see (tiers, packages, services, converted prices) for your own website or widget. Send it as <code>X-Shop-Key</code> header or <code>?key=</code>. Anyone holding the key can read the catalog — rotate it if it leaks.</p>'
         + '<button id="xshow" class="' + BTN_M + '">Show my key</button><div id="xout" class="text-sm mt-3 break-all"></div></div></div>';
@@ -142,7 +160,11 @@ window.rwaPluginUI['pershop'] = {
         }).catch(() => { q('all').textContent = 'Unavailable.'; });
       }
       j(api + '/shops/mine').then(({shop}) => {
-        if (!shop) return;
+        if (!shop) {
+          const note = '<i>Save your shop above first — tiers, packages and services unlock after setup.</i>';
+          q('tiers').innerHTML = note; q('scats').innerHTML = note;
+          return;
+        }
         shopCache = shop;
         renderStats();
         q('prefix').value = shop.prefix || ''; q('tgid').value = shop.admin_tg_id || '';
@@ -186,13 +208,33 @@ window.rwaPluginUI['pershop'] = {
           shopCache = Object.assign(shopCache || {}, {currency_label: body.currency_label, unit_rate: body.unit_rate});
         } catch (e) { alert('Save failed: ' + e.message); }
       };
-      q('bgo').onclick = async () => {
+      const loadBuyers = async () => {
+        const needle = q('bq').value.trim();
         try {
-          const {buyers} = await j(api + '/buyers?search=' + encodeURIComponent(q('bq').value.trim()));
-          q('bout').innerHTML = buyers.map((b) => '<div class="' + ROW + '"><span>tg <b>' + b.tg_id + '</b> · balance ' + esc(fmtU(b.credit_units))
-            + ' · lang ' + esc(b.lang) + ' · subs ' + b.subs + (b.flagged ? ' · 🚫 scammer' : '') + '</span></div>').join('') || '<i>none</i>';
-        } catch (e) { q('bout').textContent = 'Error: ' + e.message; }
+          const [{scammers}, {buyers}] = await Promise.all([
+            j(api + '/scammers'),
+            j(api + '/buyers?search=' + encodeURIComponent(needle)),
+          ]);
+          const scams = (scammers || []).filter((s) => !needle || String(s.tg_id).includes(needle));
+          q('scamlist').innerHTML = scams.map((s) => '<div class="' + ROW + '"><span>tg <b>' + s.tg_id + '</b> · 🚫 '
+            + esc(s.reason || 'no reason') + ' <span class="text-dark-400">(by ' + esc(s.marked_by_admin || '?') + ')</span></span>'
+            + '<button data-unscam="' + s.tg_id + '" class="' + BTN_M + '">Unmark</button></div>').join('') || '<i>none</i>';
+          const credited = (buyers || []).filter((b) => Number(b.credit_units) > 0);
+          q('creditlist').innerHTML = credited.map((b) => '<div class="' + ROW + '"><span>tg <b>' + b.tg_id + '</b> · balance '
+            + esc(fmtU(b.credit_units)) + ' · lang ' + esc(b.lang) + ' · subs ' + b.subs + (b.flagged ? ' · 🚫 scammer' : '') + '</span></div>').join('')
+            || (needle ? '<i>this buyer holds no credit — disputes settled, nothing owed</i>' : '<i>nobody holds credit right now</i>');
+          q('scamlist').querySelectorAll('[data-unscam]').forEach((b) => { b.onclick = async () => {
+            if (!confirm('Remove the network-wide scammer flag for tg ' + b.dataset.unscam + '?')) return;
+            try { await j(api + '/scammers/' + b.dataset.unscam, {method: 'DELETE'}); loadBuyers(); }
+            catch (e) { alert('Unmark failed: ' + e.message); }
+          }; });
+        } catch (e) {
+          q('scamlist').textContent = 'Error: ' + e.message;
+          q('creditlist').textContent = '';
+        }
       };
+      q('bgo').onclick = loadBuyers;
+      loadBuyers();
       const bcTags = {b: ['<b>', '</b>'], i: ['<i>', '</i>'], u: ['<u>', '</u>'],
         s: ['<s>', '</s>'], code: ['<code>', '</code>'], link: ['<a href="URL">', '</a>']};
       el.querySelector('#tabbody').querySelectorAll('[data-t]').forEach((b) => { b.onclick = () => {

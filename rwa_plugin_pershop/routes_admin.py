@@ -804,6 +804,13 @@ def build_admin_router(ctx):
                 break
         return {"buyers": out}
 
+    @router.get("/scammers")
+    async def scammers_list(_a: AdminUser = Depends(require_permission("pershop", "view"))):
+        """Network-wide scammer flags (all shops share the list)."""
+        from rwa_plugin_pershop.service import list_scammers
+
+        return {"scammers": await list_scammers(ctx)}
+
     @router.delete("/scammers/{tg_id}")
     async def scammer_unmark(tg_id: int, _a: AdminUser = Depends(require_permission("pershop", "moderate"))):
         """Remove a network-wide scammer flag (second chances)."""
