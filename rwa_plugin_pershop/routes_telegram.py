@@ -176,6 +176,24 @@ async def _show(ctx, shop, tg, chat_id: int, mid: int | None, text: str,
         except Exception:
             pass
         return None
+    if not new_mid:
+        # Telegram answered HTTP 200 with ok:false (no exception raised), so
+        # there is nothing to show and nothing was logged until now.
+        try:
+            _shop = shop.get("prefix") if isinstance(shop, dict) else None
+            ctx.logger.error(
+                "shop.send_empty_result shop=%s chat=%s len=%d preview=%r"
+                % (_shop, chat_id, len(text or ""), (text or "")[:160]))
+        except Exception:
+            pass
+        return None
+    try:
+        _shop = shop.get("prefix") if isinstance(shop, dict) else None
+        ctx.logger.info(
+            "shop.screen_sent shop=%s chat=%s mid=%s len=%d"
+            % (_shop, chat_id, new_mid, len(text or "")))
+    except Exception:
+        pass
     await set_last_mid(ctx, sid, chat_id, new_mid)
     return new_mid
 
