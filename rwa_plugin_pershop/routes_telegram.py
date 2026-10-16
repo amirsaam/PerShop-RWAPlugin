@@ -18,9 +18,9 @@ async def handle_update(ctx, shop: dict, update: dict) -> None:
               if cb else (msg.get("from") or {}).get("id"))
     what = (cb.get("data") or "") if cb else (msg.get("text") or "")[:60]
     try:
-        ctx.logger.info("shop.update_in",
-                        extra={"shop": (shop or {}).get("prefix"), "sender": sender,
-                               "kind": "cb" if cb else "msg", "what": what})
+        ctx.logger.info(
+            "shop.update_in shop=%s sender=%s kind=%s what=%r"
+            % ((shop or {}).get("prefix"), sender, "cb" if cb else "msg", what))
     except Exception:
         pass
     try:
@@ -46,11 +46,11 @@ async def handle_update(ctx, shop: dict, update: dict) -> None:
         try:
             import traceback as _tb
 
-            ctx.logger.error("shop.update_failed",
-                             extra={"shop": (shop or {}).get("prefix"), "sender": sender,
-                                    "kind": "cb" if cb else "msg", "what": what,
-                                    "err": f"{type(e).__name__}: {e}",
-                                    "trace": _tb.format_exc(limit=8)})
+            _err = f"{type(e).__name__}: {e}"
+            ctx.logger.error(
+                "shop.update_failed shop=%s sender=%s kind=%s what=%r err=%s\n%s"
+                % ((shop or {}).get("prefix"), sender, "cb" if cb else "msg",
+                   what, _err, _tb.format_exc(limit=8)))
         except Exception:
             pass
 
@@ -132,9 +132,9 @@ async def _show(ctx, shop, tg, chat_id: int, mid: int | None, text: str,
     # be intentional, so fall back to the menu title instead of sending "".
     if not (text or "").strip():
         try:
-            ctx.logger.warning("shop.empty_screen",
-                               extra={"shop": shop.get("prefix") if isinstance(shop, dict) else None,
-                                      "chat": chat_id})
+            ctx.logger.warning(
+                "shop.empty_screen shop=%s chat=%s"
+                % (shop.get("prefix") if isinstance(shop, dict) else None, chat_id))
         except Exception:
             pass
         try:
@@ -168,11 +168,11 @@ async def _show(ctx, shop, tg, chat_id: int, mid: int | None, text: str,
         new_mid = await tg.send_message(chat_id, text, reply_markup=reply_markup)
     except Exception as e:
         try:
-            ctx.logger.error("shop.send_failed",
-                             extra={"shop": shop.get("prefix") if isinstance(shop, dict) else None,
-                                    "chat": chat_id, "len": len(text or ""),
-                                    "preview": (text or "")[:160],
-                                    "err": f"{type(e).__name__}: {e}"})
+            _shop = shop.get("prefix") if isinstance(shop, dict) else None
+            ctx.logger.error(
+                "shop.send_failed shop=%s chat=%s len=%d preview=%r err=%s"
+                % (_shop, chat_id, len(text or ""), (text or "")[:160],
+                   f"{type(e).__name__}: {e}"))
         except Exception:
             pass
         return None
