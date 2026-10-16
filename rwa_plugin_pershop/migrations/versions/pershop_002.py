@@ -6,7 +6,9 @@
 """
 revision = "pershop_002"
 down_revision = "pershop_001"
-branch_labels = ("plugin_pershop",)
+# NOTE: branch_labels lives only on the branch root (pershop_001).
+# Re-declaring it here makes alembic abort at script-parse time with
+# "Branch name 'plugin_pershop' ... already used".
 depends_on = None
 
 
