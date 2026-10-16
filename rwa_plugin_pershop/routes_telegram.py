@@ -149,6 +149,13 @@ async def _show(ctx, shop, tg, chat_id: int, mid: int | None, text: str,
         try:
             if await tg.edit_text(chat_id, mid, text, reply_markup):
                 await set_last_mid(ctx, sid, chat_id, mid)
+                try:
+                    _shop = shop.get("prefix") if isinstance(shop, dict) else None
+                    ctx.logger.info(
+                        "shop.screen_edited shop=%s chat=%s mid=%s len=%d"
+                        % (_shop, chat_id, mid, len(text or "")))
+                except Exception:
+                    pass
                 return mid
         except Exception:
             pass
@@ -157,6 +164,13 @@ async def _show(ctx, shop, tg, chat_id: int, mid: int | None, text: str,
         if prev and prev != mid:
             try:
                 if await tg.edit_text(chat_id, prev, text, reply_markup):
+                    try:
+                        _shop = shop.get("prefix") if isinstance(shop, dict) else None
+                        ctx.logger.info(
+                            "shop.screen_edited shop=%s chat=%s mid=%s len=%d"
+                            % (_shop, chat_id, prev, len(text or "")))
+                    except Exception:
+                        pass
                     return prev
             except Exception:
                 pass
