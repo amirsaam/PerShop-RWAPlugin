@@ -338,7 +338,7 @@ async def _send_svc_contract(ctx, shop, tg, sender, svc, note, back,
              "total_units": price, "back": back, "credit": bool(use_credit)}
     await _set_session(ctx, shop["id"], sender, "buyer",
                        f"await_summary:svc:{svc['id']}", saved)
-    await tg.send_message(sender, "\n".join(lines), reply_markup=kb(
+    await tg.send_message(sender, "\n\n".join(lines), reply_markup=kb(
         [[{"text": L(shop, "contract_pay_btn"), "callback_data": "stconfirm"}]]
         + credit_row +
         [[{"text": L(shop, "back_btn"), "callback_data": back}]]))
@@ -1151,7 +1151,7 @@ async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back=
              "hwid": hwid_value, "total_units": pv["price_units"], "back": back,
              "credit": bool(use_credit)}
     await _set_session(ctx, shop["id"], sender, "buyer", f"await_summary:{pkg['id']}", saved)
-    await tg.send_message(sender, "\n".join(lines), reply_markup=kb(
+    await tg.send_message(sender, "\n\n".join(lines), reply_markup=kb(
         [[{"text": L(shop, "contract_pay_btn"), "callback_data": "stconfirm"}]]
         + credit_row +
         [[{"text": L(shop, "back_btn"), "callback_data": back}]]))

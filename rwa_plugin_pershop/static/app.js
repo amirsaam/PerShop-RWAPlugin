@@ -45,7 +45,8 @@ window.rwaPluginUI['pershop'] = {
       s: ['<s>', '</s>'], code: ['<code>', '</code>'], link: ['<a href="URL">', '</a>']};
     const FMT_NAMES = {b: 'Bold', i: 'Italic', u: 'Underline', s: 'Strike', code: 'Code', link: 'Link'};
     const fmtBar = (id) => '<div class="flex flex-wrap gap-1.5 mb-2">' + Object.keys(FMT_TAGS).map((t) =>
-      '<button data-fmt="' + t + '" data-for="' + id + '" class="' + BTN_M + '">' + FMT_NAMES[t] + '</button>').join('') + '</div>';
+      '<button data-fmt="' + t + '" data-for="' + id + '" class="' + BTN_M + '">' + FMT_NAMES[t] + '</button>').join('')
+      + '<button data-br data-for="' + id + '" class="' + BTN_M + '" title="Insert a blank line">⏎ Break</button></div>';
     const varBar = (id, vars) => (vars && vars.length)
       ? '<div class="flex flex-wrap items-center gap-1.5 mb-2"><span class="text-[11px] text-dark-400">Insert:</span>' + vars.map((v) =>
         '<button data-var="' + v + '" data-for="' + id + '" class="' + BTN_M + '">{' + v + '}</button>').join('') + '</div>' : '';
@@ -58,6 +59,14 @@ window.rwaPluginUI['pershop'] = {
         const s = t.selectionStart || 0, e = t.selectionEnd || 0, v = t.value;
         t.value = v.slice(0, s) + tag[0] + (v.slice(s, e) || 'text') + tag[1] + v.slice(e);
         t.focus();
+      }; });
+      root.querySelectorAll('[data-br]').forEach((b) => { b.onclick = () => {
+        const t = el.querySelector('#' + b.dataset.for);
+        if (!t) return;
+        const s = t.selectionStart || 0, e = t.selectionEnd || 0, v = t.value;
+        t.value = v.slice(0, s) + '\n\n' + v.slice(e);
+        t.focus();
+        t.selectionStart = t.selectionEnd = s + 2;
       }; });
       root.querySelectorAll('[data-var]').forEach((b) => { b.onclick = () => {
         const t = el.querySelector('#' + b.dataset.for);
