@@ -60,6 +60,21 @@ def _owner_shop(shop: dict) -> dict:
     return shop
 
 
+def _card_block(shop: dict) -> str:
+    """Payment/card details as a tappable Telegram code block.
+
+    The owner enters a plain number in the panel; the bot wraps it in
+    <code> automatically so buyers can tap-to-copy. Text that already
+    carries its own formatting is passed through untouched."""
+    import html as _html
+    card = (shop.get("card_text") or "").strip()
+    if not card:
+        return ""
+    if "<code" in card:
+        return card
+    return "<code>" + _html.escape(card) + "</code>"
+
+
 async def _get_session(ctx, shop_id: int, tg_id: int, role: str) -> dict | None:
     return await ctx.db.fetchrow(
         "SELECT * FROM plugin_pershop_sessions WHERE shop_id=$1 AND tg_id=$2 AND role=$3",
@@ -2445,7 +2460,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                                    f"await_receipt:svc:{svc['id']}", dict(saved, pm=mid))
                 pm = await _show(tg, sender, mid,
                     L(shop, "send_receipt_new", pkg=svc["name"],
-                      price=format_price(shop, saved["total_units"]), card=shop["card_text"])
+                      price=format_price(shop, saved["total_units"]), card=_card_block(shop))
                     + credit_note,
                     reply_markup=kb([[{"text": L(shop, "back_btn"), "callback_data": "back:contract"}]]))
                 if pm:
@@ -2480,7 +2495,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             pm = await _show(tg, sender, mid,
                 L(shop, "send_receipt_topup", label=pkg["name"],
                   username=(sub["username"] if sub else saved.get("renew_username") or "?"),
-                  card=shop["card_text"]) + credit_note,
+                  card=_card_block(shop)) + credit_note,
                 reply_markup=kb([[{"text": L(shop, "back_btn"), "callback_data": "back:contract"}]]))
             if pm:
                 await _set_session(ctx, shop["id"], sender, "buyer", f"await_receipt:{pkg['id']}",
@@ -2488,7 +2503,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         pm = await _show(tg, sender, mid,
             L(shop, "send_receipt_new", pkg=pkg["name"],
-              price=format_price(shop, saved["total_units"]), card=shop["card_text"])
+              price=format_price(shop, saved["total_units"]), card=_card_block(shop))
             + credit_note,
             reply_markup=kb([[{"text": L(shop, "back_btn"), "callback_data": "back:contract"}]]))
         if pm:

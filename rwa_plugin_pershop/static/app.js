@@ -18,24 +18,29 @@ window.rwaPluginUI['pershop'] = {
     };
     const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-    // ---- Panel look: Tailwind theme tokens + legacy panel classes (.card/.table/glass-card).
-    // shadcn React components are host-only; these class strings reproduce their look.
-    const BTN_P = 'inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50';
-    const BTN_S = 'inline-flex h-9 items-center justify-center rounded-md bg-secondary px-4 py-2 text-sm font-medium text-secondary-foreground shadow-sm hover:bg-secondary/80 disabled:pointer-events-none disabled:opacity-50';
-    const BTN_D = 'inline-flex h-9 items-center justify-center rounded-md bg-destructive px-4 py-2 text-sm font-medium text-destructive-foreground shadow-sm hover:bg-destructive/90 disabled:pointer-events-none disabled:opacity-50';
-    const BTN_M = 'inline-flex h-8 items-center justify-center rounded-md border border-input bg-background px-3 text-xs font-medium text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50';
-    const INP = 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm';
-    const TA = 'flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm';
-    const LBL = 'mb-1.5 block text-sm font-medium text-white';
-    const HELP = 'mt-1 text-[11px] text-dark-400';
+    // ---- Panel look, copied from the RWA panel itself (web/frontend):
+    // buttons carry the panel glow, inputs/labels/rows use the glass tokens
+    // (border/bg --glass-*, text-dark-*) so every theme + light mode applies.
+    const BTN_P = 'inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-[0_0_20px_-5px_rgba(var(--glow-rgb),0.35)] hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50';
+    const BTN_S = 'inline-flex h-9 items-center justify-center rounded-md bg-[var(--glass-bg)] px-4 py-2 text-sm font-medium text-secondary-foreground border border-[var(--glass-border)] shadow-sm hover:bg-[var(--glass-bg-hover)] disabled:pointer-events-none disabled:opacity-50';
+    const BTN_D = 'inline-flex h-9 items-center justify-center rounded-md bg-destructive px-4 py-2 text-sm font-medium text-destructive-foreground shadow-[0_0_16px_-5px_rgba(239,68,68,0.3)] hover:bg-destructive/90 disabled:pointer-events-none disabled:opacity-50';
+    const BTN_M = 'inline-flex h-8 items-center justify-center rounded-md border border-[var(--glass-border)] bg-[var(--glass-bg)] px-3 text-xs font-medium text-dark-100 shadow-sm hover:bg-[var(--glass-bg-hover)] hover:border-[var(--glass-border-hover)] disabled:pointer-events-none disabled:opacity-50';
+    const INP = 'flex h-9 w-full rounded-md border border-[var(--glass-border)] bg-[var(--glass-bg)] px-3 py-1 text-sm text-dark-50 shadow-sm placeholder:text-dark-200 hover:border-[var(--glass-border-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:border-primary/40';
+    const TA = 'flex min-h-[80px] w-full rounded-md border border-[var(--glass-border)] bg-[var(--glass-bg)] px-3 py-2 text-sm text-dark-50 shadow-sm placeholder:text-dark-200 hover:border-[var(--glass-border-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:border-primary/40';
+    const LBL = 'mb-1.5 block text-sm font-medium text-dark-100';
+    const HELP = 'mt-1 text-[11px] text-dark-300';
     const CARD = 'glass-card p-5';
     const CARD_T = 'text-base font-semibold text-white mb-4';
-    const ROW = 'flex items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground';
-    const PILL = 'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ';
-    const pillFor = (s) => PILL + ({pending: 'bg-amber-500/15 text-amber-400',
-      withdraw_requested: 'bg-orange-500/15 text-orange-400', approved: 'bg-emerald-500/15 text-emerald-400',
-      denied: 'bg-red-500/15 text-red-400', withdrawn: 'bg-gray-500/15 text-gray-400',
-      cancelled: 'bg-gray-500/15 text-gray-400'}[s] || 'bg-gray-500/15 text-gray-400');
+    const SEC_T = 'text-xs font-medium uppercase tracking-wider text-dark-300 mb-2';
+    const ROW = 'flex items-center justify-between gap-2 rounded-md border border-[var(--glass-border)] bg-[var(--glass-bg)] px-3 py-2 text-sm text-dark-100';
+    const PILL = 'inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-medium ';
+    const pillFor = (s) => PILL + ({pending: 'border-yellow-500/30 bg-gradient-to-br from-yellow-500/15 to-yellow-500/10 text-yellow-400',
+      withdraw_requested: 'border-orange-500/30 bg-gradient-to-br from-orange-500/15 to-orange-500/10 text-orange-400',
+      approved: 'border-green-500/30 bg-gradient-to-br from-green-500/15 to-green-500/10 text-green-400',
+      denied: 'border-red-500/30 bg-gradient-to-br from-red-500/15 to-red-500/10 text-red-400',
+      withdrawn: 'border-gray-500/30 bg-gradient-to-br from-gray-500/15 to-gray-500/10 text-gray-400',
+      cancelled: 'border-gray-500/30 bg-gradient-to-br from-gray-500/15 to-gray-500/10 text-gray-400'}[s]
+      || 'border-gray-500/30 bg-gradient-to-br from-gray-500/15 to-gray-500/10 text-gray-400');
 
     // ---- Rich-text helpers: every buyer message sends as Telegram HTML, so all
     // message fields share one formatting toolbar; fields with {variables} also
@@ -48,7 +53,7 @@ window.rwaPluginUI['pershop'] = {
       '<button data-fmt="' + t + '" data-for="' + id + '" class="' + BTN_M + '">' + FMT_NAMES[t] + '</button>').join('')
       + '<button data-br data-for="' + id + '" class="' + BTN_M + '" title="Insert a blank line">⏎ Break</button></div>';
     const varBar = (id, vars) => (vars && vars.length)
-      ? '<div class="flex flex-wrap items-center gap-1.5 mb-2"><span class="text-[11px] text-dark-400">Insert:</span>' + vars.map((v) =>
+      ? '<div class="flex flex-wrap items-center gap-1.5 mb-2"><span class="text-[11px] text-dark-300">Insert:</span>' + vars.map((v) =>
         '<button data-var="' + v + '" data-for="' + id + '" class="' + BTN_M + '">{' + v + '}</button>').join('') + '</div>' : '';
     const wireFmt = (root) => {
       root.querySelectorAll('[data-fmt]').forEach((b) => { b.onclick = () => {
@@ -77,15 +82,16 @@ window.rwaPluginUI['pershop'] = {
         t.selectionStart = t.selectionEnd = s + ins.length;
       }; });
     };
-    const ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 text-emerald-400 shrink-0"><path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/><path d="M2 7h20"/></svg>';
+    const ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5 text-primary-400 shrink-0"><path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/><path d="M2 7h20"/></svg>';
 
     // Panel 5.x mounts this module once on the single route /plugins/:pluginId,
     // so sections are in-module tabs, not separate URLs.
     const renderShell = (tabs, active) => {
       el.innerHTML = '<div class="space-y-6">'
-        + '<div class="flex items-center justify-between gap-3"><div class="flex items-center gap-2 min-w-0">'
-        + ICON + '<h1 class="text-xl sm:text-2xl font-bold text-white truncate">PerShop</h1>'
-        + '</div><span class="text-sm text-dark-300 shrink-0">Telegram shops for panel admins</span></div>'
+        + '<div class="page-header"><div class="flex items-center gap-2 min-w-0">'
+        + ICON + '<div><h1 class="page-header-title">PerShop</h1>'
+        + '<p class="text-muted-foreground mt-1 text-sm">Telegram shops for panel admins</p></div>'
+        + '</div></div>'
         + '<div class="inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground">'
         + tabs.map((t) => '<button data-tab="' + t + '" class="inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all'
           + (t === active ? ' bg-background text-foreground shadow' : ' hover:text-foreground') + '">'
@@ -108,7 +114,7 @@ window.rwaPluginUI['pershop'] = {
     const renderSettingsBody = (info) => {
       const d = info || {};
       q('tabbody').innerHTML = '<div class="' + CARD + '">'
-        + '<h2 class="' + CARD_T + '">Plugin Settings <span class="text-xs font-normal text-dark-400">superadmin only · applies to every shop</span></h2>'
+        + '<h2 class="' + CARD_T + '">Plugin Settings <span class="text-xs font-normal text-dark-300">superadmin only · applies to every shop</span></h2>'
         + '<p class="text-sm text-dark-300 mb-5">Version: ' + esc(d.version) + ' · Shops: ' + d.counts.shops
         + ' · Pending orders: ' + d.counts.pending_orders + ' · Subscriptions: ' + d.counts.subs + '</p>'
         + '<div class="space-y-5">'
@@ -129,8 +135,8 @@ window.rwaPluginUI['pershop'] = {
         + '<p class="' + HELP + '">HTTPS origin — the plugin points each bot at itself, no manual setWebhook needed.</p></div>'
         + '<div class="flex items-center gap-3"><button id="save" class="' + BTN_P + '">Save settings</button><span id="msg" class="text-sm text-dark-300"></span></div>'
         + '</div>'
-        + '<div class="mt-8 border-t border-input pt-5"><h3 class="text-sm font-semibold text-red-400 mb-2">Danger zone</h3>'
-        + '<p class="text-xs text-dark-400 mb-3">Delete every shop, order, subscription, buyer, flag, broadcast and plugin setting. The database tables stay, but everything in them is gone. This cannot be undone.</p>'
+        + '<div class="mt-8 border-t border-[var(--glass-border)] pt-5"><h3 class="text-sm font-semibold text-red-400 mb-2">Danger zone</h3>'
+        + '<p class="text-xs text-dark-300 mb-3">Delete every shop, order, subscription, buyer, flag, broadcast and plugin setting. The database tables stay, but everything in them is gone. This cannot be undone.</p>'
         + '<button id="reset" class="' + BTN_D + '">Reset all PerShop data</button></div>'
         + '</div>';
       j(api + '/squads').then(({squads}) => {
@@ -180,36 +186,37 @@ window.rwaPluginUI['pershop'] = {
         + '<div><label class="' + LBL + '" for="tgid">Admin Telegram ID</label><input id="tgid" inputmode="numeric" class="' + INP + '" placeholder="your numeric id — order alerts arrive here"></div>'
         + '<div><label class="' + LBL + '" for="lang">Bot language</label><select id="lang" class="' + INP + '"><option value="en">English</option><option value="fa">فارسی</option><option value="ru">Русский</option><option value="zh">简体中文</option></select></div>'
         + '<div><label class="' + LBL + '" for="token">Bot token</label><input id="token" type="password" class="' + INP + '" placeholder="paste a BotFather token to connect — blank leaves it as is"></div>'
+        + '<div><label class="' + LBL + '" for="cardnum">Payment / card text</label><input id="cardnum" inputmode="numeric" class="' + INP + '" placeholder="card or account number, e.g. 6037991234567890"><p class="' + HELP + '">Shown to buyers as a tappable box before they send a receipt.</p></div>'
         + '<div><label class="' + LBL + '" for="currency">Currency label</label><input id="currency" class="' + INP + '" placeholder="shown after every price, e.g. تومان"></div>'
         + '<div><label class="' + LBL + '" for="rate">Unit rate</label><input id="rate" inputmode="decimal" class="' + INP + '" placeholder="how much 1 unit costs, e.g. 250000"></div>'
         + '<div><label class="' + LBL + '" for="refpct">Referral reward %</label><input id="refpct" inputmode="decimal" class="' + INP + '" placeholder="0 = off"><p class="' + HELP + '">% of each invited purchase, gifted to the inviter as shop credit.</p></div>'
         + '<div><label class="' + LBL + '" for="naghours">Pending-receipt nudge (hours)</label><input id="naghours" inputmode="numeric" class="' + INP + '" placeholder="6"><p class="' + HELP + '">0 = off — remind me when a receipt waits longer than this.</p></div>'
         + '<div class="sm:col-span-2"><label class="' + LBL + '" for="bosel">Bot texts</label>'
-        + '<select id="bosel" class="' + INP + ' max-w-xs mb-2"><option value="card">Payment / card text</option><option value="welcome">Welcome text</option><option value="thanks">Thank-you text (after receipt)</option><option value="approved">Approved text</option><option value="denied">Denied text</option><option value="referral">Referral program text (blank hides the button)</option><option value="support">Support text (blank hides the button)</option></select>'
+        + '<select id="bosel" class="' + INP + ' max-w-xs mb-2"><option value="welcome">Welcome text</option><option value="thanks">Thank-you text (after receipt)</option><option value="approved">Approved text</option><option value="denied">Denied text</option><option value="referral">Referral program text (blank hides the button)</option><option value="support">Support text (blank hides the button)</option></select>'
         + fmtBar('botext') + '<div id="bovars"></div><textarea id="botext" rows="4" class="' + TA + '"></textarea></div>'
         + '<div class="sm:col-span-2 flex items-start gap-3"><input type="checkbox" id="teston" class="h-4 w-4 mt-1 accent-primary"><div><label for="teston" class="text-sm text-white">Test subscription enabled</label><p class="' + HELP + '">Free trial, one per person across all shops.</p></div></div>'
-        + '</div><div class="flex flex-wrap items-center gap-2 mt-4"><button id="save" class="' + BTN_P + '">Save shop</button><button id="connect" class="' + BTN_S + '">Connect bot</button><button id="disconnect" class="' + BTN_M + '">Disconnect bot</button><span id="sec" class="text-xs text-dark-400"></span></div></div>'
+        + '</div><div class="flex flex-wrap items-center gap-2 mt-4"><button id="save" class="' + BTN_P + '">Save shop</button><button id="connect" class="' + BTN_S + '">Connect bot</button><button id="disconnect" class="' + BTN_M + '">Disconnect bot</button><span id="sec" class="text-xs text-dark-300"></span></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Catalog — tiers → packages</h2><div id="tiers" class="flex flex-wrap gap-2"></div><div id="tierdetail" class="mt-4"></div></div>'
-        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Other Services — categories → items</h2><p class="text-xs text-dark-400 mb-3">Non-VPN sellables. No duration, traffic or device limits.</p><div id="scats" class="flex flex-wrap gap-2"></div><div id="scatdetail" class="mt-4"></div></div>'
+        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Other Services — categories → items</h2><p class="text-xs text-dark-300 mb-3">Non-VPN sellables. No duration, traffic or device limits.</p><div id="scats" class="flex flex-wrap gap-2"></div><div id="scatdetail" class="mt-4"></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Plan matching — users without a plan</h2><div id="unmapped"><button id="uload" class="' + BTN_M + '">Load users</button></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Broadcast — send to all buyers</h2><div class="grid gap-3 max-w-xl">'
         + fmtBar('bctext')
         + '<textarea id="bctext" rows="4" class="' + TA + '" placeholder="Message for EVERY buyer, in your buyers language. HTML tags allowed: <b> <i> <u> <s> <code> <a href=&quot;...&quot;>"></textarea>'
-        + '<input id="bcphoto" type="file" accept="image/*" class="text-sm text-dark-300"><div id="bcsize" class="text-xs text-dark-400"></div>'
+        + '<input id="bcphoto" type="file" accept="image/*" class="text-sm text-dark-300"><div id="bcsize" class="text-xs text-dark-300"></div>'
         + '<div><button id="bcsend" class="' + BTN_P + '">Queue broadcast</button></div><div id="bcstat" class="text-xs text-dark-300"></div></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Buyers — scammer flags &amp; credit balances</h2>'
-        + '<p class="text-xs text-dark-400 mb-3">Network-wide scammer flags are shared across all shops on this panel. Credit balances are per-shop.</p>'
+        + '<p class="text-xs text-dark-300 mb-3">Network-wide scammer flags are shared across all shops on this panel. Credit balances are per-shop.</p>'
         + '<div class="flex gap-2 max-w-xl mb-4"><input id="bq" inputmode="numeric" class="' + INP + '" placeholder="filter by telegram id"> <button id="bgo" class="' + BTN_S + '">Filter</button></div>'
         + '<h3 class="text-sm font-semibold text-white mb-2">Flagged as scammer</h3><div id="scamlist" class="text-sm text-dark-300 mb-4"><i>loading…</i></div>'
         + '<h3 class="text-sm font-semibold text-white mb-2">Credit balances</h3><div id="creditlist" class="text-sm text-dark-300"><i>loading…</i></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">External API — reuse the bot catalog elsewhere</h2><div class="max-w-xl">'
-        + '<p class="text-xs text-dark-400 mb-3">Read-only JSON of exactly what buyers see (tiers, packages, services, converted prices) for your own website or widget. Send it as <code>X-Shop-Key</code> header or <code>?key=</code>. Anyone holding the key can read the catalog — rotate it if it leaks.</p>'
+        + '<p class="text-xs text-dark-300 mb-3">Read-only JSON of exactly what buyers see (tiers, packages, services, converted prices) for your own website or widget. Send it as <code>X-Shop-Key</code> header or <code>?key=</code>. Anyone holding the key can read the catalog — rotate it if it leaks.</p>'
         + '<button id="xshow" class="' + BTN_M + '">Show my key</button><div id="xout" class="text-sm mt-3 break-all"></div></div></div>';
       let shopCache = null, statsCache = null;
       const renderStats = () => {
         if (!statsCache) return;
         const s = statsCache;
-        const cell = (v, l) => '<div class="glass-card p-4"><div class="text-xl font-bold text-white">' + v + '</div><div class="text-xs text-dark-400 mt-0.5">' + l + '</div></div>';
+        const cell = (v, l) => '<div class="glass-card p-4"><div class="text-xl font-bold text-white">' + v + '</div><div class="text-xs text-dark-300 mt-0.5">' + l + '</div></div>';
         q('stats').innerHTML = cell(s.subs_active || 0, 'Active subs') + cell(s.orders_pending || 0, 'Pending orders')
           + cell((s.orders_approved || 0) + ' · ' + (s.units_sold || 0) + 'u', 'Approved · units sold')
           + cell(s.orders_denied || 0, 'Denied') + cell(s.orders_withdrawn || 0, 'Withdrawn')
@@ -243,7 +250,7 @@ window.rwaPluginUI['pershop'] = {
         wireFmt(el);
       };
       q('bosel').onchange = () => {
-        botextCache[q('bosel').dataset.cur || 'card'] = q('botext').value;
+        botextCache[q('bosel').dataset.cur || 'welcome'] = q('botext').value;
         const k = q('bosel').value;
         q('bosel').dataset.cur = k;
         botextShow(k);
@@ -257,11 +264,12 @@ window.rwaPluginUI['pershop'] = {
         shopCache = shop;
         renderStats();
         q('prefix').value = shop.prefix || ''; q('tgid').value = shop.admin_tg_id || '';
-        botextCache = {card: shop.card_text || '', welcome: shop.welcome_text || '',
+        botextCache = {welcome: shop.welcome_text || '',
           thanks: shop.thank_you_text || '', approved: shop.approved_text || '',
           denied: shop.denied_text || '', referral: shop.referral_text || '',
           support: shop.support_text || ''};
-        q('bosel').value = 'card'; q('bosel').dataset.cur = 'card'; botextShow('card');
+        q('bosel').value = 'welcome'; q('bosel').dataset.cur = 'welcome'; botextShow('welcome');
+        q('cardnum').value = shop.card_text || '';
         q('currency').value = shop.currency_label || ''; q('rate').value = shop.unit_rate || '';
         q('teston').checked = !!shop.test_enabled;
         q('refpct').value = shop.referral_percent || 0;
@@ -295,9 +303,9 @@ window.rwaPluginUI['pershop'] = {
       };
       q('save').onclick = async () => {
         try {
-          botextCache[q('bosel').dataset.cur || 'card'] = q('botext').value;
+          botextCache[q('bosel').dataset.cur || 'welcome'] = q('botext').value;
           const body = {prefix: q('prefix').value, admin_tg_id: Number(q('tgid').value), lang: q('lang').value,
-            card_text: botextCache.card, welcome_text: botextCache.welcome,
+            card_text: q('cardnum').value.trim(), welcome_text: botextCache.welcome,
             currency_label: q('currency').value, unit_rate: q('rate').value ? Number(q('rate').value) : null,
             thank_you_text: botextCache.thanks, approved_text: botextCache.approved, denied_text: botextCache.denied,
             test_enabled: q('teston').checked, referral_text: botextCache.referral, support_text: botextCache.support,
@@ -323,7 +331,7 @@ window.rwaPluginUI['pershop'] = {
           ]);
           const scams = (scammers || []).filter((s) => !needle || String(s.tg_id).includes(needle));
           q('scamlist').innerHTML = scams.map((s) => '<div class="' + ROW + '"><span>tg <b>' + s.tg_id + '</b> · 🚫 '
-            + esc(s.reason || 'no reason') + ' <span class="text-dark-400">(by ' + esc(s.marked_by_admin || '?') + ')</span></span>'
+            + esc(s.reason || 'no reason') + ' <span class="text-dark-300">(by ' + esc(s.marked_by_admin || '?') + ')</span></span>'
             + '<button data-unscam="' + s.tg_id + '" class="' + BTN_M + '">Unmark</button></div>').join('') || '<i>none</i>';
           const credited = (buyers || []).filter((b) => Number(b.credit_units) > 0);
           q('creditlist').innerHTML = credited.map((b) => '<div class="' + ROW + '"><span>tg <b>' + b.tg_id + '</b> · balance '
@@ -444,9 +452,9 @@ window.rwaPluginUI['pershop'] = {
             + '</div><div class="flex gap-2 items-center mb-3">'
             + '<label class="text-sm text-dark-300"><input type="checkbox" id="cactive" class="h-4 w-4 accent-primary" ' + ((service_cats.find((x) => x.id === id) || {}).active === false ? '' : 'checked') + '> active</label>'
             + '<button id="csave" class="' + BTN_M + '">Save category</button><button id="cdel" class="' + BTN_M + '">Delete category</button></div>')
-          + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-400 mb-2">Items</h5><div id="svcs" class="space-y-1.5">' + (items.map((s) =>
+          + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Items</h5><div id="svcs" class="space-y-1.5">' + (items.map((s) =>
             '<div class="' + ROW + '" data-s="' + s.id + '"><span>' + esc(s.name) + ' · ' + fmtU(s.price_units)
-            + (s.active ? '' : ' (off)') + '</span><span class="flex gap-1.5"><button data-se="1" class="' + BTN_M + '">Edit</button> <button data-sd="1" class="' + BTN_M + '">Del</button></span></div>').join('') || '<i class="text-sm text-dark-400">none</i>') + '</div>'
+            + (s.active ? '' : ' (off)') + '</span><span class="flex gap-1.5"><button data-se="1" class="' + BTN_M + '">Edit</button> <button data-sd="1" class="' + BTN_M + '">Del</button></span></div>').join('') || '<i class="text-sm text-dark-300">none</i>') + '</div>'
           + '<div class="grid gap-3 mt-3 sm:grid-cols-2">'
           + '<div><label class="' + LBL + '" for="sname">Item name</label><input id="sname" class="' + INP + '"><p class="' + HELP + '">Shown to buyers inside this category.</p></div>'
           + '<div><label class="' + LBL + '" for="sunits">Price (units)</label><input id="sunits" class="' + INP + '" value="1" inputmode="decimal"><p class="' + HELP + '">Multiplied by your currency rate for the buyer price.</p></div>'
@@ -493,12 +501,12 @@ window.rwaPluginUI['pershop'] = {
           + '</select>';
         const row = (uuid, label) => '<div class="' + ROW + '" data-u="' + esc(uuid) + '"><span>' + label + '</span><span class="flex gap-1.5">' + opts()
           + ' <button data-assign="1" class="' + BTN_M + '">Match</button></span></div>';
-        q('unmapped').innerHTML = '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-400 mb-2">Your panel users with no shop plan (' + orphans.length + ')</h5><div class="space-y-1.5 mb-4">'
+        q('unmapped').innerHTML = '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Your panel users with no shop plan (' + orphans.length + ')</h5><div class="space-y-1.5 mb-4">'
           + (orphans.map((o) => row(o.uuid, '👤 ' + esc(o.username)
-            + ' <span class="text-dark-400">' + esc(String(o.uuid).slice(0, 8)) + '</span>')).join('') || '<i class="text-sm text-dark-400">none</i>') + '</div>'
-          + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-400 mb-2">Shop subscriptions with no plan (' + unplanned.length + ')</h5><div class="space-y-1.5">'
+            + ' <span class="text-dark-300">' + esc(String(o.uuid).slice(0, 8)) + '</span>')).join('') || '<i class="text-sm text-dark-300">none</i>') + '</div>'
+          + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Shop subscriptions with no plan (' + unplanned.length + ')</h5><div class="space-y-1.5">'
           + (unplanned.map((s) => row(s.user_uuid, '📦 ' + esc(s.username)
-            + (s.buyer_tg_id ? '' : ' <span class="text-dark-400">not linked</span>'))).join('') || '<i class="text-sm text-dark-400">none</i>') + '</div>';
+            + (s.buyer_tg_id ? '' : ' <span class="text-dark-300">not linked</span>'))).join('') || '<i class="text-sm text-dark-300">none</i>') + '</div>';
         q('unmapped').querySelectorAll('[data-assign]').forEach((b) => { b.onclick = async () => {
           const div = b.closest('[data-u]');
           const pid = div.querySelector('[data-pick]').value;
@@ -527,7 +535,7 @@ window.rwaPluginUI['pershop'] = {
           + '</div><div class="flex gap-2 items-center mb-3">'
           + '<label class="text-sm text-dark-300"><input type="checkbox" id="tactive" class="h-4 w-4 accent-primary" ' + (t.active ? 'checked' : '') + '> active</label>'
           + '<button id="tsave" class="' + BTN_M + '">Save tier</button><button id="tdel" class="' + BTN_M + '">Delete tier</button></div>'
-          + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-400 mb-2">Packages</h5><div id="pkgs" class="space-y-1.5">' + (pkgs.map((p) =>
+          + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Packages</h5><div id="pkgs" class="space-y-1.5">' + (pkgs.map((p) =>
             '<div class="' + ROW + '" data-p="' + p.id + '"><span>' + esc(p.name) + ' · '
             + (Number(p.duration_days) === 0 ? 'never expires · ' : p.duration_days + 'd · ')
             + (p.traffic_limit_bytes ? (p.traffic_limit_bytes / 1073741824) + 'GB · ' : 'unlimited · ')
@@ -535,7 +543,7 @@ window.rwaPluginUI['pershop'] = {
             + ' · ' + esc({full: 'full plan', time_only: 'time top-up', traffic_only: 'traffic top-up'}[p.effect] || 'full plan')
             + (p.scope_tier_id ? ' · only ' + esc((tiers.find((x) => x.id === p.scope_tier_id) || {}).name || ('tier ' + p.scope_tier_id)) : '')
             + (p.traffic_reset === false ? ' · topup' : '') + (p.active ? '' : ' (off)')
-            + '</span><span class="flex gap-1.5"><button data-pe="1" class="' + BTN_M + '">Edit</button> <button data-pd="1" class="' + BTN_M + '">Del</button></span></div>').join('') || '<i class="text-sm text-dark-400">none</i>') + '</div>'
+            + '</span><span class="flex gap-1.5"><button data-pe="1" class="' + BTN_M + '">Edit</button> <button data-pd="1" class="' + BTN_M + '">Del</button></span></div>').join('') || '<i class="text-sm text-dark-300">none</i>') + '</div>'
           + '<div class="grid gap-3 sm:grid-cols-2 mt-3">'
           + '<div><label class="' + LBL + '" for="pname">Package name</label><input id="pname" class="' + INP + '"><p class="' + HELP + '">Shown to buyers inside this tier.</p></div>'
           + '<div><label class="' + LBL + '" for="pdays">Duration (days)</label><input id="pdays" class="' + INP + '" value="30" inputmode="numeric"><p class="' + HELP + '">0 = never expires (∞).</p></div>'
@@ -659,11 +667,11 @@ window.rwaPluginUI['pershop'] = {
             + '<td>@' + esc(o.buyer_username) + (o.buyer_flagged ? ' 🚫 <button data-a="unscam" data-tg="' + o.buyer_tg_id + '" class="' + BTN_M + '">Unmark</button>' : '') + '</td>'
             + '<td>' + (o.total_units != null ? esc(String(o.total_units)) + 'u' : '—') + '</td>'
             + '<td>' + (o.renew_username ? 'renew ' + esc(o.renew_username) : 'new') + '</td>'
-            + '<td>' + (o.status === 'withdraw_requested' ? '<span class="' + pillFor('withdraw_requested') + '">withdraw requested</span><div class="text-xs text-dark-400 mt-1">reason: ' + esc(o.withdraw_reason || '') + ' · refund to: ' + esc(o.withdraw_card || '') + ' (decide in the bot DM)</div>'
+            + '<td>' + (o.status === 'withdraw_requested' ? '<span class="' + pillFor('withdraw_requested') + '">withdraw requested</span><div class="text-xs text-dark-300 mt-1">reason: ' + esc(o.withdraw_reason || '') + ' · refund to: ' + esc(o.withdraw_card || '') + ' (decide in the bot DM)</div>'
               : '<span class="' + pillFor(o.status) + '">' + esc(o.status) + '</span>') + '</td>'
             + '<td class="whitespace-nowrap">' + (status === 'pending' && o.status === 'pending'
               ? '<button data-a="ok" class="' + BTN_M + '">Approve</button> <button data-a="no" class="' + BTN_M + '">Deny</button>' : '') + '</td></tr>').join('')
-          + '</tbody></table></div>' : '<i class="text-sm text-dark-400">none</i>';
+          + '</tbody></table></div>' : '<i class="text-sm text-dark-300">none</i>';
         q('o').querySelectorAll('button').forEach((b) => { b.onclick = async () => {
           const id = b.closest('[data-id]').dataset.id;
           if (b.dataset.a === 'ok') await j(api + '/orders/' + id + '/approve', {method: 'POST'});

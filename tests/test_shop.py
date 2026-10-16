@@ -867,6 +867,9 @@ async def _full():
                                                                       "data": "buy:1"}})
     await handle_update(ctx, shop, {"update_id": 20, "callback_query": {"id": "c1b", "from": {"id": 111},
                                                                       "data": "stconfirm"}})
+    _prompt = [p["text"] for inst in FakeTg.instances for _, p in inst.sent
+               if isinstance(p, dict) and "text" in p]
+    assert any("<code>pay here</code>" in t for t in _prompt), "card not auto-wrapped as code block"
     await handle_update(ctx, shop, {"update_id": 3, "message": {"message_id": 5, "from": {"id": 111, "username": "alice"},
                                                                "chat": {"id": 111}, "text": "receipt-xyz"}})
     new_orders = [o for o in db.orders.values() if o["status"] == "pending"]
