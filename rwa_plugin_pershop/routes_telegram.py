@@ -304,7 +304,15 @@ async def _send_buyer_menu(ctx, shop, tg, chat_id, edit=None) -> None:
         # panel is already up, so only the text is refreshed in place.
         await _show(ctx, shop, tg, chat_id, edit, text)
     else:
-        await tg.send_message(chat_id, text, reply_markup=reply_kb(rows))
+        menu_mid = await tg.send_message(chat_id, text, reply_markup=reply_kb(rows))
+        # Track it: without this, later taps keep editing a stale message
+        # from a previous session while this fresh menu sits unchanged.
+        try:
+            from rwa_plugin_pershop.service import set_last_mid as _slm
+
+            await _slm(ctx, shop.get("id"), chat_id, menu_mid)
+        except Exception:
+            pass
 
 
 async def _send_test_offer(ctx, shop, tg, sender, edit=None) -> None:

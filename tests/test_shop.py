@@ -3624,6 +3624,8 @@ async def _empty_texts_flow():
 
     fa = LOCALES["fa"]
     await txt("/start")
+    menu_mid = 1000 + FakeTg._mid
+    assert db.last_mids.get((sid, 111)) == menu_mid, db.last_mids
     await txt(fa["buy_subs_btn"])
     await cb(f"tiers:{tid}", "e1")
     await cb(f"buy:{pid}", "e2")
