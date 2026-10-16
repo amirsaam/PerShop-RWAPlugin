@@ -28,6 +28,9 @@ class ShopIn(BaseModel):
     # Hours a pending receipt may wait before the owner gets a Telegram
     # nudge (0 = off). Re-nudged every window until decided.
     pending_nag_hours: int = Field(default=6, ge=0, le=168)
+    # True = tiers stay an internal grouping/squad tool; buyers see one flat
+    # package list after pressing Buy instead of tier buttons.
+    tiers_internal: bool = False
 
 
 class PluginSettingsIn(BaseModel):
@@ -42,7 +45,11 @@ class PluginSettingsIn(BaseModel):
 
 class PkgIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    tier_id: int | None = None
+    # Every package lives in a tier (tier = internal squad mapping; a squad-less
+    # sub gets no connection, so tier-less packages are rejected).
+    tier_id: int
+    # Show order in the bot (ORDER BY sort, id).
+    sort: int = Field(default=0, ge=0, le=1000000)
     traffic_limit_bytes: int | None = Field(default=None, ge=0)
     # 0/blank = timeless package (no expiry, subs written as year 2999).
     duration_days: int = Field(default=30, ge=0, le=3650)
@@ -170,6 +177,26 @@ def build_admin_router(ctx):
         row["webhook_configured"] = bool(row.get("webhook_secret")) and has_token
         return {"shop": row}
 
+    @router.get("/shops/default-texts")
+    async def shop_default_texts(_a: AdminUser = Depends(require_permission("pershop", "view"))):
+        """Builtin defaults for every owner-editable bot text, in the shop's
+        language (or ?lang= override). Powers the ↺ Default buttons."""
+        from rwa_plugin_pershop.lang import L
+
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me) or {}
+        lang = (shop.get("lang") or "en") if isinstance(shop, dict) else "en"
+        probe = {"lang": lang}
+        return {"defaults": {
+            "welcome": L(probe, "menu_title"),
+            "card": "",
+            "thank_you": L(probe, "tpl_thank_you"),
+            "approved": L(probe, "tpl_approved"),
+            "denied": L(probe, "tpl_denied"),
+            "referral": "",
+            "support": "",
+        }}
+
     @router.put("/shops/mine")
     async def shops_upsert(payload: ShopIn, _a: AdminUser = Depends(require_permission("pershop", "edit"))):
         import secrets
@@ -196,13 +223,14 @@ def build_admin_router(ctx):
                        thank_you_text=$7, approved_text=$8, denied_text=$9, lang=$10,
                        currency_label=$11, unit_rate=$12, test_enabled=$13,
                        referral_text=$14, support_text=$15, pending_nag_hours=$16,
-                       referral_percent=$17 WHERE id=$18""",
+                       referral_percent=$17, tiers_internal=$18 WHERE id=$19""",
                     token_enc, payload.admin_tg_id, prefix,
                     payload.card_text, payload.welcome_text, secret,
                     payload.thank_you_text, payload.approved_text, payload.denied_text, lang,
                     payload.currency_label.strip(), payload.unit_rate,
                     payload.test_enabled, payload.referral_text, payload.support_text,
-                    payload.pending_nag_hours, payload.referral_percent, cur["id"],
+                    payload.pending_nag_hours, payload.referral_percent,
+                    payload.tiers_internal, cur["id"],
                 )
                 shop_id = cur["id"]
             else:
@@ -210,13 +238,13 @@ def build_admin_router(ctx):
                     """INSERT INTO plugin_pershop_shops(owner_admin, bot_token_enc, admin_tg_id, prefix, card_text,
                        welcome_text, webhook_secret, thank_you_text, approved_text, denied_text, lang,
                        currency_label, unit_rate, test_enabled, referral_text, support_text, pending_nag_hours,
-                       referral_percent)
-                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id""",
+                       referral_percent, tiers_internal)
+                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id""",
                     me, token_enc, payload.admin_tg_id, prefix, payload.card_text, payload.welcome_text, secret,
                     payload.thank_you_text, payload.approved_text, payload.denied_text, lang,
                     payload.currency_label.strip(), payload.unit_rate,
                     payload.test_enabled, payload.referral_text, payload.support_text,
-                    payload.pending_nag_hours, payload.referral_percent,
+                    payload.pending_nag_hours, payload.referral_percent, payload.tiers_internal,
                 )
                 shop_id = row["id"]
         except Exception as e:
@@ -401,7 +429,7 @@ def build_admin_router(ctx):
         shop = await shop_for_owner(ctx, me)
         if not shop:
             return {"packages": []}
-        rows = await ctx.db.fetch("SELECT * FROM plugin_pershop_packages WHERE shop_id=$1 ORDER BY id", shop["id"])
+        rows = await ctx.db.fetch("SELECT * FROM plugin_pershop_packages WHERE shop_id=$1 ORDER BY sort, id", shop["id"])
         return {"packages": [dict(r) for r in rows]}
 
     @router.post("/packages")
@@ -410,11 +438,12 @@ def build_admin_router(ctx):
         shop = await shop_for_owner(ctx, me)
         if not shop:
             raise HTTPException(400, "create shop first")
-        if payload.tier_id:
-            tier = await ctx.db.fetchrow(
-                "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", payload.tier_id, shop["id"])
-            if not tier:
-                raise HTTPException(400, "tier not found")
+        if not payload.tier_id:
+            raise HTTPException(400, "tier required")
+        tier = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", payload.tier_id, shop["id"])
+        if not tier:
+            raise HTTPException(400, "tier not found")
         _check_hwid(payload)
         if payload.scope_tier_id:
             scope = await ctx.db.fetchrow(
@@ -425,13 +454,13 @@ def build_admin_router(ctx):
         row = await ctx.db.fetchrow(
             """INSERT INTO plugin_pershop_packages(shop_id,tier_id,name,traffic_limit_bytes,duration_days,
                price_units,squad_uuid,active,hwid_mode,hwid_min,hwid_default,hwid_max,
-               hwid_free,hwid_percent,hwid_fixed,traffic_reset,effect,scope_tier_id)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id""",
+               hwid_free,hwid_percent,hwid_fixed,traffic_reset,effect,scope_tier_id,sort)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id""",
             shop["id"], payload.tier_id, payload.name.strip(), payload.traffic_limit_bytes,
             payload.duration_days, payload.price_units, payload.squad_uuid, payload.active,
             payload.hwid_mode, payload.hwid_min, payload.hwid_default, payload.hwid_max,
             payload.hwid_free, payload.hwid_percent, payload.hwid_fixed, payload.traffic_reset,
-            payload.effect, payload.scope_tier_id,
+            payload.effect, payload.scope_tier_id, payload.sort,
         )
         return {"id": row["id"]}
 
@@ -441,11 +470,12 @@ def build_admin_router(ctx):
         shop = await shop_for_owner(ctx, me)
         if not shop:
             raise HTTPException(400, "no shop")
-        if payload.tier_id:
-            tier = await ctx.db.fetchrow(
-                "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", payload.tier_id, shop["id"])
-            if not tier:
-                raise HTTPException(400, "tier not found")
+        if not payload.tier_id:
+            raise HTTPException(400, "tier required")
+        tier = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", payload.tier_id, shop["id"])
+        if not tier:
+            raise HTTPException(400, "tier not found")
         _check_hwid(payload)
         if payload.scope_tier_id:
             scope = await ctx.db.fetchrow(
@@ -457,13 +487,13 @@ def build_admin_router(ctx):
             """UPDATE plugin_pershop_packages SET tier_id=$1, name=$2, traffic_limit_bytes=$3, duration_days=$4,
                price_units=$5, squad_uuid=$6, active=$7, hwid_mode=$8, hwid_min=$9, hwid_default=$10,
                hwid_max=$11, hwid_free=$12, hwid_percent=$13, hwid_fixed=$14, traffic_reset=$15,
-               effect=$16, scope_tier_id=$17
-               WHERE id=$18 AND shop_id=$19""",
+               effect=$16, scope_tier_id=$17, sort=$18
+               WHERE id=$19 AND shop_id=$20""",
             payload.tier_id, payload.name.strip(), payload.traffic_limit_bytes, payload.duration_days,
             payload.price_units, payload.squad_uuid, payload.active, payload.hwid_mode,
             payload.hwid_min, payload.hwid_default, payload.hwid_max, payload.hwid_free,
             payload.hwid_percent, payload.hwid_fixed, payload.traffic_reset, payload.effect,
-            payload.scope_tier_id, pkg_id, shop["id"],
+            payload.scope_tier_id, payload.sort, pkg_id, shop["id"],
         )
         return {"ok": True}
 
@@ -848,21 +878,25 @@ def build_admin_router(ctx):
             raise HTTPException(409, str(e))
         from rwa_plugin_pershop.lang import L
         from rwa_plugin_pershop.service import format_price, message_text
+        from rwa_plugin_pershop.service import approval_vars as _av2
+        from rwa_plugin_pershop.service import fmt_safe as _fs2
 
         try:
             tg = TgClient(await decrypt_token(ctx, shop["bot_token_enc"]))
             bshop = await shop_for_tg(ctx, shop, order["buyer_tg_id"])
+            _card2 = await _av2(ctx, shop, order, result)
             if result.get("service"):
                 await tg.send_message(order["buyer_tg_id"],
-                    result.get("done_text") or L(bshop, "service_done_default"))
+                    _fs2(result.get("done_text") or L(bshop, "service_done_default"),
+                         username=order.get("buyer_username") or ""))
             elif result.get("renewed"):
                 await tg.send_message(order["buyer_tg_id"],
-                    message_text(bshop, "renewed", username=result["username"], expire=result["expire_at"]))
+                    message_text(bshop, "renewed", username=result["username"], **_card2))
             else:
                 url = result.get("subscription_url") or L(bshop, "url_fallback")
                 await tg.send_message(order["buyer_tg_id"],
                     message_text(bshop, "approved", username=result["username"],
-                                 expire=result["expire_at"], url=url))
+                                 url=url, **_card2))
         except Exception as e:
             ctx.logger.warning("shop.notify_buyer_failed", extra={"err": str(e)})
         try:
@@ -911,8 +945,22 @@ def build_admin_router(ctx):
         try:
             tg = TgClient(await decrypt_token(ctx, shop["bot_token_enc"]))
             bshop = await shop_for_tg(ctx, shop, order["buyer_tg_id"])
+            _dplan = ""
+            try:
+                if order.get("package_id"):
+                    _dpkg = await ctx.db.fetchrow(
+                        "SELECT name FROM plugin_pershop_packages WHERE id=$1", order["package_id"])
+                    _dplan = (_dpkg or {}).get("name") or ""
+                elif order.get("service_id"):
+                    _dsvc = await ctx.db.fetchrow(
+                        "SELECT name FROM plugin_pershop_services WHERE id=$1", order["service_id"])
+                    _dsvc = (_dsvc or {}).get("name") or ""
+                    _dplan = _dsvc
+            except Exception:
+                pass
             await tg.send_message(order["buyer_tg_id"],
-                message_text(bshop, "denied", reason=payload.reason))
+                message_text(bshop, "denied", reason=payload.reason,
+                             username=order.get("buyer_username") or "", plan=_dplan))
             if (refunded or 0) > 0:
                 await tg.send_message(order["buyer_tg_id"],
                     L(bshop, "credit_refunded", value=format_price(bshop, float(refunded))))
@@ -984,8 +1032,9 @@ def build_admin_router(ctx):
 
     @router.delete("/admin/reset")
     async def admin_reset(_a: AdminUser = Depends(require_permission("pershop_system", "manage"))):
-        """Superadmin wipe: every shop, order, sub, buyer, flag, broadcast
-        and plugin setting is deleted. The schema stays; IRREVERSIBLE."""
+        """Superadmin wipe: every PerShop table is dropped (schema + rows),
+        our migration revisions are unstamped so they re-run on next restart,
+        and every plugin setting is deleted. IRREVERSIBLE."""
         from rwa_plugin_pershop.service import reset_all
 
         return await reset_all(ctx)

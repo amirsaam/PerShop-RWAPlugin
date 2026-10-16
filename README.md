@@ -84,11 +84,13 @@ owners with only `pershop` permissions see an access-denied notice here.
 (A panel superadmin acting as a shop owner can additionally open a shop of
 their own from the Shops tab.)
 
-**Danger zone (superadmin only).** `DELETE /admin/reset` wipes every
-`plugin_pershop_*` table and every `plugin_settings` key the plugin owns
-(shops, catalog, orders, subs, referrals, buyer preferences, credit
-balances, scammer flags, test claims, broadcasts). Sold panel accounts are
-never touched. The button asks for confirmation twice.
+**Danger zone (superadmin only).** `DELETE /admin/reset` drops every
+`plugin_pershop_*` table (schema and rows) and deletes every
+`plugin_settings` key the plugin owns (shops, catalog, orders, subs,
+referrals, buyer preferences, credit balances, scammer flags, test claims,
+broadcasts). It also unstamps the plugin's migration revisions, so the next
+panel restart recreates all tables empty via the normal migration run. Sold
+panel accounts are never touched. The button asks for confirmation twice.
 
 Currency is configured per shop (see Shop setup), not globally. Shops using
 different currencies coexist on one panel.
@@ -114,10 +116,15 @@ different currencies coexist on one panel.
    `2.5` units then renders as `625,000 تومان` on buttons, contracts,
    receipt headers, and public API responses. With both fields empty, prices
    render as `2.5u`.
-5. **Write the buyer-facing texts**: payment-card details, welcome,
-   thank-you (receipt received), approved (`{username} {expire} {url}`),
-   denied (`{reason}`). Empty fields fall back to built-in templates in the
-   shop language.
+5. **Write the buyer-facing texts**: payment-card details, welcome
+   (`{shop}`), thank-you (`{order}`), approved (`{username} {dot}
+   {status} {plan} {price} {when} {traffic} {hwid} {url}`, legacy `{expire}`
+   still accepted), denied (`{reason} {username} {plan}`), referral
+   (`{percent} {link}`), service descriptions (`{price}`), completion
+   texts (`{username}`). Every text has a **↺ Default** button restoring
+   the built-in template in the shop language
+   (`GET /shops/default-texts`). Empty fields fall back to those built-ins
+   automatically.
 6. **Save.** Saving never requires a bot token: texts, currency, catalog,
    and matching can be configured first and the bot connected later (or after
    a disconnect). When a token is supplied, it is stored Fernet-encrypted; the plugin generates the
@@ -156,7 +163,11 @@ A tier is an internal squad and the first step of every VPN purchase.
 | `name` (1–120 chars, unique per shop) | Buyer-facing tier label. |
 | `squad_uuid` | Internal squad, selected from a dropdown of squads visible to the admin (`GET /squads` is scope-filtered). Every account sold from this tier lands in this squad; the tier squad takes precedence over any package-level value. |
 | `hwid_default` (optional int) | Fallback device limit, applied only when a package uses "panel default" mode and the panel assigns no value. |
-| `sort`, `active` | Ordering and visibility. |
+| `sort`, `active` | Ordering (lower shows first, in the bot and in the panel list) and visibility. |
+
+When the owner enables **Tiers are internal** (My Shop checkbox), buyers
+skip the tier buttons and see every package as one flat list sorted by
+`sort`; tiers stay in the panel for squads and grouping only.
 
 Deleting a tier that still has packages is refused (409) — move or delete
 the packages first.
@@ -170,7 +181,7 @@ and only when the owner enables it.
 | Field | Type / rule | Meaning |
 |---|---|---|
 | `name` | 1–120 chars | Buyer-facing plan name. |
-| `tier_id` | tier id or null | The tier (squad) this plan belongs to. |
+| `tier_id` | tier id, required | The tier (squad) this plan belongs to. Every package belongs to exactly one tier — a squad-less subscription gets no connection. Change it any time to move the package between tiers. |
 | `traffic_limit_bytes` | int ≥ 0 or null | Fixed cap. Null/blank = unlimited. |
 | `duration_days` | int 0–3650, default 30 | Fixed lifetime. **`0` = timeless**: accounts are written with expiry `2999-12-31`, rendered everywhere as "never expires". |
 | `price_units` | number ≥ 0 | Price in shop units (converted for display per Shop setup, step 4). |
@@ -211,7 +222,8 @@ set) · **My account (always last)**. Tapping a panel button leaves the
 current screen; submitted orders are unaffected. All screens below the menu
 use inline buttons on their own message.
 
-- **Buy Subscription** → tiers → packages (converted prices) → optional
+- **Buy Subscription** → tiers → packages (converted prices, sorted by
+  Sort order; a single flat package list when tiers are internal) → optional
   device counter → **contract screen** (plan, exact resulting date/cap,
   leftover-traffic treatment, price, payment card) → optional **credit
   spend** ("Use credit" button, shown when the buyer holds a referral
@@ -270,8 +282,12 @@ use inline buttons on their own message.
   Size, squad, and device limit come from the superadmin settings. Trial
   subscriptions are informational in My Subs — no renewals or top-ups; a
   full plan is purchased through the Buy menu like any new subscription.
-- **Referral Program** (if text set): shows the buyer's personal
-  `/start r_<id>` link; deep-link starts are recorded per shop. The owner
+- **Referral Program** (if text set): shows the buyer's personal copyable
+  `https://t.me/<bot>?start=r_<id>` link; deep-link starts are recorded
+  per shop. If the stored bot username is missing (e.g. the shop was
+  connected while the panel had no Telegram egress), it is re-fetched via
+  `getMe` the first time a buyer opens this screen and cached. The owner
+  text supports `{percent}` (reward %) and `{link}` (the invite URL). The owner
   sets a **reward %** on the Shops tab (`0` = off): every approved
   purchase by an invited buyer credits that percentage of the order's
   **cash-paid** units to the inviter's **non-withdrawable balance**,
@@ -393,6 +409,19 @@ entirely, and timeless subscriptions never receive expiry warnings:
 | 72 h pre-expiry | 0 < time-left ≤ 72 h, year < 2999 | Quick renew |
 | Expired | past expiry, year < 2999 | Reactivate (quick renew) |
 
+Approvals flow into the panel's own account stream, not a custom notice card:
+new sales and renewals go through the panel's native `fire_event("user.created")`
+/ account machinery, so the RWA bot's standard user-created notification fires
+exactly as it does for panel-created accounts — no duplicate plugin card.
+
+Button taps rewrite the current bot message in place instead of sending a
+new one, so the buyer DM stays to a single screen. Consumed buyer messages
+(panel taps, /start and /cancel, entered links, reasons, card details, service
+notes) are deleted after reading, RWA-bot style. The buyer's receipt
+message is never deleted or edited — it stays as the anchor of the order —
+and owner approve/deny rewrites both the buyer's waiting message and the
+owner's decide card with the final result.
+
 ---
 
 ## 10. External API (per-shop key)
@@ -485,7 +514,7 @@ references).
 | `POST /broadcast` · `GET /broadcasts` | edit / view | Broadcast |
 | `GET /buyers?search=` | view | Buyer lookup: balance, language, subscription count, scammer flag |
 | `DELETE /scammers/{tg_id}` | moderate | Lift a network scammer flag |
-| `DELETE /admin/reset` | `pershop_system:manage` | Wipe all plugin data (never panel accounts) |
+| `DELETE /admin/reset` | `pershop_system:manage` | Drop all plugin tables + unstamp migrations (never panel accounts) |
 | `GET /shops/all` | `pershop_system:manage` | Every shop, tokens stripped |
 | `GET /plugin-settings` · `PUT /plugin-settings` | `pershop_system:manage` | Superadmin settings |
 | `GET /app` | view | The console bundle itself |

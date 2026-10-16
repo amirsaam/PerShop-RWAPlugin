@@ -7,6 +7,30 @@ from typing import Any
 from rwa_plugin_pershop.naming import allocate_username
 
 
+async def get_last_mid(ctx, shop_id: int, chat_id: int) -> int | None:
+    """Last bot message id we show in this chat (delete-before-send cleanup). Never raises."""
+    try:
+        mid = await ctx.db.fetchval(
+            "SELECT last_mid FROM plugin_pershop_buyers WHERE shop_id=$1 AND tg_id=$2",
+            shop_id, int(chat_id))
+        return int(mid) if mid else None
+    except Exception:
+        return None
+
+
+async def set_last_mid(ctx, shop_id: int, chat_id: int, mid: int | None) -> None:
+    """Remember the message id now showing our screen. Never raises."""
+    if mid is None:
+        return
+    try:
+        await ctx.db.execute(
+            "INSERT INTO plugin_pershop_buyers (shop_id, tg_id, last_mid) VALUES ($1,$2,$3) "
+            "ON CONFLICT (shop_id, tg_id) DO UPDATE SET last_mid=$3",
+            shop_id, int(chat_id), int(mid))
+    except Exception:
+        pass
+
+
 async def list_squads() -> list[dict[str, Any]]:
     """Internal squads via api_client.get_internal_squads().
 
@@ -133,6 +157,36 @@ async def webhook_status(ctx, shop: dict) -> dict:
         return {"ok": False, "error": str(e)[:200]}
 
 
+async def ensure_bot_username(ctx, shop: dict) -> str:
+    """Return the shop bot's @username without "@", fetching via getMe and
+    caching it on first success when the stored value is empty (e.g. the
+    shop was connected while the panel had no Telegram egress, so the
+    connect-time getMe failed). Best-effort: "" when unreachable."""
+    uname = (shop.get("bot_username") or "").strip().lstrip("@")
+    if uname:
+        return uname
+    try:
+        from rwa_plugin_pershop.crypto import decrypt_token
+        from rwa_plugin_pershop.telegram import TgClient
+        token = await decrypt_token(ctx, shop.get("bot_token_enc") or "")
+        if not token:
+            return ""
+        me = await TgClient(token).call("getMe", {})
+        uname = ((me.get("result") or {}).get("username") or "").strip().lstrip("@")
+        if uname:
+            await ctx.db.execute(
+                "UPDATE plugin_pershop_shops SET bot_username=$1 WHERE id=$2",
+                uname, shop["id"])
+            try:
+                shop["bot_username"] = uname
+            except Exception:
+                pass
+            return uname
+    except Exception:
+        pass
+    return ""
+
+
 async def disconnect_shop(ctx, owner_admin: str) -> dict:
     """Detach the shop's bot: deleteWebhook on Telegram's side (best
     effort), then clear the stored token. All other shop settings stay
@@ -189,20 +243,31 @@ _PERSHOP_SETTING_KEYS = [
 
 
 async def reset_all(ctx) -> dict:
-    """Superadmin wipe: delete every PerShop row and every PerShop plugin
-    setting (tokens, offsets, flags). The schema stays; the plugin starts
-    over empty. Never raises; returns {ok, wiped}."""
+    """Superadmin wipe: DROP every PerShop table (schema + rows), clear our
+    alembic version rows so migrations re-run clean on next restart, and
+    delete every PerShop plugin setting (tokens, offsets, flags). The panel
+    itself is untouched. Never raises; returns {ok, dropped, wiped}."""
     try:
         shops = await ctx.db.fetch("SELECT id FROM plugin_pershop_shops")
     except Exception:
         shops = []
-    wiped = []
-    for t in _PERSHOP_TABLES:
-        try:
-            await ctx.db.execute(f"DELETE FROM {t}")
-            wiped.append(t)
-        except Exception:
-            pass
+    dropped, wiped = [], []
+    try:
+        await ctx.db.execute(
+            "DROP TABLE IF EXISTS " + ", ".join(_PERSHOP_TABLES) + " CASCADE")
+        dropped = list(_PERSHOP_TABLES)
+    except Exception:
+        for t in _PERSHOP_TABLES:
+            try:
+                await ctx.db.execute(f"DELETE FROM {t}")
+                wiped.append(t)
+            except Exception:
+                pass
+    try:
+        await ctx.db.execute(
+            "DELETE FROM alembic_version WHERE version_num IN ('pershop_001','pershop_002')")
+    except Exception:
+        pass
     keys = list(_PERSHOP_SETTING_KEYS)
     for s in shops or []:
         try:
@@ -214,7 +279,7 @@ async def reset_all(ctx) -> dict:
             await ctx.settings.delete(k)
         except Exception:
             pass
-    return {"ok": True, "wiped": wiped}
+    return {"ok": True, "dropped": dropped, "wiped": wiped}
 
 
 async def existing_usernames(ctx, shop_id: int) -> set[str]:
@@ -375,6 +440,21 @@ async def panel_create_user(ctx, *, username: str, expire_at: datetime,
         pass
     return {"uuid": user_uuid or panel_id or username,
             "subscription_url": sub_url, "username": username}
+
+
+def _fire_updated(ctx, user_uuid: str, username: str | None,
+                  changed_fields: list, updated_by: str | None) -> None:
+    """Mirror the panel update route's user.updated event (same keys:
+    uuid, username, changed_fields, updated_by). Best-effort: never raises."""
+    try:
+        from web.backend.core.webhook_security import fire_event
+        fire_event("user.updated", {
+            "uuid": str(user_uuid), "username": username,
+            "changed_fields": sorted(changed_fields),
+            "updated_by": updated_by,
+        })
+    except Exception:
+        pass
 
 
 async def panel_extend_user(ctx, user_uuid: str, extra_days: int,
@@ -770,7 +850,7 @@ def format_when(shop_or_lang, dt, now=None) -> str:
         date = dt.strftime("%Y-%m-%d")
     except Exception:
         date = str(dt)
-    return f"{rel} · {date}" if rel else date
+    return f"{rel} ({date})" if rel else date
 
 
 async def request_withdraw(ctx, order_id: int, buyer_tg_id: int,
@@ -1008,6 +1088,12 @@ async def cancel_credit_sub(ctx, sub_id: int, buyer_tg_id: int) -> dict:
     except Exception:
         panel_id = sub["user_uuid"]
     await _panel_client().update_user(panel_id, status="DISABLED")
+    try:
+        _shop = await shop_by_id(ctx, sub["shop_id"])
+        _fire_updated(ctx, sub["user_uuid"], sub["username"], ["status"],
+                      (_shop or {}).get("owner_admin"))
+    except Exception:
+        pass
     await add_credit(ctx, sub["shop_id"], int(buyer_tg_id), amount)
     await ctx.db.execute(
         "UPDATE plugin_pershop_subs SET cancelled=TRUE WHERE id=$1", sub_id)
@@ -1299,6 +1385,12 @@ async def approve_order(ctx, order_id: int, decided_by: str) -> dict:
             except Exception as e:
                 ctx.logger.error("shop renew counter sync failed: %s", e)
         earned = await _earn_referral_credit(ctx, shop, order, order.get("total_units"))
+        changed = ["traffic_limit_bytes"] if effect == "traffic_only" else ["expire_at"]
+        if effect == "full":
+            changed.append("traffic_limit_bytes")
+            if squad_changed:
+                changed.append("active_internal_squads")
+        _fire_updated(ctx, sub["user_uuid"], sub["username"], changed, shop.get("owner_admin"))
         return {"username": sub["username"], "renewed": True, "expire_at": new_exp,
                 "subscription_url": None, "squad_changed": squad_changed,
                 "traffic_limit_bytes": new_limit, "effect": effect,
@@ -1436,6 +1528,75 @@ TEXT_COLUMNS = {
     "renewed": "approved_text",
     "denied": "denied_text",
 }
+
+
+def format_gb(value) -> str:
+    """Bytes -> '12.40 GB' / '850.0 MB' / '∞' for buyer messages. Never raises."""
+    try:
+        if value is None:
+            return "∞"
+        v = float(value)
+        if v >= 10 ** 9:
+            return f"{v / 10 ** 9:.2f} GB"
+        return f"{v / 10 ** 6:.1f} MB"
+    except Exception:
+        return "?"
+
+
+async def approval_vars(ctx, shop: dict, order: dict, result: dict) -> dict:
+    """Template variables for the approved/renewed buyer cards (RWA-bot card
+    style): when (relative + date), traffic, plan, price, status. The legacy
+    {expire} raw value is kept for custom texts. Never raises."""
+    from rwa_plugin_pershop.lang import L
+    pkg = None
+    try:
+        if order.get("package_id"):
+            pkg = await ctx.db.fetchrow(
+                "SELECT * FROM plugin_pershop_packages WHERE id=$1", order["package_id"])
+    except Exception:
+        pkg = None
+    pkg = pkg or {}
+    traffic = result.get("traffic_limit_bytes")
+    if traffic is None:
+        traffic = pkg.get("traffic_limit_bytes")
+    try:
+        no_cap = not traffic or float(traffic) <= 0
+    except Exception:
+        no_cap = True
+    traffic_str = L(shop, "unlimited_lbl") if no_cap else format_gb(traffic)
+    try:
+        total = float(order.get("total_units") or pkg.get("price_units") or 0)
+    except Exception:
+        total = 0
+    exp = result.get("expire_at")
+    chosen_hwid = _snapshot_hwid(order)
+    if chosen_hwid:
+        hwid = str(chosen_hwid)
+    elif (pkg.get("hwid_mode") or "default") == "unlimited":
+        hwid = "∞"
+    elif (pkg.get("hwid_mode") or "default") == "fixed":
+        hwid = str(pkg.get("hwid_fixed") or "—")
+    else:
+        hwid = "—"
+    return {
+        "when": format_when(shop, exp),
+        "traffic": traffic_str,
+        "plan": pkg.get("name") or "",
+        "price": format_price(shop, total),
+        "status": L(shop, "status_active"),
+        "dot": "🟢",
+        "hwid": hwid,
+        "expire": exp,
+    }
+
+
+def fmt_safe(text: str, **vars: Any) -> str:
+    """Format owner-written text with the given variables, leaving the raw
+    text untouched when a placeholder is unknown (never raises)."""
+    try:
+        return (text or "").format(**vars)
+    except Exception:
+        return text or ""
 
 
 def message_text(shop: dict, kind: str, **vars: Any) -> str:

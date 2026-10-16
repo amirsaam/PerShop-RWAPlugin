@@ -221,11 +221,12 @@ window.rwaPluginUI['pershop'] = {
         + '<div><label class="' + LBL + '" for="naghours">Pending-receipt nudge (hours)</label><input id="naghours" inputmode="numeric" class="' + INP + '" placeholder="6"><p class="' + HELP + '">0 = off — remind me when a receipt waits longer than this.</p></div>'
         + '<div class="sm:col-span-2"><label class="' + LBL + '" for="bosel">Bot texts</label>'
         + '<select id="bosel" class="' + INP + ' max-w-xs mb-2"><option value="welcome">Welcome text</option><option value="thanks">Thank-you text (after receipt)</option><option value="approved">Approved text</option><option value="denied">Denied text</option><option value="referral">Referral program text (blank hides the button)</option><option value="support">Support text (blank hides the button)</option></select>'
-        + fmtBar('botext') + '<div id="bovars"></div><textarea id="botext" rows="4" class="' + TA + '"></textarea></div>'
+        + fmtBar('botext') + '<button type="button" class="' + BTN_M + '" id="bodef">↺ Default</button><div id="bovars"></div><textarea id="botext" rows="4" class="' + TA + '"></textarea></div>'
         + '<div class="sm:col-span-2 flex items-start gap-3"><input type="checkbox" id="teston" class="h-4 w-4 mt-1 accent-primary"><div><label for="teston" class="text-sm text-white">Test subscription enabled</label><p class="' + HELP + '">Free trial, one per person across all shops.</p></div></div>'
+        + '<div class="sm:col-span-2 flex items-start gap-3"><input type="checkbox" id="tierint" class="h-4 w-4 mt-1 accent-primary"><div><label for="tierint" class="text-sm text-white">Tiers are internal</label><p class="' + HELP + '">Buyers skip the tier buttons and see every package as one list. Tiers stay in the panel for squads and grouping.</p></div></div>'
         + '</div><div class="flex flex-wrap items-center gap-2 mt-4"><button id="save" class="' + BTN_P + '">Save shop</button><button id="connect" class="' + BTN_S + '">Connect bot</button><button id="disconnect" class="' + BTN_M + '">Disconnect bot</button><span id="sec" class="text-xs text-dark-300"></span></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Tiers</h2><p class="text-xs text-dark-300 mb-3">Buyer groups — each tier puts sold accounts in one squad. Packages live on their own below and can move between tiers any time.</p><div id="tiers" class="space-y-1.5"></div><button id="addtier" class="' + BTN_M + ' mt-3">Add tier</button></div>'
-        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Packages</h2><p class="text-xs text-dark-300 mb-3">Standalone sellables. The tier dropdown decides which tier sells it — change it any time to move the package. Empty tier = sold alongside the tier buttons.</p><div id="pkgs" class="space-y-1.5"></div><button id="addpkg" class="' + BTN_M + ' mt-3">Add package</button></div>'
+        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Packages</h2><p class="text-xs text-dark-300 mb-3">Standalone sellables, sorted by Sort order. Each package belongs to a tier (that decides its squad); change the tier any time to move it.</p><div id="pkgs" class="space-y-1.5"></div><button id="addpkg" class="' + BTN_M + ' mt-3">Add package</button></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Other Services — categories → items</h2><p class="text-xs text-dark-300 mb-3">Non-VPN sellables. No duration, traffic or device limits.</p><div id="scats" class="flex flex-wrap gap-2"></div><div id="scatdetail" class="mt-4"></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Plan matching — users without a plan</h2><div id="unmapped"><button id="uload" class="' + BTN_M + '">Load users</button></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Broadcast — send to all buyers</h2><div class="grid gap-3 max-w-xl">'
@@ -270,7 +271,9 @@ window.rwaPluginUI['pershop'] = {
             + '</tbody></table>' : '<i>no shops yet</i>';
         }).catch(() => { q('all').textContent = 'Unavailable.'; });
       }
-      const BOTEXT_VARS = {approved: ['username', 'expire', 'url'], denied: ['reason']};
+      const BOTEXT_VARS = {welcome: ['shop'], thanks: ['order'],
+        approved: ['username', 'dot', 'status', 'plan', 'price', 'when', 'traffic', 'hwid', 'url'],
+        denied: ['reason', 'username', 'plan'], referral: ['percent', 'link']};
       let botextCache = {};
       const botextShow = (key) => {
         q('botext').value = botextCache[key] || '';
@@ -283,6 +286,20 @@ window.rwaPluginUI['pershop'] = {
         const k = q('bosel').value;
         q('bosel').dataset.cur = k;
         botextShow(k);
+      };
+      let defCache = null;
+      q('bodef').onclick = () => {
+        const map = {welcome: 'welcome', thanks: 'thank_you', approved: 'approved',
+          denied: 'denied', referral: 'referral', support: 'support'};
+        const apply = () => {
+          const k = q('bosel').dataset.cur || 'welcome';
+          const v = defCache ? defCache[map[k]] : undefined;
+          if (v !== undefined) { q('botext').value = v; botextCache[k] = v; }
+        };
+        if (defCache) return apply();
+        j(api + '/shops/default-texts').then(({defaults}) => {
+          defCache = defaults || {}; apply();
+        }).catch(() => {});
       };
       const loadMine = () => j(api + '/shops/mine').then(({shop}) => {
         if (!shop) {
@@ -301,6 +318,7 @@ window.rwaPluginUI['pershop'] = {
         q('cardnum').value = shop.card_text || '';
         q('currency').value = shop.currency_label || ''; q('rate').value = shop.unit_rate || '';
         q('teston').checked = !!shop.test_enabled;
+        q('tierint').checked = !!shop.tiers_internal;
         q('refpct').value = shop.referral_percent || 0;
         q('naghours').value = shop.pending_nag_hours == null ? 6 : shop.pending_nag_hours;
         q('lang').value = ['en', 'fa', 'ru', 'zh'].includes(shop.lang) ? shop.lang : 'en';
@@ -338,6 +356,7 @@ window.rwaPluginUI['pershop'] = {
             currency_label: q('currency').value, unit_rate: q('rate').value ? Number(q('rate').value) : null,
             thank_you_text: botextCache.thanks, approved_text: botextCache.approved, denied_text: botextCache.denied,
             test_enabled: q('teston').checked, referral_text: botextCache.referral, support_text: botextCache.support,
+            tiers_internal: q('tierint').checked,
             referral_percent: Math.max(0, Math.min(100, Number(q('refpct').value) || 0)),
             pending_nag_hours: Math.max(0, Math.min(168, Number(q('naghours').value) || 0))};
           if (q('token').value) body.bot_token = q('token').value;
@@ -477,7 +496,7 @@ window.rwaPluginUI['pershop'] = {
       };
       const EFFLBL = {full: 'full plan', time_only: 'time top-up', traffic_only: 'traffic top-up'};
       const pkgBadges = (p, tiers) => {
-        const tn = p.tier_id ? ((tiers.find((x) => x.id === p.tier_id) || {}).name || ('tier ' + p.tier_id)) : 'no tier';
+        const tn = (tiers.find((x) => x.id === p.tier_id) || {}).name || ('tier ' + p.tier_id);
         return '<span class="' + pillFor('pending') + '">' + esc(tn) + '</span> '
           + '<span>' + esc(p.name) + ' · ' + (Number(p.duration_days) === 0 ? 'never expires' : p.duration_days + 'd') + ' · '
           + (p.traffic_limit_bytes ? (p.traffic_limit_bytes / 1073741824) + 'GB' : 'unlimited') + ' · ' + fmtU(p.price_units)
@@ -486,8 +505,8 @@ window.rwaPluginUI['pershop'] = {
       const hwidFields = (p) => {
         p = p || {};
         const m = p.hwid_mode || 'default';
-        return '<div><label class="' + LBL + '">Tier</label><select id="m_tier" class="' + INP + '"><option value="">No tier — sold alongside tiers</option></select>'
-          + '<p class="' + HELP + '">Change this any time to move the package between tiers.</p></div>'
+        return '<div><label class="' + LBL + '">Tier</label><select id="m_tier" class="' + INP + '"></select>'
+          + '<p class="' + HELP + '">Required — the tier decides the internal squad. Change any time to move the package.</p></div>'
           + '<div><label class="' + LBL + '">Device limit (HWID)</label>'
           + '<select id="m_hmode" class="' + INP + '"><option value="default"' + (m === 'default' ? ' selected' : '') + '>hwid: panel default</option><option value="input"' + (m === 'input' ? ' selected' : '') + '>hwid: buyer input</option><option value="fixed"' + (m === 'fixed' ? ' selected' : '') + '>hwid: fixed by admin</option><option value="unlimited"' + (m === 'unlimited' ? ' selected' : '') + '>hwid: unlimited</option></select></div>'
           + '<div id="m_hinput" class="grid grid-cols-2 sm:grid-cols-5 gap-2"' + (m === 'input' ? '' : ' style="display:none"') + '>'
@@ -508,6 +527,7 @@ window.rwaPluginUI['pershop'] = {
           + '<div><label class="' + LBL + '">Duration (days)</label><input id="m_pdays" class="' + INP + '" inputmode="numeric" value="' + (p.duration_days == null ? 30 : p.duration_days) + '"><p class="' + HELP + '">0 = never expires (∞).</p></div>'
           + '<div><label class="' + LBL + '">Traffic cap (GB)</label><input id="m_pgb" class="' + INP + '" inputmode="decimal" value="' + (p.traffic_limit_bytes ? p.traffic_limit_bytes / GB : '') + '"><p class="' + HELP + '">Blank = unlimited.</p></div>'
           + '<div><label class="' + LBL + '">Price (units)</label><input id="m_punits" class="' + INP + '" inputmode="decimal" value="' + (p.price_units || 0) + '"></div>'
+          + '<div><label class="' + LBL + '">Sort order</label><input id="m_psort" class="' + INP + '" inputmode="numeric" value="' + (p.sort || 0) + '"><p class="' + HELP + '">Lower numbers show first in the bot.</p></div>'
           + '<div><label class="' + LBL + '">Package type</label><select id="m_peffect" class="' + INP + '"><option value="full"' + (p.effect === 'full' ? ' selected' : '') + '>full plan</option><option value="time_only"' + (p.effect === 'time_only' ? ' selected' : '') + '>time top-up (+days)</option><option value="traffic_only"' + (p.effect === 'traffic_only' ? ' selected' : '') + '>traffic top-up (+GB)</option></select></div>'
           + '<div><label class="' + LBL + '">Offer scope</label><select id="m_pscope" class="' + INP + '"><option value="">scope: all tiers</option>'
           + tiers.map((x) => '<option value="' + x.id + '"' + (x.id === p.scope_tier_id ? ' selected' : '') + '>scope: ' + esc(x.name) + ' only</option>').join('') + '</select></div>'
@@ -519,6 +539,7 @@ window.rwaPluginUI['pershop'] = {
             const mode = ov.querySelector('#m_hmode').value;
             const body = {name: ov.querySelector('#m_pname').value.trim(),
               tier_id: ov.querySelector('#m_tier').value ? Number(ov.querySelector('#m_tier').value) : null,
+              sort: Math.max(0, Number(ov.querySelector('#m_psort').value) || 0),
               duration_days: Math.max(0, Number(ov.querySelector('#m_pdays').value) || 0),
               traffic_limit_bytes: ov.querySelector('#m_pgb').value.trim() === '' ? null : Math.round(Number(ov.querySelector('#m_pgb').value) * GB),
               price_units: Number(ov.querySelector('#m_punits').value) || 0,
@@ -528,6 +549,7 @@ window.rwaPluginUI['pershop'] = {
               active: ov.querySelector('#m_pactive').checked,
               hwid_mode: mode, hwid_min: 0, hwid_default: 0, hwid_max: 0, hwid_free: 0, hwid_percent: 0, hwid_fixed: null};
             if (!body.name) throw new Error('Package name is required.');
+            if (!body.tier_id) throw new Error('Pick a tier — every package belongs to one.');
             if (mode === 'input') { body.hwid_min = gv('#m_hmin', 1); body.hwid_default = gv('#m_hstart', 1);
               body.hwid_max = gv('#m_hmax', 10); body.hwid_free = gv('#m_hfree', 1); body.hwid_percent = gv('#m_hpct', 50); }
             else if (mode === 'fixed') { body.hwid_fixed = gv('#m_hfixedn', 1); }

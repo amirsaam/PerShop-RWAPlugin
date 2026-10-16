@@ -47,6 +47,7 @@ class FakeDB:
         self.tiers = {}
         self.referrals = set()
         self.buyers = {}  # (shop_id, tg_id) -> lang
+        self.last_mids = {}  # (shop_id, tg_id) -> tracked last bot message id
         self.credits = {}  # (shop_id, tg_id) -> credit units
         self.scammers = {}  # tg_id -> {marked_by_admin, reason}
         self.test_claims = set()  # tg_ids with a panel-global test claim
@@ -54,6 +55,8 @@ class FakeDB:
         self.svc_cats = {}
         self.svcs = {}
         self.bcs = {}
+        self.versions = {"pershop_001", "pershop_002"}  # fake alembic_version rows
+        self.dropped = False
         self.seq = {"shop": 0, "pkg": 0, "order": 0, "sub": 0, "tier": 0,
                     "scat": 0, "svc": 0, "bc": 0}
 
@@ -149,10 +152,12 @@ class FakeDB:
                     if p["shop_id"] == a[0] and p.get("active", True)
                     and (p.get("effect") or "full") == "traffic_only"]
         if "FROM plugin_pershop_packages WHERE shop_id" in q:
-            return [p for p in self.pkgs.values() if p["shop_id"] == a[0] and p.get("active", True)]
+            return sorted([p for p in self.pkgs.values() if p["shop_id"] == a[0] and p.get("active", True)],
+                          key=lambda p: (p.get("sort") or 0, p["id"]))
         if "FROM plugin_pershop_packages WHERE tier_id" in q:
-            return [p for p in self.pkgs.values()
-                    if p.get("tier_id") == a[0] and ("AND active" not in q or p.get("active", True))]
+            return sorted([p for p in self.pkgs.values()
+                    if p.get("tier_id") == a[0] and ("AND active" not in q or p.get("active", True))],
+                    key=lambda p: (p.get("sort") or 0, p["id"]))
         if "FROM plugin_pershop_tiers WHERE shop_id" in q:
             return [t for t in self.tiers.values()
                     if t["shop_id"] == a[0] and ("AND active" not in q or t.get("active", True))]
@@ -362,6 +367,8 @@ class FakeDB:
         return self.users.get(uuid)
 
     async def fetchval(self, q, *a):
+        if "SELECT last_mid FROM plugin_pershop_buyers" in q:
+            return self.last_mids.get((a[0], a[1]))
         if "FROM plugin_pershop_buyers" in q and "credit_units" in q:
             return self.credits.get((a[0], a[1]), 0.0)
         if "COUNT(*)" in q and "plugin_pershop_subs" in q and "expire_at" in q:
@@ -402,6 +409,26 @@ class FakeDB:
         raise AssertionError(f"unhandled fetchval: {q}")
 
     async def execute(self, q, *a):
+        if q.strip().startswith("DROP TABLE IF EXISTS"):
+            for _t, _s in (("plugin_pershop_broadcasts", self.bcs),
+                            ("plugin_pershop_referrals", self.referrals),
+                            ("plugin_pershop_test_claims", self.test_claims),
+                            ("plugin_pershop_scammers", self.scammers),
+                            ("plugin_pershop_buyers", self.buyers),
+                            ("plugin_pershop_sessions", self.sessions),
+                            ("plugin_pershop_orders", self.orders),
+                            ("plugin_pershop_subs", self.subs),
+                            ("plugin_pershop_packages", self.pkgs),
+                            ("plugin_pershop_services", self.svcs),
+                            ("plugin_pershop_tiers", self.tiers),
+                            ("plugin_pershop_service_cats", self.svc_cats),
+                            ("plugin_pershop_shops", self.shops)):
+                _s.clear()
+            self.dropped = True
+            return
+        if "DELETE FROM alembic_version" in q:
+            self.versions = set()
+            return
         if "SET bot_username=$1" in q:
             self.shops[a[1]]["bot_username"] = a[0]
             return
@@ -487,6 +514,9 @@ class FakeDB:
         if "plugin_pershop_orders SET buyer_msg_id=$1" in q:
             self.orders[a[1]]["buyer_msg_id"] = a[0]
             return
+        if "last_mid" in q and "plugin_pershop_buyers" in q:
+            self.last_mids[(a[0], a[1])] = a[2]
+            return
         if "scam_noted_at" in q and "plugin_pershop_buyers" in q:
             self.scam_noted.add((a[0], a[1]))
             return
@@ -509,6 +539,9 @@ class FakeDB:
             return
         if "UPDATE plugin_pershop_shops SET bot_token_enc=NULL WHERE id=$1" in q:
             self.shops[a[0]]["bot_token_enc"] = None
+            return
+        if "UPDATE plugin_pershop_shops SET bot_username=$1 WHERE id=$2" in q:
+            self.shops[a[1]]["bot_username"] = a[0]
             return
         if q.strip().startswith("DELETE FROM plugin_pershop_"):
             table = q.strip().split()[2]
@@ -723,8 +756,8 @@ def make_shop(db, prefix="vip", admin_tg=999):
                      "admin_tg_id": admin_tg, "prefix": prefix, "card_text": "pay here",
                      "welcome_text": "", "webhook_secret": None, "lang": "en",
                      "currency_label": "تومان", "unit_rate": 250000,
-                     "test_enabled": False, "test_counter": 0,
-                     "referral_text": "", "support_text": ""}
+                     "test_enabled": False, "test_counter": 0, "tiers_internal": False,
+                     "referral_text": "", "referral_percent": 10, "support_text": ""}
     pid = db._next("pkg")
     db.pkgs[pid] = {"id": pid, "shop_id": sid, "tier_id": None, "name": "Monthly",
                     "traffic_limit_bytes": 1000, "duration_days": 30,
@@ -743,7 +776,7 @@ def make_stepped(db, sid):
                     "price_text": "", "price_units": 2.5, "squad_uuid": None, "active": True,
                     "hwid_mode": "input", "hwid_min": 1, "hwid_default": 1,
                     "hwid_max": 10, "hwid_free": 1, "hwid_percent": 50,
-                    "hwid_fixed": None}
+                    "hwid_fixed": None, "sort": 0, "effect": "full", "traffic_reset": True}
     return tid, pid
 
 
@@ -852,7 +885,7 @@ async def _full():
     assert db.subs[sub["id"]].get("notified_out") is True, db.subs[sub["id"]]
 
     def _texts():
-        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent if m == "sendMessage"]
+        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent if m in ("sendMessage", "editMessageText")]
 
     assert any("ran out of traffic" in t for t in _texts()), _texts()
     n = len(_texts())
@@ -879,6 +912,8 @@ async def _full():
                                                                "chat": {"id": 111}, "text": "receipt-xyz"}})
     new_orders = [o for o in db.orders.values() if o["status"] == "pending"]
     assert new_orders, "receipt did not create order"
+    assert not any(m == "deleteMessage" and p.get("message_id") == 5
+                   for inst in FakeTg.instances for m, p in inst.sent), "receipt anchor deleted"
     # breadcrumb Back: new-buy receipt -> Back -> main menu, session cleared
     FakeTg.instances.clear()
     await handle_update(ctx, shop, {"update_id": 4, "callback_query": {"id": "c2", "from": {"id": 111},
@@ -902,7 +937,7 @@ async def _full():
     await handle_update(ctx, shop, {"update_id": 15, "callback_query": {"id": "c9", "from": {"id": 111},
                                                                         "data": "menu"}})
     assert len(db.orders) == n_before, "Back navigation created an order"
-    sent = [p for inst in FakeTg.instances for m, p in inst.sent if m == "sendMessage"]
+    sent = [p for inst in FakeTg.instances for m, p in inst.sent if m in ("sendMessage", "editMessageText")]
     texts = [p.get("text", "") for p in sent]
     rms = [p["rm"] for p in sent if p["rm"]]
     assert any("renewpkg:" in str(rm) for rm in rms), sent
@@ -912,7 +947,7 @@ async def _full():
     detail_rms = [str(rm) for rm in rms
                   if "renew:1" in str(rm) and "back:subs" in str(rm) and "'menu'" in str(rm)]
     assert detail_rms, sent
-    assert any("Traffic:" in t and "Expires:" in t for t in texts), texts
+    assert any("Traffic Limit" in t and "Expire Date" in t for t in texts), texts
     assert "Buy Subscription" in str(rms[-1]), sent
     print("ALL INTEGRATION CHECKS PASSED")
 
@@ -1085,7 +1120,7 @@ async def _renew_tier_flow():
     await cb("my_subs", "r0")
     assert f"sub:{subid}" in last_rm(), last_rm()
     await cb(f"sub:{subid}", "r1")
-    assert "Traffic:" in last_text(), last_text()
+    assert "Traffic Limit" in last_text(), last_text()
     await cb(f"renew:{subid}", "r2")  # renew entry is the tier list now
     assert f"renewtier:{subid}:{tidA}" in last_rm(), last_rm()
     assert f"renewtier:{subid}:{tidB}" in last_rm(), last_rm()
@@ -1248,10 +1283,10 @@ async def _match_topup_flow():
     # no explainer, no owner ping.
     await cb(f"qrenew:{sub2id}", "m3")
     chain_rms = [p[1].get("rm") for inst in FakeTg.instances for p in inst.sent
-                 if p[0] == "sendMessage" and p[1].get("rm")]
+                 if p[0] in ("sendMessage", "editMessageText") and p[1].get("rm")]
     assert any("renewtier:" in str(r) for r in chain_rms), chain_rms
     assert not any("exact terms" in p[1]["text"] for inst in FakeTg.instances for p in inst.sent
-                   if p[0] == "sendMessage"), "explainer should be gone"
+                   if p[0] in ("sendMessage", "editMessageText")), "explainer should be gone"
     svc._owner_account_id, svc._owner_is_superadmin = real_owner, real_super
     print("MATCH TOPUP FLOW PASSED")
 
@@ -1337,7 +1372,7 @@ async def _effects_flow():
             "chat": {"id": 111}, "text": text}})
 
     def texts():
-        return [p[1]["text"] for inst in FakeTg.instances for p in inst.sent if p[0] == "sendMessage"]
+        return [p[1]["text"] for inst in FakeTg.instances for p in inst.sent if p[0] in ("sendMessage", "editMessageText")]
 
     def last_text():
         return FakeTg.instances[-1].sent[-1][1]["text"]
@@ -1445,8 +1480,9 @@ def test_webhook_flow():
     asyncio.run(_webhook_flow())
 
 
-async def _loose_pkg_flow():
-    """Decoupled catalog: tier-less packages show next to tiers; referral sends a usable link."""
+async def _internal_tiers_flow():
+    """Internal tiers + sort order: tier buttons by default; flat sorted package
+    list when the owner marks tiers internal; tracked bot-message cleanup."""
     import rwa_plugin_pershop.crypto as crypto_mod
     import rwa_plugin_pershop.telegram as tgmod
     from rwa_plugin_pershop.routes_telegram import handle_update
@@ -1459,12 +1495,12 @@ async def _loose_pkg_flow():
     db = FakeDB()
     ctx = FakeCtx(db)
     sid, _legacy = make_shop(db)
-    tid, _tied = make_stepped(db, sid)
-    loose = db._next("pkg")
-    db.pkgs[loose] = {"id": loose, "shop_id": sid, "tier_id": None, "name": "Loose",
+    tid, tied = make_stepped(db, sid)
+    second = db._next("pkg")
+    db.pkgs[second] = {"id": second, "shop_id": sid, "tier_id": tid, "name": "Second",
                        "traffic_limit_bytes": None, "duration_days": 30,
                        "price_text": "", "price_units": 1.0, "squad_uuid": None, "active": True,
-                       "effect": "full", "hwid_mode": "default"}
+                       "effect": "full", "hwid_mode": "default", "sort": -1}
     shop = db.shops[sid]
     shop.update({"referral_text": "Invite!", "bot_username": "vipshopbot"})
     FakeTg.instances.clear()
@@ -1480,31 +1516,58 @@ async def _loose_pkg_flow():
 
     def rms():
         return [p["rm"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["rm"]]
+                if m in ("sendMessage", "editMessageText") and p.get("rm")]
 
     def texts():
-        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent if m == "sendMessage"]
+        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText")]
 
-    # buy list: tier button AND the tier-less package side by side
+    def edits():
+        return [(m, p) for inst in FakeTg.instances for m, p in inst.sent if m == "editMessageText"]
+
+    def deletes():
+        return [(m, p) for inst in FakeTg.instances for m, p in inst.sent if m == "deleteMessage"]
+
+    # default: tier buttons only, no direct package buttons
     await txt("🛒 Buy Subscription")
     flat = str(rms()[-1])
-    assert f"tiers:{tid}" in flat and f"buy:{loose}" in flat, flat
-    # renew tiers: same shape with renewpkg: for the loose package
+    assert f"tiers:{tid}" in flat and "buy:" not in flat, flat
+    # second tap reuses the tracked message: edit, no fresh send
+    def sends():
+        return [p for inst in FakeTg.instances for m, p in inst.sent if m == "sendMessage"]
+    sends_before = len(sends())
+    await txt("🛒 Buy Subscription")
+    assert len(sends()) == sends_before, "menu tap should edit, not send"
+    assert edits(), "expected an editMessageText"
+    assert db.last_mids.get((sid, 111)), db.last_mids
+    assert any(p["message_id"] == 9 for _, p in deletes()), "panel tap not cleaned up"
+    # internal tiers: flat package list sorted by sort (Second first), no tier buttons
+    shop["tiers_internal"] = True
+    await cb("menu", "m1")
+    await txt("🛒 Buy Subscription")
+    flat = str(rms()[-1])
+    assert "tiers:" not in flat, flat
+    assert f"buy:{second}" in flat and f"buy:{tied}" in flat, flat
+    assert flat.index(f"buy:{second}") < flat.index(f"buy:{tied}"), "sort order not respected"
+    # renew with internal tiers goes straight to the flat picker
     db.subs[1] = {"id": 1, "shop_id": sid, "buyer_tg_id": 111, "user_uuid": "uu-9",
                   "username": "vip-alice", "package_id": None, "expire_at": None,
                   "traffic_limit_bytes": None, "is_test": False, "is_linked": True,
                   "cancelled": False}
     await cb("renew:1", "l2")
     flat = str(rms()[-1])
-    assert f"renewtier:1:{tid}" in flat and f"renewpkg:1:{loose}" in flat, flat
+    assert f"renewpkg:1:{second}" in flat and f"renewpkg:1:{tied}" in flat, flat
+    assert "renewtier:" not in flat, flat
     # referral: usable t.me link, not a bare code
     await txt("👥 Referral Program")
     assert "t.me/vipshopbot?start=r_111" in texts()[-1], texts()[-1]
-    print("LOOSE PKG FLOW PASSED")
+    assert not deletes() or all(p["message_id"] == 9 for _, p in deletes()), \
+        "only the panel-tap message may be deleted here"
+    print("INTERNAL TIERS FLOW PASSED")
 
 
-def test_loose_pkg_flow():
-    asyncio.run(_loose_pkg_flow())
+def test_internal_tiers_flow():
+    asyncio.run(_internal_tiers_flow())
 
 
 def test_effects_flow():
@@ -1615,10 +1678,11 @@ async def _menu_flow():
 
     def rms():
         return [p["rm"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["rm"]]
+                if m in ("sendMessage", "editMessageText") and p.get("rm")]
 
     def texts():
-        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent if m == "sendMessage"]
+        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText")]
 
     # full seven-entry bottom panel (labels, not callbacks)
     await txt("/start")
@@ -1670,6 +1734,74 @@ async def _menu_flow():
 
 def test_menu_flow():
     asyncio.run(_menu_flow())
+
+
+async def _referral_cards_flow():
+    """Referral self-heal (getMe when no stored username, {percent}/{link}
+    filled in), welcome {shop}, and the RWA-style approved/renewed cards
+    carrying plan/traffic/price/when."""
+    from datetime import datetime, timedelta, timezone
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.service as svc
+    import rwa_plugin_pershop.telegram as tgmod
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, pid = make_shop(db)
+    shop = db.shops[sid]
+    assert not shop.get("bot_username")
+    shop["referral_text"] = "Reward {percent}%! Share: {link}"
+    shop["welcome_text"] = "Welcome to {shop}!"
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    async def txt(text, uid=111, un="alice"):
+        await handle_update(ctx, shop, {"update_id": 210, "message": {
+            "message_id": 19, "from": {"id": uid, "username": un},
+            "chat": {"id": uid}, "text": text}})
+
+    def texts():
+        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText")]
+
+    await txt("👥 Referral Program")
+    assert "t.me/vipshopbot?start=r_111" in texts()[-1], texts()[-1]
+    assert "10" in texts()[-1], texts()[-1]
+    assert db.shops[sid]["bot_username"] == "vipshopbot", db.shops[sid]
+    # second tap uses the cached username, no new getMe needed for the link
+    await txt("👥 Referral Program")
+    assert "t.me/vipshopbot?start=r_111" in texts()[-1], texts()[-1]
+    # welcome text fills in the shop prefix
+    FakeTg.instances.clear()
+    await txt("/start")
+    assert "Welcome to vip!" in texts()[-1], texts()[-1]
+    # approved/renewed cards carry plan, traffic, price, relative date
+    exp = datetime.now(timezone.utc) + timedelta(days=30)
+    order = {"package_id": pid, "total_units": 2.5,
+             "buyer_tg_id": 111, "buyer_username": "alice"}
+    result = {"username": "vip-alice", "expire_at": exp,
+              "subscription_url": "https://sub/abc"}
+    card = await svc.approval_vars(ctx, shop, order, result)
+    assert card["plan"] == "Monthly", card
+    assert "625,000" in card["price"], card
+    bought = svc.message_text(shop, "approved", username="vip-alice",
+                              url="https://sub/abc", **card)
+    for needle in ("vip-alice", "Monthly", "625,000", "Traffic Limit", "Subscription Link",
+                   "HWID Limit", "Expire Date"):
+        assert needle in bought, bought
+    renewed = svc.message_text(shop, "renewed", username="vip-alice", **card)
+    assert "Expire Date" in renewed and "Monthly" in renewed, renewed
+    assert svc.fmt_safe("Thanks {username}!", username="alice") == "Thanks alice!"
+    assert "{unknown}" in svc.fmt_safe("Hi {unknown}!", username="alice")
+    print("REFERRAL CARDS FLOW PASSED")
+
+
+def test_referral_cards_flow():
+    asyncio.run(_referral_cards_flow())
 
 
 async def _tier_squad_flow():
@@ -1802,7 +1934,7 @@ async def _link_flow():
 
         def texts(uid=333):
             return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
-                    if m == "sendMessage" and p.get("chat_id") == uid]
+                    if m in ("sendMessage", "editMessageText") and p.get("chat_id") == uid]
 
         await cb("my_subs", "l0", uid=333, un="cara")
         assert "linksub" in str(FakeTg.instances[-1].sent), FakeTg.instances[-1].sent
@@ -1856,8 +1988,8 @@ def test_relatives():
     assert rel_words(en, now - timedelta(days=1), now) == "yesterday"
     assert rel_words(fa, now + timedelta(days=5), now) == "5 روز دیگر"
     assert rel_words(fa, now - timedelta(hours=2), now) == "2 ساعت پیش"
-    assert format_when(en, now + timedelta(days=5), now) == "in 5 days · 2027-01-06"
-    assert format_when(en, datetime(2999, 12, 31)) == "never expires"
+    assert format_when(en, now + timedelta(days=5), now) == "in 5 days (2027-01-06)"
+    assert format_when(en, datetime(2999, 12, 31)) == "No expiry"
     assert format_when(en, None) != ""
     print("RELATIVES PASSED")
 
@@ -1913,7 +2045,7 @@ async def _account_cancel_flow():
 
     def mine(uid=111):
         return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["chat_id"] == uid]
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid]
 
     def owner_msgs():
         return [(p["text"], p.get("rm")) for inst in FakeTg.instances for m, p in inst.sent
@@ -2045,7 +2177,7 @@ async def _mixed_withdraw_flow():
 
     def mine(uid=111):
         return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["chat_id"] == uid]
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid]
 
     def owner_msgs():
         return [(p["text"], p.get("rm")) for inst in FakeTg.instances for m, p in inst.sent
@@ -2133,7 +2265,7 @@ async def _buyer_lang_flow():
 
     def rms(uid=111):
         return [p.get("rm") for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["chat_id"] == uid]
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid]
 
     def flat(rm):
         rows = (rm or {}).get("inline_keyboard", [])
@@ -2202,11 +2334,11 @@ async def _account_hub_flow():
 
     def rms(uid=111):
         return [p.get("rm") for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["chat_id"] == uid]
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid]
 
     def texts(uid=111):
         return [p.get("text", "") for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["chat_id"] == uid]
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid]
 
     def btns(rm):
         return [b.get("text") for r in (rm or {}).get("inline_keyboard", []) for b in (r or [])]
@@ -2353,11 +2485,11 @@ async def _followup6_flow():
 
     def texts(uid=111):
         return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p.get("chat_id") == uid]
+                if m in ("sendMessage", "editMessageText") and p.get("chat_id") == uid]
 
     def rms(uid=111):
         return [p.get("rm") for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["chat_id"] == uid]
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid]
 
     def flat(rm):
         rows = (rm or {}).get("inline_keyboard", [])
@@ -2562,7 +2694,7 @@ async def _scam_flow():
 
     def texts_to(cid):
         return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p.get("chat_id") == cid]
+                if m in ("sendMessage", "editMessageText") and p.get("chat_id") == cid]
 
     # deny first (reason flow), the report button only appears after that
     await acbA(f"deny:{oid}", "s0")
@@ -2626,7 +2758,7 @@ async def _global_test_flow():
             "id": cid, "from": {"id": uid, "username": "u"}, "data": "testconfirm"}})
 
     def texts():
-        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent if m == "sendMessage"]
+        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent if m in ("sendMessage", "editMessageText")]
 
     await confirm(shopA, "t1", 111)
     assert sum(1 for s in db.subs.values() if s.get("is_test")) == 1, db.subs
@@ -2715,11 +2847,11 @@ async def _service_flow(ctx, shop, db):
 
     def mine(uid=555):
         return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["chat_id"] == uid]
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid]
 
     def rms():
         return [p["rm"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p.get("rm")]
+                if m in ("sendMessage", "editMessageText") and p.get("rm")]
 
     await handle_update(ctx, shop, {"update_id": 502, "message": {"message_id": 1,
         "from": {"id": 555, "username": "bob"}, "chat": {"id": 555}, "text": "/start"}})
@@ -2744,7 +2876,7 @@ async def _service_flow(ctx, shop, db):
     orders = [o for o in db.orders.values() if o.get("service_id") == svcid]
     assert len(orders) == 1 and orders[0]["status"] == "pending", db.orders
     owner = [p["text"] for inst in FakeTg.instances for m, p in inst.sent
-             if m == "sendMessage" and p["chat_id"] == 999]
+             if m in ("sendMessage", "editMessageText") and p["chat_id"] == 999]
     assert any("[service]" in t and "please hurry" in t for t in owner), owner
     assert any("approve:" in str(rm) for rm in rms()), rms()
     assert not any("scam:" in str(rm) for rm in rms()), "scam report must not show pre-deny"
@@ -3032,11 +3164,11 @@ async def _credit_flow():
 
     def rms():
         return [p["rm"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["rm"]]
+                if m in ("sendMessage", "editMessageText") and p["rm"]]
 
     def texts(uid=None):
         return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and (uid is None or p.get("chat_id") == uid)]
+                if m in ("sendMessage", "editMessageText") and (uid is None or p.get("chat_id") == uid)]
 
     async def buy_contract(uid, un, cid):
         await cb(f"tiers:{tid}", f"{cid}a", uid=uid, un=un)
@@ -3135,11 +3267,11 @@ async def _credit_auto_flow():
 
     def rms():
         return [p["rm"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and p["rm"]]
+                if m in ("sendMessage", "editMessageText") and p["rm"]]
 
     def texts(uid=None):
         return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
-                if m == "sendMessage" and (uid is None or p.get("chat_id") == uid)]
+                if m in ("sendMessage", "editMessageText") and (uid is None or p.get("chat_id") == uid)]
 
     # 111 invited 777; 777 holds 5.0u and buys Pro (2.5u) fully on credit.
     await svc.record_referral(ctx, sid, 111, 777)
@@ -3319,7 +3451,8 @@ async def _shop_admin_flow():
     await ctx.settings.set("tg_offset:1", 42)
     assert len(db.shops) == 1
     res = await svc.reset_all(ctx)
-    assert res["ok"] is True and len(res["wiped"]) == 13, res
+    assert res["ok"] is True and len(res["dropped"]) == 13, res
+    assert db.dropped is True and db.versions == set(), res
     assert db.shops == {} and db.pkgs == {} and db.subs == {}, db
     assert ctx.settings.d == {}, ctx.settings.d
 
@@ -3373,9 +3506,10 @@ if __name__ == "__main__":
     test_renew_tier_flow()
     test_match_topup_flow()
     test_webhook_flow()
-    test_loose_pkg_flow()
+    test_internal_tiers_flow()
     test_effects_flow()
     test_menu_flow()
+    test_referral_cards_flow()
     test_tier_squad_flow()
     test_link_flow()
     test_account_cancel_flow()

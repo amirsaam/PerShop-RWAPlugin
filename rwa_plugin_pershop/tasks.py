@@ -162,6 +162,26 @@ async def _traffic_offers(ctx, shop: dict) -> bool:
         return False
 
 
+async def _say(ctx, tg, shop: dict, chat_id: int, text: str,
+           reply_markup: dict | None = None) -> None:
+    """Notifier send with the same delete-before-send cleanup as the bot
+    screens: our previous bot message in this chat is removed first, so
+    reminders never stack. Buyer messages are never touched. Never raises."""
+    from rwa_plugin_pershop.service import get_last_mid, set_last_mid
+
+    try:
+        prev = await get_last_mid(ctx, shop["id"], chat_id)
+        if prev:
+            try:
+                await tg.delete_message(chat_id, prev)
+            except Exception:
+                pass
+        mid = await tg.send_message(chat_id, text, reply_markup=reply_markup)
+        await set_last_mid(ctx, shop["id"], chat_id, mid)
+    except Exception as e:
+        ctx.logger.warning("shop.notify_send_failed", extra={"err": str(e)})
+
+
 async def _notify_expiry(ctx, tg, shop: dict, sub: dict, exp, now: datetime) -> None:
     """Expired (once) + 72h warning (once, re-arms) — each with its fix button."""
     from rwa_plugin_pershop.lang import L
@@ -170,7 +190,7 @@ async def _notify_expiry(ctx, tg, shop: dict, sub: dict, exp, now: datetime) -> 
     # Expired (once).
     if exp and exp <= now:
         if not sub["notified_expired"]:
-            await tg.send_message(sub["buyer_tg_id"],
+            await _say(ctx, tg, shop, sub["buyer_tg_id"],
                 L(shop, "expired_notice", username=sub["username"]), reply_markup=kb(
                 [[{"text": L(shop, "reactivate_btn"),
                    "callback_data": f"qrenew:{sub['id']}"}]]))
@@ -182,7 +202,7 @@ async def _notify_expiry(ctx, tg, shop: dict, sub: dict, exp, now: datetime) -> 
     if exp:
         remaining = (exp - now).total_seconds()
         if 0 < remaining <= HOURS_72 and not sub["notified_72h"]:
-            await tg.send_message(sub["buyer_tg_id"],
+            await _say(ctx, tg, shop, sub["buyer_tg_id"],
                 L(shop, "expiring_notice", username=sub["username"],
                   expire=exp.strftime("%Y-%m-%d %H:%M")), reply_markup=kb(
                 [[{"text": L(shop, "renew_keep_btn"),
@@ -202,7 +222,7 @@ async def _notify_traffic(ctx, tg, shop: dict, sub: dict, ratio: float) -> None:
     markup = (kb([[{"text": L(shop, "add_traffic_btn"),
                             "callback_data": f"addtraffic:{sub['id']}"}]])
               if await _traffic_offers(ctx, shop) else None)
-    await tg.send_message(sub["buyer_tg_id"],
+    await _say(ctx, tg, shop, sub["buyer_tg_id"],
         L(shop, "traffic_notice", username=sub["username"], percent=f"{ratio:.0%}"),
         reply_markup=markup)
     await ctx.db.execute(
@@ -220,7 +240,7 @@ async def _notify_out_of_traffic(ctx, tg, shop: dict, sub: dict) -> None:
     else:
         btn = {"text": L(shop, "renew_keep_btn"),
                "callback_data": f"qrenew:{sub['id']}"}
-    await tg.send_message(sub["buyer_tg_id"],
+    await _say(ctx, tg, shop, sub["buyer_tg_id"],
         L(shop, "out_of_traffic_notice", username=sub["username"]),
         reply_markup=kb([[btn]]))
     await ctx.db.execute(
