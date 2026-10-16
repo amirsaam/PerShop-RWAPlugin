@@ -4,7 +4,15 @@ window.rwaPluginUI['pershop'] = {
     const api = '/api/v2/plugins/pershop';
     const q = (id) => el.querySelector('#' + id);
     const j = async (url, opts) => {
-      const r = await fetch(url, Object.assign({headers: {'Content-Type': 'application/json'}}, opts || {}));
+      const o = Object.assign({headers: {'Content-Type': 'application/json'}}, opts || {});
+      const method = (o.method || 'GET').toUpperCase();
+      if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+        // Panel auth is cookie-based (rw_access); mutating requests need the
+        // double-submit CSRF token from the readable rw_csrf cookie.
+        const m = document.cookie.match(/(?:^|; )rw_csrf=([^;]*)/);
+        if (m) o.headers['X-CSRF-Token'] = decodeURIComponent(m[1]);
+      }
+      const r = await fetch(url, o);
       if (!r.ok) { const e = new Error(await r.text()); e.status = r.status; throw e; }
       return r.json();
     };
@@ -266,7 +274,10 @@ window.rwaPluginUI['pershop'] = {
         if (f) fd.append('photo', f);
         q('bcstat').textContent = 'Queueing…';
         try {
-          const r = await fetch(api + '/broadcast', {method: 'POST', body: fd}).then(async (x) => {
+          const h = {};
+          const m = document.cookie.match(/(?:^|; )rw_csrf=([^;]*)/);
+          if (m) h['X-CSRF-Token'] = decodeURIComponent(m[1]);
+          const r = await fetch(api + '/broadcast', {method: 'POST', headers: h, body: fd}).then(async (x) => {
             if (!x.ok) throw new Error((await x.text()).slice(0, 200));
             return x.json();
           });
