@@ -1776,6 +1776,8 @@ async def _referral_cards_flow():
     await txt("👥 Referral Program")
     assert "t.me/vipshopbot?start=r_111" in texts()[-1], texts()[-1]
     assert "10" in texts()[-1], texts()[-1]
+    # the referral screen always carries a Back button to the main menu
+    assert rms()[-1]["inline_keyboard"][-1][0]["callback_data"] == "menu", rms()[-1]
     assert db.shops[sid]["bot_username"] == "vipshopbot", db.shops[sid]
     # second tap uses the cached username, no new getMe needed for the link
     await txt("👥 Referral Program")

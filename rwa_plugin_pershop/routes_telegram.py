@@ -326,7 +326,8 @@ async def _send_test_offer(ctx, shop, tg, sender, edit=None) -> None:
     from rwa_plugin_pershop.telegram import kb
 
     if not shop.get("test_enabled"):
-        await _show(ctx, shop, tg, sender, edit, L(shop, "test_off"))
+        await _show(ctx, shop, tg, sender, edit, L(shop, "test_off"),
+                    kb(_back_row(shop)))
         return
     terms = await test_terms(ctx, shop)
     await _show(
@@ -340,6 +341,7 @@ async def _send_referral(ctx, shop, tg, chat_id, tg_id, edit=None) -> None:
     copyable invite link. Self-heals a missing bot username via getMe."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import ensure_bot_username, fmt_safe
+    from rwa_plugin_pershop.telegram import kb
 
     bot_un = await ensure_bot_username(ctx, shop)
     try:
@@ -351,10 +353,12 @@ async def _send_referral(ctx, shop, tg, chat_id, tg_id, edit=None) -> None:
     text = fmt_safe(text, percent=pct, link=link or f"r_{tg_id}")
     if bot_un:
         await _show(ctx, shop, tg, chat_id, edit,
-                    L(shop, "referral_body", text=text, link=link))
+                    L(shop, "referral_body", text=text, link=link),
+                    reply_markup=kb(_back_row(shop)))
     else:
         await _show(ctx, shop, tg, chat_id, edit,
-                    L(shop, "referral_nocode", text=text, id=tg_id))
+                    L(shop, "referral_nocode", text=text, id=tg_id),
+                    reply_markup=kb(_back_row(shop)))
 
 
 async def _on_menu_action(ctx, shop, tg, chat_id, buyer_id, buyer_un, action) -> None:
@@ -374,11 +378,17 @@ async def _on_menu_action(ctx, shop, tg, chat_id, buyer_id, buyer_un, action) ->
     elif action == "pershop:how":
         tutorial = (await ctx.settings.get("tutorial_text", default="") or "").strip()
         if tutorial:
-            await _show(ctx, shop, tg, buyer_id, None, tutorial)
+            from rwa_plugin_pershop.telegram import kb as _k
+
+            await _show(ctx, shop, tg, buyer_id, None, tutorial,
+                        reply_markup=_k(_back_row(shop)))
     elif action == "pershop:help":
         support = (shop.get("support_text") or "").strip()
         if support:
-            await _show(ctx, shop, tg, buyer_id, None, support)
+            from rwa_plugin_pershop.telegram import kb as _k
+
+            await _show(ctx, shop, tg, buyer_id, None, support,
+                        reply_markup=_k(_back_row(shop)))
     elif action == "account":
         await _send_account(ctx, shop, tg, buyer_id)
 
@@ -1220,7 +1230,8 @@ async def _send_renew_picker(ctx, shop, tg, sender, sub, edit=None) -> None:
 
     pkgs = _full_only(await _packages(ctx, shop["id"]))
     if not pkgs:
-        await _show(ctx, shop, tg, sender, edit, L(shop, "no_packages"))
+        await _show(ctx, shop, tg, sender, edit, L(shop, "no_packages"),
+                    kb(_back_row(shop)))
         return
     btns = [[{"text": f"{p['name']} — {p['price_text']}", "callback_data": f"renewpkg:{sub['id']}:{p['id']}"}]
             for p in pkgs]
@@ -2264,7 +2275,8 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             res = await claim_test_sub(ctx, shop, sender,
                                        ((cb.get("from") or {}).get("username")) or "")
         except ValueError:
-            await _show(ctx, shop, tg, sender, mid, L(shop, "test_limit_one"))
+            await _show(ctx, shop, tg, sender, mid, L(shop, "test_limit_one"),
+                        kb(_back_row(shop)))
             return
         url = res.get("subscription_url") or L(shop, "url_fallback")
         await _show(
@@ -2279,13 +2291,19 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
     if data == "pershop:how":
         tutorial = (await ctx.settings.get("tutorial_text", default="") or "").strip()
         if tutorial:
-            await _show(ctx, shop, tg, sender, mid, tutorial)
+            from rwa_plugin_pershop.telegram import kb as _k
+
+            await _show(ctx, shop, tg, sender, mid, tutorial,
+                        reply_markup=_k(_back_row(shop)))
         return
 
     if data == "pershop:help":
         support = (shop.get("support_text") or "").strip()
         if support:
-            await _show(ctx, shop, tg, sender, mid, support)
+            from rwa_plugin_pershop.telegram import kb as _k
+
+            await _show(ctx, shop, tg, sender, mid, support,
+                        reply_markup=_k(_back_row(shop)))
         return
 
     if data.startswith("tiers:"):
@@ -2325,7 +2343,8 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         from rwa_plugin_pershop.service import hwid_cfg, pkg_effect
 
         if not pkg or pkg_effect(pkg) != "full":
-            await _show(ctx, shop, tg, sender, mid, L(shop, "pkg_unavailable"))
+            await _show(ctx, shop, tg, sender, mid, L(shop, "pkg_unavailable"),
+                        kb(_back_row(shop)))
             return
         await _maybe_scam_warn(ctx, shop, tg, sender,
                                ((cb.get("from") or {}).get("username")) or "")
