@@ -612,7 +612,13 @@ async def link_subscription(ctx, shop: dict, token: str, tg_id: int) -> tuple[st
     except Exception as e:
         ctx.logger.error("shop link failed for %s: %s", username, e)
         return ("failed", {"username": username})
-    exp = row.get("expireAt", row.get("expire_at"))
+    exp_raw = row.get("expireAt", row.get("expire_at"))
+    try:
+        from datetime import datetime
+
+        exp = datetime.fromisoformat(str(exp_raw).replace("Z", "+00:00")).replace(tzinfo=None) if exp_raw else None
+    except Exception:
+        exp = exp_raw  # pass through if parsing fails; DB will reject with clear message
     try:
         existing = await ctx.db.fetchrow(
             "SELECT id FROM plugin_pershop_subs WHERE shop_id=$1 AND username=$2",
