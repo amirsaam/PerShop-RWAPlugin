@@ -1592,25 +1592,31 @@ async def approval_vars(ctx, shop: dict, order: dict, result: dict) -> dict:
 
 
 def tutorial_link_rows(raw: str) -> list:
-    """Inline URL-button rows for the buyer How-to-Use message.
+    """Inline-button rows for the buyer How-to-Use message.
 
-    The superadmin writes one button per line in the plugin settings:
-        Label | https://example.com
-    Only http(s) links pass; blank or malformed lines are skipped.
-    Never raises."""
+    The superadmin writes one row per line in the plugin settings:
+        Label | https://example.com            (one button, own row)
+        Label1 | https://a.io || Label2 | https://b.io   (two buttons inline)
+    Buttons are wrapped at 8 per row; only http(s) links pass; blank or
+    malformed chunks are skipped. Never raises."""
     rows: list[list[dict]] = []
     try:
         for line in (raw or "").splitlines():
-            if "|" not in line:
-                continue
-            label, _, url = line.partition("|")
-            label = (label or "").strip()
-            url = (url or "").strip()
-            if not label or not url.lower().startswith(("http://", "https://")):
-                continue
-            rows.append([{"text": label[:64], "url": url}])
+            row: list[dict] = []
+            for chunk in line.split("||"):
+                if "|" not in chunk:
+                    continue
+                label, _, url = chunk.partition("|")
+                label = (label or "").strip()
+                url = (url or "").strip()
+                if not label or not url.lower().startswith(("http://", "https://")):
+                    continue
+                if len(row) < 8:
+                    row.append({"text": label[:64], "url": url})
+            if row:
+                rows.append(row)
     except Exception:
-        return rows
+        return []
     return rows[:24]
 
 

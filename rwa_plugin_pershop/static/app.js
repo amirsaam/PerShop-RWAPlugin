@@ -152,8 +152,8 @@ window.rwaPluginUI['pershop'] = {
         + '<div><label class="' + LBL + '" for="tutorial">How-to tutorial</label>' + fmtBar('tutorial')
         + '<textarea id="tutorial" rows="4" class="' + TA + '" placeholder="How buyers use the bot — every shop shows this. Blank hides the button.">' + esc(d.tutorial_text || '') + '</textarea></div>'
         + '<div><label class="' + LBL + '" for="tbtns">How-to buttons (optional)</label>' + fmtBar('tbtns')
-        + '<textarea id="tbtns" rows="3" class="' + TA + '" placeholder="One button per line:&#10;Video guide | https://youtube.com/...&#10;Website | https://example.com&#10;Only http(s) links; malformed lines are skipped.">' + esc(d.tutorial_buttons || '') + '</textarea>'
-        + '<p class="' + HELP + '">URL buttons attached under the tutorial message, above the Back button.</p></div>'
+        + '<textarea id="tbtns" rows="3" class="' + TA + '" placeholder="One row per line:&#10;Video guide | https://youtube.com/...&#10;Two inline | https://a.io || Docs | https://b.io&#10;Only http(s) links; malformed parts skipped.">' + esc(d.tutorial_buttons || '') + '</textarea>'
+        + '<p class="' + HELP + '">Row buttons attached under the tutorial message, above the Back button. Use || to put several buttons side-by-side on one row.</p></div>'
         + '<div><span class="' + LBL + '">Test subscription size (every shop, one trial per person across all shops)</span>'
         + '<div class="grid gap-4 sm:grid-cols-4">'
         + '<div><label class="' + LBL + '" for="tdays">Duration (days)</label><input id="tdays" inputmode="numeric" class="' + INP + '" value="' + esc(d.test_duration_days == null ? 1 : d.test_duration_days) + '"></div>'

@@ -1735,6 +1735,12 @@ async def _menu_flow():
     assert _tlr("A | https://a.io\nhttp ok | http://b.io\nB|not-a-url\n") == [
         [{"text": "A", "url": "https://a.io"}],
         [{"text": "http ok", "url": "http://b.io"}]]
+    # two buttons side-by-side on one row via ||
+    assert _tlr("Video | https://v.io || Docs | https://d.io\n") == [
+        [{"text": "Video", "url": "https://v.io"},
+         {"text": "Docs", "url": "https://d.io"}]]
+    # a bad chunk inside a line doesn't poison the good ones
+    assert _tlr("Good | https://g.io || junk\n") == [[{"text": "Good", "url": "https://g.io"}]]
     await txt("🆘 Request Support")
     assert "@support" in texts()[-1], texts()[-1]
     # disabled test + unconfigured texts hide their panel buttons
