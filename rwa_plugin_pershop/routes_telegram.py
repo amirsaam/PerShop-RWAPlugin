@@ -395,10 +395,13 @@ async def _on_menu_action(ctx, shop, tg, chat_id, buyer_id, buyer_un, action) ->
     elif action == "pershop:how":
         tutorial = (await ctx.settings.get("tutorial_text", default="") or "").strip()
         if tutorial:
+            from rwa_plugin_pershop.service import tutorial_link_rows
             from rwa_plugin_pershop.telegram import kb as _k
 
+            trows = tutorial_link_rows(
+                await ctx.settings.get("tutorial_buttons", default=""))
             await _show(ctx, shop, tg, buyer_id, None, tutorial,
-                        reply_markup=_k(_back_row(shop)))
+                        reply_markup=_k(trows + _back_row(shop)))
     elif action == "pershop:help":
         support = (shop.get("support_text") or "").strip()
         if support:
@@ -2313,10 +2316,13 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
     if data == "pershop:how":
         tutorial = (await ctx.settings.get("tutorial_text", default="") or "").strip()
         if tutorial:
+            from rwa_plugin_pershop.service import tutorial_link_rows
             from rwa_plugin_pershop.telegram import kb as _k
 
+            trows = tutorial_link_rows(
+                await ctx.settings.get("tutorial_buttons", default=""))
             await _show(ctx, shop, tg, sender, mid, tutorial,
-                        reply_markup=_k(_back_row(shop)))
+                        reply_markup=_k(trows + _back_row(shop)))
         return
 
     if data == "pershop:help":

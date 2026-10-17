@@ -36,6 +36,9 @@ class ShopIn(BaseModel):
 class PluginSettingsIn(BaseModel):
     polling_enabled: bool = False
     tutorial_text: str = ""
+    # One URL button per line for the buyer How-to-Use message:
+    #   Label | https://example.com
+    tutorial_buttons: str = ""
     test_duration_days: int = Field(default=1, ge=1, le=365)
     test_traffic_gb: int = Field(default=1, ge=0, le=100000)
     test_squad_uuid: str = ""
@@ -1000,6 +1003,7 @@ def build_admin_router(ctx):
 
         polling = await ctx.settings.get("polling_enabled", default=False)
         tutorial = await ctx.settings.get("tutorial_text", default="")
+        tbuttons = await ctx.settings.get("tutorial_buttons", default="")
         test_days = await ctx.settings.get("test_duration_days", default=1)
         test_gb = await ctx.settings.get("test_traffic_gb", default=1)
         test_squad = await ctx.settings.get("test_squad_uuid", default="")
@@ -1009,7 +1013,8 @@ def build_admin_router(ctx):
         n_pending = await ctx.db.fetchval("SELECT COUNT(*) FROM plugin_pershop_orders WHERE status IN ('pending','withdraw_requested')")
         n_subs = await ctx.db.fetchval("SELECT COUNT(*) FROM plugin_pershop_subs")
         return {"version": _own_version(), "polling_enabled": bool(polling),
-                "tutorial_text": tutorial or "", "test_duration_days": test_days,
+                "tutorial_text": tutorial or "", "tutorial_buttons": tbuttons or "",
+                "test_duration_days": test_days,
                 "test_traffic_gb": test_gb, "test_squad_uuid": test_squad or "",
                 "test_hwid": test_hwid, "public_base_url": base or "",
                 "counts": {"shops": n_shops, "pending_orders": n_pending, "subs": n_subs}}
@@ -1019,6 +1024,7 @@ def build_admin_router(ctx):
                                   _a: AdminUser = Depends(require_permission("pershop_system", "manage"))):
         await ctx.settings.set("polling_enabled", payload.polling_enabled)
         await ctx.settings.set("tutorial_text", payload.tutorial_text)
+        await ctx.settings.set("tutorial_buttons", (payload.tutorial_buttons or "")[:5000])
         await ctx.settings.set("test_duration_days", payload.test_duration_days)
         await ctx.settings.set("test_traffic_gb", payload.test_traffic_gb)
         await ctx.settings.set("test_squad_uuid", (payload.test_squad_uuid or "").strip())
@@ -1027,6 +1033,7 @@ def build_admin_router(ctx):
         await ctx.settings.set("public_base_url", base)
         return {"polling_enabled": payload.polling_enabled,
                 "tutorial_text": payload.tutorial_text,
+                "tutorial_buttons": (payload.tutorial_buttons or "")[:5000],
                 "test_duration_days": payload.test_duration_days,
                 "test_traffic_gb": payload.test_traffic_gb,
                 "test_squad_uuid": (payload.test_squad_uuid or "").strip(),

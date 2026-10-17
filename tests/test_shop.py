@@ -1722,6 +1722,19 @@ async def _menu_flow():
     assert "t.me/vipshopbot?start=r_111" in texts()[-1], texts()[-1]
     await txt("📖 How to Use")
     assert "How to use" in texts()[-1], texts()[-1]
+    # tutorial URL buttons from the plugin setting ride above the Back row
+    await ctx.settings.set("tutorial_buttons",
+                           "Video guide | https://tutorials.example.com/x\nbad line\nDocs|javascript:alert(1)\n")
+    await txt("📖 How to Use")
+    rm = str(rms()[-1])
+    assert '"url": "https://tutorials.example.com/x"' in rm.replace("'", '"'), rm
+    assert "Video guide" in rm, rm
+    assert "javascript" not in rm, rm  # non-http(s) schemes dropped
+    assert "bad line" not in rm, rm
+    from rwa_plugin_pershop.service import tutorial_link_rows as _tlr
+    assert _tlr("A | https://a.io\nhttp ok | http://b.io\nB|not-a-url\n") == [
+        [{"text": "A", "url": "https://a.io"}],
+        [{"text": "http ok", "url": "http://b.io"}]]
     await txt("🆘 Request Support")
     assert "@support" in texts()[-1], texts()[-1]
     # disabled test + unconfigured texts hide their panel buttons

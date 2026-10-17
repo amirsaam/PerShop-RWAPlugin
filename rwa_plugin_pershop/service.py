@@ -235,6 +235,7 @@ _PERSHOP_SETTING_KEYS = [
     "polling_enabled",
     "public_base_url",
     "tutorial_text",
+    "tutorial_buttons",
     "test_duration_days",
     "test_traffic_gb",
     "test_squad_uuid",
@@ -1588,6 +1589,29 @@ async def approval_vars(ctx, shop: dict, order: dict, result: dict) -> dict:
         "hwid": hwid,
         "expire": exp,
     }
+
+
+def tutorial_link_rows(raw: str) -> list:
+    """Inline URL-button rows for the buyer How-to-Use message.
+
+    The superadmin writes one button per line in the plugin settings:
+        Label | https://example.com
+    Only http(s) links pass; blank or malformed lines are skipped.
+    Never raises."""
+    rows: list[list[dict]] = []
+    try:
+        for line in (raw or "").splitlines():
+            if "|" not in line:
+                continue
+            label, _, url = line.partition("|")
+            label = (label or "").strip()
+            url = (url or "").strip()
+            if not label or not url.lower().startswith(("http://", "https://")):
+                continue
+            rows.append([{"text": label[:64], "url": url}])
+    except Exception:
+        return rows
+    return rows[:24]
 
 
 def fmt_safe(text: str, **vars: Any) -> str:
