@@ -1610,6 +1610,7 @@ async def approval_vars(ctx, shop: dict, order: dict, result: dict) -> dict:
         "dot": "🟢",
         "hwid": hwid,
         "expire": format_when(shop, exp),
+        "url": result.get("subscription_url") or L(shop, "url_fallback"),
     }
 
 
