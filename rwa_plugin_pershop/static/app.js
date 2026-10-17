@@ -141,6 +141,33 @@ window.rwaPluginUI['pershop'] = {
 
     const renderSettingsBody = (info) => {
       const d = info || {};
+      // How-to buttons editor state: [{label, url, inline}] parsed from the
+      // stored `Label | URL || Label | URL` string (line = own bot row).
+      const tbState = [];
+      try {
+        (d.tutorial_buttons || '').split('\n').forEach((line) => {
+          line.split('||').forEach((chunk, ci) => {
+            if (!chunk.includes('|')) {
+              if (chunk.trim()) tbState.push({label: chunk.trim(), url: '',
+                                              inline: ci > 0});
+              return;
+            }
+            const parts = chunk.split('|');
+            const label = (parts[0] || '').trim();
+            const url = (parts.slice(1).join('|') || '').trim();
+            if (label || url) tbState.push({label: label, url: url,
+                                            inline: ci > 0});
+          });
+        });
+      } catch (e) { /* empty editor on any parse surprise */ }
+      const tbSerialize = () => {
+        let out = '';
+        tbState.forEach((b, i) => {
+          if (i > 0) out += b.inline ? ' || ' : '\n';
+          out += (b.label || '').trim() + ' | ' + (b.url || '').trim();
+        });
+        return out;
+      };
       q('tabbody').innerHTML = '<div class="' + CARD + '">'
         + '<h2 class="' + CARD_T + '">Plugin Settings <span class="text-xs font-normal text-dark-300">superadmin only · applies to every shop</span></h2>'
         + '<p class="text-sm text-dark-300 mb-5">Version: ' + esc(d.version) + ' · Shops: ' + d.counts.shops
@@ -151,9 +178,10 @@ window.rwaPluginUI['pershop'] = {
         + '<p class="' + HELP + '">For servers without public HTTPS. Webhook delivery is preferred — leave this off when the panel has a public URL.</p></div></div>'
         + '<div><label class="' + LBL + '" for="tutorial">How-to tutorial</label>' + fmtBar('tutorial')
         + '<textarea id="tutorial" rows="4" class="' + TA + '" placeholder="How buyers use the bot — every shop shows this. Blank hides the button.">' + esc(d.tutorial_text || '') + '</textarea></div>'
-        + '<div><label class="' + LBL + '" for="tbtns">How-to buttons (optional)</label>' + fmtBar('tbtns')
-        + '<textarea id="tbtns" rows="3" class="' + TA + '" placeholder="One row per line:&#10;Video guide | https://youtube.com/...&#10;Two inline | https://a.io || Docs | https://b.io&#10;Only http(s) links; malformed parts skipped.">' + esc(d.tutorial_buttons || '') + '</textarea>'
-        + '<p class="' + HELP + '">Row buttons attached under the tutorial message, above the Back button. Use || to put several buttons side-by-side on one row.</p></div>'
+        + '<div><label class="' + LBL + '">How-to buttons (optional)</label>'
+        + '<div id="tb_rows" class="space-y-2"></div>'
+        + '<div class="mt-2 flex items-center gap-2"><button type="button" id="tb_add" class="' + BTN_M + '">+ Add button</button></div>'
+        + '<p class="' + HELP + '">Each entry becomes one row in the bot, above the Back button. “Inline” places the button side-by-side with the one above it instead of starting a new row. Label and URL only — the text and its buttons stay the same message; only http(s) URLs are accepted.</p></div>'
         + '<div><span class="' + LBL + '">Test subscription size (every shop, one trial per person across all shops)</span>'
         + '<div class="grid gap-4 sm:grid-cols-4">'
         + '<div><label class="' + LBL + '" for="tdays">Duration (days)</label><input id="tdays" inputmode="numeric" class="' + INP + '" value="' + esc(d.test_duration_days == null ? 1 : d.test_duration_days) + '"></div>'
@@ -184,10 +212,35 @@ window.rwaPluginUI['pershop'] = {
           sel.appendChild(o);
         }
       }).catch(() => {});
+      // How-to buttons editor: one editor line per button, live state.
+      const tbRender = () => {
+        const box = q('tb_rows');
+        if (!box) return;
+        box.innerHTML = '';
+        if (!tbState.length) {
+          box.innerHTML = '<p class="text-xs text-dark-300">No buttons yet — buyers get just the tutorial text and Back.</p>';
+        }
+        tbState.forEach((b, i) => {
+          const line = document.createElement('div');
+          line.className = 'flex items-center gap-2';
+          const dis = i === 0 ? 'disabled title="The first button starts its own row"' : (b.inline ? 'checked' : '');
+          line.innerHTML = '<input id="tbl' + i + '" value="' + esc(b.label) + '" placeholder="Label (button text)" class="' + INP + '">'
+            + '<input id="tbu' + i + '" value="' + esc(b.url) + '" placeholder="https://…" class="' + INP + '">'
+            + '<label class="flex whitespace-nowrap items-center gap-1 text-xs text-dark-100" title="Same row as the button above"' + (i === 0 ? ' hidden' : '') + '><input type="checkbox" id="tbi' + i + '" class="h-4 w-4 accent-primary" ' + dis + '> inline</label>'
+            + '<button type="button" id="tbd' + i + '" class="' + BTN_M + '" title="Remove this button">✕</button>';
+          box.appendChild(line);
+          q('tbl' + i).addEventListener('change', () => { tbState[i].label = q('tbl' + i).value; });
+          q('tbu' + i).addEventListener('change', () => { tbState[i].url = q('tbu' + i).value; });
+          if (i > 0) q('tbi' + i).addEventListener('change', () => { tbState[i].inline = q('tbi' + i).checked; });
+          q('tbd' + i).addEventListener('click', () => { tbState.splice(i, 1); tbRender(); });
+        });
+      };
+      tbRender();
+      q('tb_add').addEventListener('click', () => { tbState.push({label: '', url: '', inline: false}); tbRender(); });
       q('save').onclick = async () => {
         try {
           await j(api + '/plugin-settings', {method: 'PUT', body: JSON.stringify({polling_enabled: q('poll').checked,
-            tutorial_text: q('tutorial').value, tutorial_buttons: q('tbtns').value,
+            tutorial_text: q('tutorial').value, tutorial_buttons: tbSerialize(),
             test_duration_days: Number(q('tdays').value) || 1,
             test_traffic_gb: Number(q('tgb').value) || 0, test_squad_uuid: q('tsquad').value.trim(),
             test_hwid: q('thwid').value.trim() === '' ? null : Number(q('thwid').value) || 0, public_base_url: q('base').value.trim()})});

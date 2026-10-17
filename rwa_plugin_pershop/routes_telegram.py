@@ -758,10 +758,9 @@ async def _send_subs_list(ctx, shop, tg, sender, edit=None) -> None:
                               shop["id"], sender)
     link_row = [[{"text": L(shop, "link_sub_btn"), "callback_data": "linksub"}]]
     if not rows:
-        await _show(ctx, shop, tg, sender, edit, L(shop, "no_subs"), kb([
-            [[{"text": L(shop, "buy_subs_btn"), "callback_data": "pershop:buy"}]],
-            link_row,
-        ] + _back_row(shop)))
+        await _show(ctx, shop, tg, sender, edit, L(shop, "no_subs"), kb(
+            [[{"text": L(shop, "buy_subs_btn"), "callback_data": "pershop:buy"}]]
+            + link_row + _back_row(shop)))
         return
     btns = []
     for r in rows:
@@ -1548,6 +1547,7 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
                                  saved.get("reason", ""), card)
         return
 
+    # Sub link while awaiting one?
     # Sub link while awaiting one?
     if ses and (ses["state"] or "") == "await_sub_link":
         from rwa_plugin_pershop.service import _extract_token, link_subscription

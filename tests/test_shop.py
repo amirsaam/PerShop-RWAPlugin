@@ -1700,6 +1700,14 @@ async def _menu_flow():
     assert any("buy:" in str(rm) for rm in rms()), rms()
     await txt("🔁 اشتراک‌های من / تمدید")
     assert any("linksub" in str(rm) for rm in rms()), rms()
+    # empty-subs keyboard is well-formed: 3 flat rows (buy / link / back)
+    empty_rm = [rm for rm in rms() if rm.get("inline_keyboard")
+                and any(any(b.get("callback_data") == "pershop:buy"
+                            for b in row) for row in rm["inline_keyboard"])]
+    assert empty_rm, rms()
+    kb_rows = empty_rm[-1]["inline_keyboard"]
+    assert len(kb_rows) == 3, kb_rows
+    assert all(isinstance(b, dict) and b.get("text") for row in kb_rows for b in row), kb_rows
     # referral deep-link recorded
     await txt("/start r_777", uid=222, un="bob")
     assert (sid, 777, 222) in db.referrals, db.referrals
