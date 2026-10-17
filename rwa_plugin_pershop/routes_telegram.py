@@ -255,6 +255,14 @@ def _back_row(shop) -> list:
     return [[{"text": L(shop, "back_btn"), "callback_data": "menu"}]]
 
 
+def _back_home_row(shop, back: str) -> list:
+    """One row, two buttons: climb one rung back, or jump home to the menu."""
+    from rwa_plugin_pershop.lang import L
+
+    return [[{"text": L(shop, "back_btn"), "callback_data": back},
+             {"text": L(shop, "main_menu_btn"), "callback_data": "menu"}]]
+
+
 def _pkg_back(shop: dict, pkg: dict | None) -> str:
     """Backward callback from a package-driven screen: the tier list the
     package was picked from, or the buy entry when the shop has no tiers
@@ -430,7 +438,7 @@ async def _send_tier_packages(ctx, shop, tg, sender, tier, edit=None) -> None:
     pkgs = await ctx.db.fetch(
         "SELECT * FROM plugin_pershop_packages WHERE tier_id=$1 AND active ORDER BY sort, id", tier["id"])
     rows = [[{"text": _pkg_label(shop, p), "callback_data": f"buy:{p['id']}"}] for p in _full_only(pkgs)]
-    rows.append([{"text": L(shop, "back_btn"), "callback_data": "pershop:buy"}])
+    rows += _back_home_row(shop, "pershop:buy")
     await _show(ctx, shop, tg, sender, edit, L(shop, "tier_pkg_title"), kb(rows))
 
 
@@ -460,9 +468,8 @@ async def _send_svc_items(ctx, shop, tg, chat_id, svcs, title=None, edit=None) -
 
     rows = [[{"text": f"{s['name']} — {format_price(shop, s.get('price_units') or 0)}",
               "callback_data": f"svc:{s['id']}"}] for s in svcs or []]
-    rows.append([{"text": L(shop, "back_btn"), "callback_data": "pershop:services"}])
+    rows += _back_home_row(shop, "pershop:services")
     await _show(ctx, shop, tg, chat_id, edit, title or L(shop, "choose_scat"), kb(rows))
-
 
 async def _send_svc_detail(ctx, shop, tg, chat_id, svc, back="pershop:services", edit=None) -> None:
     """One service: description + converted price + Buy + Back."""
@@ -476,8 +483,8 @@ async def _send_svc_detail(ctx, shop, tg, chat_id, svc, back="pershop:services",
         text += f"\n{_fsd((svc['description'] or '').strip(), price=_fpd(shop, svc.get('price_units') or 0))}"
     text += f"\n{L(shop, 'svc_price', price=format_price(shop, svc.get('price_units') or 0))}"
     await _show(ctx, shop, tg, chat_id, edit, text, kb(
-        [[{"text": L(shop, "contract_pay_btn"), "callback_data": f"svcbuy:{svc['id']}"}],
-         [{"text": L(shop, "back_btn"), "callback_data": back}]]))
+        [[{"text": L(shop, "contract_pay_btn"), "callback_data": f"svcbuy:{svc['id']}"}]]
+        + _back_home_row(shop, back)))
 
 
 async def _send_svc_note_prompt(ctx, shop, tg, chat_id, svc, back, edit=None) -> None:
@@ -486,8 +493,8 @@ async def _send_svc_note_prompt(ctx, shop, tg, chat_id, svc, back, edit=None) ->
     from rwa_plugin_pershop.telegram import kb
 
     mid = await _show(ctx, shop, tg, chat_id, edit, L(shop, "svc_note_prompt"), kb(
-        [[{"text": L(shop, "svc_skip_btn"), "callback_data": f"svcskip:{svc['id']}"}],
-         [{"text": L(shop, "back_btn"), "callback_data": f"svc:{svc['id']}"}]]))
+        [[{"text": L(shop, "svc_skip_btn"), "callback_data": f"svcskip:{svc['id']}"}]]
+        + _back_home_row(shop, f"svc:{svc['id']}")))
     await _set_session(ctx, shop["id"], chat_id, "buyer",
                        f"await_svc_note:{svc['id']}",
                        {"service_id": svc["id"], "back": back, "pm": mid})
@@ -525,8 +532,7 @@ async def _send_svc_contract(ctx, shop, tg, sender, svc, note, back,
                        f"await_summary:svc:{svc['id']}", saved)
     await _show(ctx, shop, tg, sender, edit, "\n\n".join(lines), kb(
         [[{"text": L(shop, "contract_pay_btn"), "callback_data": "stconfirm"}]]
-        + credit_row +
-        [[{"text": L(shop, "back_btn"), "callback_data": back}]]))
+        + credit_row + _back_home_row(shop, back)))
     return saved
 
 
@@ -952,7 +958,7 @@ async def _send_balance(ctx, shop, tg, sender, edit=None) -> None:
             lines.append(f"@{name} · {format_price(shop, r.get('earned') or 0)}")
         text = head + "\n\n" + L(shop, "acc_contrib_title") + "\n\n" + "\n".join(lines)
     await _show(ctx, shop, tg, sender, edit, text, kb(
-        [[{"text": L(shop, "back_btn"), "callback_data": "account"}]]))
+        _back_home_row(shop, "account")))
 
 
 async def _send_history(ctx, shop, tg, sender, edit=None) -> None:
@@ -985,7 +991,7 @@ async def _send_history(ctx, shop, tg, sender, edit=None) -> None:
                          f"{status_word.get(o.get('status'), o.get('status') or '')}")
         text = L(shop, "account_title") + "\n\n" + "\n".join(lines)
     await _show(ctx, shop, tg, sender, edit, text, kb(
-        [[{"text": L(shop, "back_btn"), "callback_data": "account"}]]))
+        _back_home_row(shop, "account")))
 
 
 async def _send_lang_menu(ctx, shop, tg, sender, edit=None) -> None:
@@ -998,7 +1004,7 @@ async def _send_lang_menu(ctx, shop, tg, sender, edit=None) -> None:
                        else f"{LANG_FLAGS.get(code, '')} {name}"),
               "callback_data": f"langpick:{code}"}]
             for code, name in LANGS.items()]
-    rows.append([{"text": L(shop, "back_btn"), "callback_data": "account"}])
+    rows += _back_home_row(shop, "account")
     await _show(ctx, shop, tg, sender, edit, L(shop, "lang_title"), kb(rows))
 
 
@@ -1035,7 +1041,7 @@ async def _send_withdraw_reason(ctx, shop, tg, sender, order_id: str, edit=None)
     back = await _cancel_back_target(ctx, shop, order)
     mid = await _show(
         ctx, shop, tg, sender, edit, L(shop, "withdraw_reason_prompt", id=order["id"]),
-        kb([[{"text": L(shop, "back_btn"), "callback_data": back}]]))
+        kb(_back_home_row(shop, back)))
     await _set_session(ctx, shop["id"], sender, "buyer",
                        f"await_wd_reason:{order['id']}", {"back": back, "pm": mid})
 
@@ -1227,7 +1233,7 @@ async def _send_link_prompt(ctx, shop, tg, sender, edit=None) -> None:
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
 
-    rows = [[{"text": L(shop, "back_btn"), "callback_data": "back:subs"}]]
+    rows = _back_home_row(shop, "back:subs")
     mid = await _show(ctx, shop, tg, sender, edit, L(shop, "link_sub_prompt"), kb(rows))
     await _set_session(ctx, shop["id"], sender, "buyer", "await_sub_link", {"pm": mid})
 
@@ -1240,12 +1246,11 @@ async def _send_renew_picker(ctx, shop, tg, sender, sub, edit=None) -> None:
     pkgs = _full_only(await _packages(ctx, shop["id"]))
     if not pkgs:
         await _show(ctx, shop, tg, sender, edit, L(shop, "no_packages"),
-                    kb([[{"text": L(shop, "back_btn"),
-                          "callback_data": f"sub:{sub['id']}"}]]))
+                    kb(_back_home_row(shop, f"sub:{sub['id']}")))
         return
     btns = [[{"text": f"{p['name']} — {p['price_text']}", "callback_data": f"renewpkg:{sub['id']}:{p['id']}"}]
             for p in pkgs]
-    btns.append([{"text": L(shop, "back_btn"), "callback_data": f"sub:{sub['id']}"}])
+    btns += _back_home_row(shop, f"sub:{sub['id']}")
     await _show(ctx, shop, tg, sender, edit, L(shop, "choose_renew_pkg"), kb(btns))
 
 
@@ -1260,7 +1265,7 @@ async def _send_renew_tiers(ctx, shop, tg, sender, sub, edit=None) -> None:
         await _send_renew_picker(ctx, shop, tg, sender, sub, edit=edit)
         return
     rows = [[{"text": t["name"], "callback_data": f"renewtier:{sub['id']}:{t['id']}"}] for t in tiers]
-    rows.append([{"text": L(shop, "back_btn"), "callback_data": f"sub:{sub['id']}"}])
+    rows += _back_home_row(shop, f"sub:{sub['id']}")
     await _show(ctx, shop, tg, sender, edit, L(shop, "choose_tier"), kb(rows))
 
 
@@ -1272,7 +1277,7 @@ async def _send_renew_tier_packages(ctx, shop, tg, sender, sub, tier, edit=None)
     pkgs = await ctx.db.fetch(
         "SELECT * FROM plugin_pershop_packages WHERE tier_id=$1 AND active ORDER BY sort, id", tier["id"])
     rows = [[{"text": _pkg_label(shop, p), "callback_data": f"renewpkg:{sub['id']}:{p['id']}"}] for p in _full_only(pkgs)]
-    rows.append([{"text": L(shop, "back_btn"), "callback_data": f"renew:{sub['id']}"}])
+    rows += _back_home_row(shop, f"renew:{sub['id']}")
     await _show(ctx, shop, tg, sender, edit, L(shop, "tier_pkg_title"), kb(rows))
 
 
@@ -1314,8 +1319,7 @@ async def _send_hwid(ctx, shop, tg, sender, pkg, value, edit=None) -> None:
             [{"text": "-", "callback_data": "hminus"},
              {"text": "+", "callback_data": "hplus"}],
             [{"text": L(shop, "opt_next"), "callback_data": "hnext"}],
-            [{"text": L(shop, "back_btn"), "callback_data": back_cb}],
-        ]))
+        ] + _back_home_row(shop, back_cb)))
     await _set_session(ctx, shop["id"], sender, "buyer", f"await_hwid:{pkg['id']}",
                        {"package_id": pkg["id"], "tier_id": pkg.get("tier_id"),
                         "hwid": value})
@@ -1432,8 +1436,7 @@ async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back=
     await _set_session(ctx, shop["id"], sender, "buyer", f"await_summary:{pkg['id']}", saved)
     await _show(ctx, shop, tg, sender, edit, "\n\n".join(lines), kb(
         [[{"text": L(shop, "contract_pay_btn"), "callback_data": "stconfirm"}]]
-        + credit_row +
-        [[{"text": L(shop, "back_btn"), "callback_data": back}]]))
+        + credit_row + _back_home_row(shop, back)))
     return saved
 
 
@@ -1511,8 +1514,7 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
         await _drop_user_msg(tg, chat_id, user_mid)
         await tg.send_message(
             chat_id, L(shop, "withdraw_card_prompt"),
-            reply_markup=kb([[{"text": L(shop, "back_btn"),
-                               "callback_data": saved.get("back", "my_subs")}]]))
+            reply_markup=kb(_back_home_row(shop, saved.get("back", "my_subs"))))
         return
 
     if ses and (ses["state"] or "").startswith("await_wd_card:"):
@@ -1537,7 +1539,7 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
     if ses and (ses["state"] or "") == "await_sub_link":
         from rwa_plugin_pershop.service import _extract_token, link_subscription
 
-        back = kb([[{"text": L(shop, "back_btn"), "callback_data": "back:subs"}]])
+        back = kb(_back_home_row(shop, "back:subs"))
         token = _extract_token(text or "")
         await _drop_user_msg(tg, chat_id, user_mid)
         if not token:
@@ -1929,7 +1931,7 @@ async def _send_topup_picker(ctx, shop, tg, sender, sub, effect, edit=None) -> N
         return
     rows = [[{"text": f"{o['name']} — {format_price(shop, o.get('price_units') or 0)}",
               "callback_data": f"topick:{sub['id']}:{o['id']}"}] for o in offers]
-    rows.append([{"text": L(shop, "back_btn"), "callback_data": f"sub:{sub['id']}"}])
+    rows += _back_home_row(shop, f"sub:{sub['id']}")
     await _show(ctx, shop, tg, sender, edit, L(shop, "topup_pick", username=sub["username"]),
                 kb(rows))
 
@@ -2286,8 +2288,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                                        ((cb.get("from") or {}).get("username")) or "")
         except ValueError:
             await _show(ctx, shop, tg, sender, mid, L(shop, "test_limit_one"),
-                        kb([[{"text": L(shop, "back_btn"),
-                              "callback_data": "pershop:test"}]]))
+                        kb(_back_home_row(shop, "pershop:test")))
             return
         url = res.get("subscription_url") or L(shop, "url_fallback")
         await _show(
@@ -2357,8 +2358,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
 
         if not pkg or pkg_effect(pkg) != "full":
             await _show(ctx, shop, tg, sender, mid, L(shop, "pkg_unavailable"),
-                        kb([[{"text": L(shop, "back_btn"),
-                              "callback_data": _pkg_back(shop, pkg)}]]))
+                        kb(_back_home_row(shop, _pkg_back(shop, pkg))))
             return
         await _maybe_scam_warn(ctx, shop, tg, sender,
                                ((cb.get("from") or {}).get("username")) or "")
@@ -2396,9 +2396,8 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             L(shop, "credit_cancel_confirm", item=_csub["username"],
               amount=_fp8(shop, float(_offer["total_units"] or 0))),
             reply_markup=kb([[{"text": L(shop, "credit_cancel_btn"),
-                               "callback_data": f"cfyes:{_csub['id']}"}],
-                             [{"text": L(shop, "back_btn"),
-                               "callback_data": f"sub:{_csub['id']}"}]]))
+                               "callback_data": f"cfyes:{_csub['id']}"}]]
+                            + _back_home_row(shop, f"sub:{_csub['id']}")))
         return
 
     if data.startswith("cfyes:"):
@@ -2464,8 +2463,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
 
         if await pending_for_sub(ctx, shop["id"], sub["username"]):
             await _show(ctx, shop, tg, sender, mid, L(shop, "pending_note"),
-                reply_markup=kb([[{"text": L(shop, "back_btn"),
-                                   "callback_data": f"sub:{sub['id']}"}]]))
+                reply_markup=kb(_back_home_row(shop, f"sub:{sub['id']}")))
             return
         pkg = None
         if sub.get("package_id"):
@@ -2542,8 +2540,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         if await pending_for_sub(ctx, shop["id"], sub["username"]):
             await _show(ctx, shop, tg, sender, mid, L(shop, "pending_note"),
-                reply_markup=kb([[{"text": L(shop, "back_btn"),
-                                   "callback_data": f"sub:{sub['id']}"}]]))
+                reply_markup=kb(_back_home_row(shop, f"sub:{sub['id']}")))
             return
         tier_id = pkg.get("tier_id")
         back_cb = (f"back:renewpkgs:{sub['id']}:{tier_id}" if tier_id
@@ -2560,8 +2557,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         if await pending_for_sub(ctx, shop["id"], sub["username"]):
             await _show(ctx, shop, tg, sender, mid, L(shop, "pending_note"),
-                reply_markup=kb([[{"text": L(shop, "back_btn"),
-                                   "callback_data": f"sub:{sub['id']}"}]]))
+                reply_markup=kb(_back_home_row(shop, f"sub:{sub['id']}")))
             return
         await _send_topup_picker(ctx, shop, tg, sender, sub, effect, edit=mid)
         return
@@ -2582,8 +2578,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         if await pending_for_sub(ctx, shop["id"], sub["username"]):
             await _show(ctx, shop, tg, sender, mid, L(shop, "pending_note"),
-                reply_markup=kb([[{"text": L(shop, "back_btn"),
-                                   "callback_data": f"sub:{sub['id']}"}]]))
+                reply_markup=kb(_back_home_row(shop, f"sub:{sub['id']}")))
             return
         back_cb = f"back:topups:{sub['id']}:{pkg_effect(pkg)}"
         await _send_contract(ctx, shop, tg, sender, sub, pkg, None, back_cb, edit=mid)
@@ -2691,7 +2686,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                     L(shop, "send_receipt_new", pkg=svc["name"],
                       price=format_price(shop, saved["total_units"]), card=_card_block(shop))
                     + credit_note,
-                    reply_markup=kb([[{"text": L(shop, "back_btn"), "callback_data": "back:contract"}]]))
+                    reply_markup=kb(_back_home_row(shop, "back:contract")))
                 if pm:
                     await _set_session(ctx, shop["id"], sender, "buyer",
                                        f"await_receipt:svc:{svc['id']}", dict(saved, pm=pm))
@@ -2725,7 +2720,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                 L(shop, "send_receipt_topup", label=pkg["name"],
                   username=(sub["username"] if sub else saved.get("renew_username") or "?"),
                   card=_card_block(shop)) + credit_note,
-                reply_markup=kb([[{"text": L(shop, "back_btn"), "callback_data": "back:contract"}]]))
+                reply_markup=kb(_back_home_row(shop, "back:contract")))
             if pm:
                 await _set_session(ctx, shop["id"], sender, "buyer", f"await_receipt:{pkg['id']}",
                                    dict(saved, pm=pm))
@@ -2734,7 +2729,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             L(shop, "send_receipt_new", pkg=pkg["name"],
               price=format_price(shop, saved["total_units"]), card=_card_block(shop))
             + credit_note,
-            reply_markup=kb([[{"text": L(shop, "back_btn"), "callback_data": "back:contract"}]]))
+            reply_markup=kb(_back_home_row(shop, "back:contract")))
         if pm:
             await _set_session(ctx, shop["id"], sender, "buyer", f"await_receipt:{pkg['id']}",
                                dict(saved, pm=pm))
