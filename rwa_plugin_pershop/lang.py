@@ -213,7 +213,7 @@ LOCALES: dict[str, dict[str, str]] = {
         "need_receipt": "لطفاً عکس رسید یا کد پیگیری پرداخت را بفرستید (یا /cancel).",
         "pkg_gone": "آن بسته دیگر موجود نیست. با /start یکی دیگر انتخاب کنید.",
         "cancel_btn": "❌ لغو",
-        "back_btn": "بازگشت ➡️",
+        "back_btn": "➡️ بازگشت",
         "choose_tier": "یک دسته انتخاب کنید:",
         "tier_pkg_title": "یک بسته انتخاب کنید:",
         "opt_next": "بعدی ⬅️",
