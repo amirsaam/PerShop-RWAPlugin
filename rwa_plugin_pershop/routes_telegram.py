@@ -767,14 +767,17 @@ async def _send_subs_list(ctx, shop, tg, sender, edit=None) -> None:
         st = await _subs_state(ctx, shop, r)
         if st["pending"]:
             dot = "⏳"
-        elif st["expired"]:
-            dot = "🔴"
-        elif st["timeless"] and not st["has_cap"]:
-            dot = "♾️"
         else:
-            out = st["left"] is not None and st["left"] <= 0
-            urgent = (st["days"] is not None and st["days"] <= 3) or bool(out)
-            dot = "🟡" if urgent else "🟢"
+            has_limit = st.get("limit") is not None and float(st.get("limit") or 0) > 0
+            traffic_pct = float(st.get("used") or 0) / float(st.get("limit")) if has_limit else 0
+            out_100 = has_limit and traffic_pct >= 1.0
+            over_80_under_100 = has_limit and 0.80 < traffic_pct < 1.0
+            if st.get("expired") or out_100:
+                dot = "🔴"
+            elif (st.get("days") is not None and st.get("days", 999) <= 3) or over_80_under_100:
+                dot = "🟡"
+            else:
+                dot = "🟢"
         btns.append([{"text": f"{dot} {r['username']}",
                       "callback_data": f"sub:{r['id']}"}])
     btns += link_row + _back_row(shop)
@@ -1561,9 +1564,14 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
         status, info = await link_subscription(ctx, shop, token, buyer_id)
         if status in ("linked", "already_yours"):
             await _clear_session(ctx, shop["id"], buyer_id, "buyer")
+            from rwa_plugin_pershop.telegram import kb as _k2
+
             if status == "linked":
-                await tg.send_message(chat_id, L(shop, "link_sub_success", username=info["username"],
-                                                 expire=_fmt_exp(info.get("expire_at"))))
+                await tg.send_message(
+                    chat_id,
+                    L(shop, "link_sub_success", username=info["username"],
+                      expire=_fmt_exp(info.get("expire_at"))),
+                    reply_markup=_k2(_back_home_row(shop, "back:subs")))
                 # Linked as-is: the sub keeps whatever the system holds
                 # (status, expiry, traffic). No plan is needed — renewing
                 # later just picks a package from this shop.

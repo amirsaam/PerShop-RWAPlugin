@@ -592,10 +592,20 @@ async def link_subscription(ctx, shop: dict, token: str, tg_id: int) -> tuple[st
     except (TypeError, ValueError):
         cur = None
     username = row.get("username") or token
-    if cur == tg_id:
-        return ("already_yours", {"username": username})
-    if cur is not None:
-        return ("taken", {"username": username})
+    # Bot-level link state by user_uuid (not panel users.telegramId):
+    bot_sub = await ctx.db.fetchrow(
+        "SELECT id, buyer_tg_id FROM plugin_pershop_subs WHERE shop_id=$1 AND user_uuid=$2",
+        shop["id"], row.get("uuid"))
+    if bot_sub is not None:
+        bot_tg = bot_sub.get("buyer_tg_id")
+        try:
+            bot_tg = int(bot_tg) if bot_tg is not None else None
+        except (TypeError, ValueError):
+            bot_tg = None
+        if bot_tg == tg_id:
+            return ("already_yours", {"username": username})
+        if bot_tg is not None:
+            return ("taken", {"username": username})
     try:
         allowed = await _link_allowed(ctx, shop, row)
     except Exception:
@@ -1600,7 +1610,7 @@ async def approval_vars(ctx, shop: dict, order: dict, result: dict) -> dict:
         "status": L(shop, "status_active"),
         "dot": "🟢",
         "hwid": hwid,
-        "expire": exp,
+        "expire": format_expire(shop, exp),
     }
 
 
