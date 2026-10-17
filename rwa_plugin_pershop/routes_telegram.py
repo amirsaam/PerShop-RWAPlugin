@@ -902,7 +902,7 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
 
 
 async def _send_account(ctx, shop, tg, sender, edit=None) -> None:
-    """My account hub: Credit Balance / Purchase History / Language buttons."""
+    """My account hub: live credit/history summary + Language button."""
     from rwa_plugin_pershop.lang import LANGS, LANG_FLAGS, L, normalize_lang
     from rwa_plugin_pershop.service import credit_balance, format_price
     from rwa_plugin_pershop.telegram import kb
@@ -923,8 +923,16 @@ async def _send_account(ctx, shop, tg, sender, edit=None) -> None:
                    lang=f"{LANG_FLAGS.get(cur, '')} {cur}"),
           "callback_data": "langmenu"}],
     ]
-    text = L(shop, "account_title") + "\n\n" + L(shop, "acc_hub_hint")
-    await _show(ctx, shop, tg, sender, edit, text, kb(rows + _back_row(shop)))
+    lines = [L(shop, "account_title"),
+             L(shop, "acc_summary", value=format_price(shop, bal), n=n)]
+    try:
+        pct = ("%g" % float(shop.get("referral_percent") or 0))
+    except Exception:
+        pct = "0"
+    if float(pct) > 0:
+        lines.append(L(shop, "acc_ref_line", pct=pct))
+    lines.append(L(shop, "acc_hub_hint"))
+    await _show(ctx, shop, tg, sender, edit, "\n\n".join(lines), kb(rows + _back_row(shop)))
 
 
 async def _send_balance(ctx, shop, tg, sender, edit=None) -> None:
