@@ -801,7 +801,7 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
     """Sub-detail dashboard: live numbers + exactly the buttons that make
     sense for this sub's state. Pending hides every pay button."""
     from rwa_plugin_pershop.lang import L
-    from rwa_plugin_pershop.service import format_when
+    from rwa_plugin_pershop.service import format_when, format_expire
     from rwa_plugin_pershop.telegram import kb
 
     st = await _subs_state(ctx, shop, sub)
@@ -825,14 +825,14 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
     dot = "🟢" if st["status"] == "ACTIVE" else "🔴"
     plan = st["plan"] or "—"
     text = L(shop, "sub_info", username=sub["username"], status=status,
-             expire=format_when(shop, st["exp"]), traffic=traffic, plan=plan,
+             expire=format_expire(shop, st["exp"]), traffic=traffic, plan=plan,
              dot=dot, hwid=hwid)
     home = [[{"text": L(shop, "back_btn"), "callback_data": "back:subs"},
              {"text": L(shop, "main_menu_btn"), "callback_data": "menu"}]]
     if st["pending"]:
         status = L(shop, "pending_badge")
         text = L(shop, "sub_info", username=sub["username"], status=status,
-                 expire=format_when(shop, st["exp"]), traffic=traffic, plan=plan,
+                 expire=format_expire(shop, st["exp"]), traffic=traffic, plan=plan,
                  dot="⏳", hwid=hwid)
         text += "\n\n" + L(shop, "pending_note")
         pid = (st["pending"] or {}).get("id") if isinstance(st["pending"], dict) else None
