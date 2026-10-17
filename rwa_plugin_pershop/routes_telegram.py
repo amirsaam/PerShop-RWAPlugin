@@ -255,6 +255,15 @@ def _back_row(shop) -> list:
     return [[{"text": L(shop, "back_btn"), "callback_data": "menu"}]]
 
 
+def _pkg_back(shop: dict, pkg: dict | None) -> str:
+    """Backward callback from a package-driven screen: the tier list the
+    package was picked from, or the buy entry when the shop has no tiers
+    (legacy flat package list). Never the main menu — that would skip the
+    rungs above."""
+    tid = (pkg or {}).get("tier_id")
+    return f"back:tier:{tid}" if tid else "pershop:buy"
+
+
 def _pkg_label(shop, pkg) -> str:
     from rwa_plugin_pershop.service import format_price
 
@@ -414,14 +423,14 @@ async def _send_buy_list(ctx, shop, tg, chat_id, edit=None) -> None:
 
 
 async def _send_tier_packages(ctx, shop, tg, sender, tier, edit=None) -> None:
-    """Package list of one tier + Back to menu."""
+    """Package list of one tier + Back to the tier list above it."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
 
     pkgs = await ctx.db.fetch(
         "SELECT * FROM plugin_pershop_packages WHERE tier_id=$1 AND active ORDER BY sort, id", tier["id"])
     rows = [[{"text": _pkg_label(shop, p), "callback_data": f"buy:{p['id']}"}] for p in _full_only(pkgs)]
-    rows += _back_row(shop)
+    rows.append([{"text": L(shop, "back_btn"), "callback_data": "pershop:buy"}])
     await _show(ctx, shop, tg, sender, edit, L(shop, "tier_pkg_title"), kb(rows))
 
 
@@ -1231,7 +1240,8 @@ async def _send_renew_picker(ctx, shop, tg, sender, sub, edit=None) -> None:
     pkgs = _full_only(await _packages(ctx, shop["id"]))
     if not pkgs:
         await _show(ctx, shop, tg, sender, edit, L(shop, "no_packages"),
-                    kb(_back_row(shop)))
+                    kb([[{"text": L(shop, "back_btn"),
+                          "callback_data": f"sub:{sub['id']}"}]]))
         return
     btns = [[{"text": f"{p['name']} — {p['price_text']}", "callback_data": f"renewpkg:{sub['id']}:{p['id']}"}]
             for p in pkgs]
@@ -1295,7 +1305,7 @@ async def _send_hwid(ctx, shop, tg, sender, pkg, value, edit=None) -> None:
 
     cfg = hwid_cfg(pkg)
     value = max(cfg["min"], min(cfg["max"], int(value or cfg["default"])))
-    back_cb = f"back:tier:{pkg['tier_id']}" if pkg.get("tier_id") else "menu"
+    back_cb = _pkg_back(shop, pkg)
     await _show(ctx, shop, tg, sender, edit,
         f"<b>{L(shop, 'step_hwid').rstrip(':：')}</b>\n"
         f"{value}  ({cfg['min']} - {cfg['max']})\n"
@@ -1377,7 +1387,7 @@ async def _ping_owner(ctx, shop, text) -> None:
         ctx.logger.warning("shop.ping_owner_failed", extra={"err": str(e)})
 
 
-async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back="menu",
+async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back="pershop:buy",
                          credit_applied=False, edit=None) -> dict:
     """Universal contract screen: plan, exact outcome, price — then Pay.
 
@@ -1959,7 +1969,7 @@ async def _draft_sub(ctx, shop, saved):
 async def _to_summary(ctx, shop, tg, sender, pkg, hwid_value=None, sub=None, back=None, edit=None) -> None:
     """Show the contract screen (was: plain summary)."""
     if back is None:
-        back = f"back:tier:{pkg['tier_id']}" if pkg.get("tier_id") else "menu"
+        back = _pkg_back(shop, pkg)
     await _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value, back, edit=edit)
 
 
@@ -2276,7 +2286,8 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                                        ((cb.get("from") or {}).get("username")) or "")
         except ValueError:
             await _show(ctx, shop, tg, sender, mid, L(shop, "test_limit_one"),
-                        kb(_back_row(shop)))
+                        kb([[{"text": L(shop, "back_btn"),
+                              "callback_data": "pershop:test"}]]))
             return
         url = res.get("subscription_url") or L(shop, "url_fallback")
         await _show(
@@ -2327,9 +2338,11 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         tier = await ctx.db.fetchrow(
             "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2 AND active",
             tier_id, shop["id"])
-        if not tier:
-            return
-        await _send_tier_packages(ctx, shop, tg, sender, tier, edit=mid)
+        if tier:
+            await _send_tier_packages(ctx, shop, tg, sender, tier, edit=mid)
+        else:
+            # Tier vanished since the tap: land on the buy entry, one rung up.
+            await _send_buy_list(ctx, shop, tg, sender, edit=mid)
         return
 
     if data.startswith("buy:"):
@@ -2344,14 +2357,15 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
 
         if not pkg or pkg_effect(pkg) != "full":
             await _show(ctx, shop, tg, sender, mid, L(shop, "pkg_unavailable"),
-                        kb(_back_row(shop)))
+                        kb([[{"text": L(shop, "back_btn"),
+                              "callback_data": _pkg_back(shop, pkg)}]]))
             return
         await _maybe_scam_warn(ctx, shop, tg, sender,
                                ((cb.get("from") or {}).get("username")) or "")
         if hwid_cfg(pkg)["mode"] == "input":
             await _send_hwid(ctx, shop, tg, sender, pkg, hwid_cfg(pkg)["default"], edit=mid)
             return
-        back_cb = f"back:tier:{pkg['tier_id']}" if pkg.get("tier_id") else "menu"
+        back_cb = _pkg_back(shop, pkg)
         await _send_contract(ctx, shop, tg, sender, None, pkg, None, back_cb, edit=mid)
         return
 
@@ -2503,9 +2517,12 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             "SELECT * FROM plugin_pershop_subs WHERE id=$1 AND shop_id=$2", sub_id, shop["id"])
         tier = await ctx.db.fetchrow(
             "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", tier_id, shop["id"])
-        if not sub or sub["buyer_tg_id"] != sender or not tier:
+        if not sub or sub["buyer_tg_id"] != sender:
             return
-        await _send_renew_tier_packages(ctx, shop, tg, sender, sub, tier, edit=mid)
+        if tier:
+            await _send_renew_tier_packages(ctx, shop, tg, sender, sub, tier, edit=mid)
+        else:
+            await _send_renew_tiers(ctx, shop, tg, sender, sub, edit=mid)
         return
 
     if data.startswith("renewpkg:"):
@@ -2730,7 +2747,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             if saved.get("total_units") is not None:
                 sub = await _draft_sub(ctx, shop, saved)
                 await _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value,
-                                     saved.get("back") or "menu", credit_applied=True, edit=mid)
+                                     saved.get("back") or _pkg_back(shop, pkg), credit_applied=True, edit=mid)
                 return
         sdraft = await _load_svc_draft(ctx, shop, sender)
         if sdraft:
@@ -2756,7 +2773,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         sub = await _draft_sub(ctx, shop, saved)
         await _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value,
-                             saved.get("back") or "menu", edit=mid)
+                             saved.get("back") or _pkg_back(shop, pkg), edit=mid)
         return
 
     if data == "cancel":

@@ -1012,8 +1012,12 @@ async def _step_flow():
     await cb(f"tiers:{tid}", "t1")
     assert f"buy:{tpid}" in last_rm(), last_rm()
     assert "625,000" in last_rm(), last_rm()  # 2.5u x 250000 base price
+    # Back from the tier's package list returns to the tier list, not menu
+    assert "pershop:buy" in last_rm(), last_rm()
     await cb(f"buy:{tpid}", "t2")
     assert "devices" in last_text().lower(), last_text()  # hwid picker only
+    # Back from the device picker returns to this tier's package list
+    assert f"back:tier:{tid}" in last_rm(), last_rm()
     await cb("hplus", "t3")
     assert "2 " in last_text() or "2  " in last_text(), last_text()
     await cb("hnext", "t4")
