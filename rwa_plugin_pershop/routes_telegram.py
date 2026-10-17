@@ -299,20 +299,24 @@ async def _send_buyer_menu(ctx, shop, tg, chat_id, edit=None) -> None:
     rows = [labels[i:i + 2] for i in range(0, len(labels), 2)]
     from rwa_plugin_pershop.service import fmt_safe as _fsw
     text = _fsw((shop["welcome_text"] or "").strip(), shop=shop.get("prefix") or "") or L(shop, "menu_title")
+    # The menu's buttons live in the reply-keyboard panel, which Telegram
+    # only attaches to a NEW message — an edit can carry inline buttons at
+    # most. So going "back to the menu" always sends it fresh (re-asserting
+    # the panel) and drops the screen we came from.
+    fresh = await tg.send_message(chat_id, text, reply_markup=reply_kb(rows))
     if edit:
-        # A reply keyboard cannot ride on an edited message; the persistent
-        # panel is already up, so only the text is refreshed in place.
-        await _show(ctx, shop, tg, chat_id, edit, text)
-    else:
-        menu_mid = await tg.send_message(chat_id, text, reply_markup=reply_kb(rows))
-        # Track it: without this, later taps keep editing a stale message
-        # from a previous session while this fresh menu sits unchanged.
         try:
-            from rwa_plugin_pershop.service import set_last_mid as _slm
-
-            await _slm(ctx, shop.get("id"), chat_id, menu_mid)
+            await tg.delete_message(chat_id, edit)
         except Exception:
             pass
+    # Track it: without this, later taps keep editing a stale message
+    # from a previous session while this fresh menu sits unchanged.
+    try:
+        from rwa_plugin_pershop.service import set_last_mid as _slm
+
+        await _slm(ctx, shop.get("id"), chat_id, fresh)
+    except Exception:
+        pass
 
 
 async def _send_test_offer(ctx, shop, tg, sender, edit=None) -> None:

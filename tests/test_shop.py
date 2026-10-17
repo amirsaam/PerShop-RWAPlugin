@@ -3347,13 +3347,20 @@ async def _edit_place_flow():
         await handle_update(ctx, shop, {"update_id": 100, "callback_query":
             {"id": cid, "from": {"id": who}, "data": data, "message": {"message_id": mid}}})
 
-    # buyer taps rewrite the same message, no new sends
+    # buyer taps rewrite the same message, no new sends. The menu tap is
+    # the exception: the reply-keyboard panel only rides on a FRESH
+    # message, so going back to the menu sends it new (re-asserting the
+    # persistent panel) and deletes the screen it came from.
     await _tap("my_subs", mid=5001, cid="e1")
     await _tap("back:subs", mid=5001, cid="e2")
     await _tap("account", mid=5001, cid="e3")
-    await _tap("menu", mid=5001, cid="e4")
     assert not _sends(), _sends()
-    assert len(_edits()) == 4, _edits()
+    assert len(_edits()) == 3, _edits()
+    await _tap("menu", mid=5001, cid="e4")
+    assert len(_sends()) == 1, _sends()
+    assert _sends()[0]["rm"].get("is_persistent"), _sends()
+    assert any(m == "deleteMessage" and p.get("message_id") == 5001
+               for m, p in _all()), _all()
 
     # full buy with taps: contract edits, receipt prompt edits, submit
     # deletes the prompt and sends ONE fresh waiting message
