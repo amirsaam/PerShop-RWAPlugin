@@ -552,18 +552,25 @@ async def _owner_account_row(ctx, owner_admin: str | None) -> tuple[bool, Any | 
 
 async def _link_allowed(ctx, shop: dict, row: dict) -> bool:
     """Attribution only, no squad check:
-    - createdByAdminId == shop owner's account id -> link;
-    - createdByAdminId empty + owner is a row-less superadmin -> link;
-    - anything else (different creator, sub-admin owner with
-      creator-less user, unknown owner, crashed lookup) -> foreign."""
-    creator = row.get("createdByAdminId", row.get("created_by_admin_id"))
+    - createdByAdminId == 'superadmin' -> link (any owner);
+    - createdByAdminId empty + superadmin-owner (role_name='superadmin') -> link;
+    - anything else (numeric admin id different from owner, non-superadmin owner,
+      unknown owner, crashed lookup) -> foreign."""
+    creator_raw = row.get("createdByAdminId", row.get("created_by_admin_id"))
+    # Creator may be numeric admin id, or the literal "superadmin" string.
+    creator_str = str(creator_raw).strip() if creator_raw is not None else None
     try:
-        creator = int(creator) if creator is not None else None
+        creator_num = int(creator_raw) if creator_str else None
     except (TypeError, ValueError):
-        creator = None
+        creator_num = None
     owner_id = await _owner_account_id(ctx, shop.get("owner_admin"))
-    if creator is not None:
-        return owner_id is not None and creator == owner_id
+    # Linking allowed ONLY for:
+    #   - explicit superadmin creator ("superadmin")
+    #   - empty creator + superadmin-owned shop
+    if creator_str == "superadmin":
+        return True
+    if creator_num is not None:
+        return False  # any non-empty, non-superadmin creator = foreign
     ok, acct = await _owner_account_row(ctx, shop.get("owner_admin"))
     is_super = bool(ok and (acct is None or (acct and acct.get("role_name") == "superadmin")))
     return bool(ok and is_super)

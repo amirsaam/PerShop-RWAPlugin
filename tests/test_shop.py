@@ -1225,9 +1225,16 @@ async def _match_topup_flow():
                               "expireAt": exp.isoformat(), "trafficLimitBytes": 64 * GB,
                               "activeInternalSquads": [{"uuid": "sqT"}]}
     status, _info = await svc.link_subscription(ctx, shop, "tok1", 111)
-    assert status == "linked", (status, _info)
-    sub = [s for s in db.subs.values() if s["username"] == "own-one"][0]
-    assert sub["buyer_tg_id"] == 111 and sub["package_id"] == pid, sub
+    # stricter rule: numeric owner-match no longer passes; only superadmin/empty link
+    assert status == "foreign", (status, _info)
+    # use a superadmin empty-creator token instead for the link test
+    db.short_users["tokS"] = {"uuid": "uu-s", "username": "super-bob", "shortUuid": "tokS",
+                              "telegramId": None, "createdByAdminId": None,
+                              "expireAt": exp.isoformat(), "trafficLimitBytes": 64 * GB,
+                              "activeInternalSquads": [{"uuid": "sqT"}]}
+    svc._owner_account_row = lambda _c, _o: (True, None)
+    status2, info2 = await svc.link_subscription(ctx, shop, "tokS", 222)
+    assert status2 == "linked" and info2["username"] == "super-bob", (status2, info2)
     res3 = await svc.assign_plan(ctx, shop, "uu-1", pid)
     assert res3["created"] is False and res3["buyer_tg_id"] == 111, res3
 
@@ -1931,10 +1938,10 @@ async def _link_flow():
                                   "trafficLimitBytes": None,
                                   "activeInternalSquads": [{"uuid": "sqt", "name": "Tier A"}]}
 
-        # service-level: creator match passes, everything else rejected
+        # service-level: only superadmin ("superadmin") or empty creator link;
+        # matching numeric owner no longer passes (stricter rule).
         st, info = await svc.link_subscription(ctx, shop, "tokA", 111)
-        assert st == "linked" and info["username"] == "old-bob", (st, info)
-        assert panel.updated[-1] == ("uu-a", {"telegramId": 111}), panel.updated
+        assert st == "foreign", (st, info)  # numeric creator (42) != superadmin/empty
         st, _ = await svc.link_subscription(ctx, shop, "tokD", 112)
         assert st == "foreign", st  # different creator: shop squad no longer helps
         st, _ = await svc.link_subscription(ctx, shop, "tokB", 111)
@@ -1990,8 +1997,9 @@ async def _link_flow():
                                   "telegramId": None, "createdByAdminId": 42,
                                   "expireAt": "2026-12-02T00:00:00+00:00",
                                   "trafficLimitBytes": None, "activeInternalSquads": []}
+        # tokE uses numeric createdByAdminId: 42 (not superadmin/empty) -> foreign per stricter rule
         await txt("https://sub.example.com/s/tokE", uid=333, un="cara")
-        assert "cara-sub" in texts()[-2], texts()[-2:]  # success, then subs list
+        assert "foreign" in texts()[-1].lower() or "این فروشگاه" in texts()[-1], texts()[-1:]
         # linked as-is: NO owner ping about plan matching anymore
         assert not any(p.get("chat_id") != 333
                        for inst in FakeTg.instances for m, p in inst.sent
