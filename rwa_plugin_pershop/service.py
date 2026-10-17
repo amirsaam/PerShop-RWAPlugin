@@ -565,7 +565,8 @@ async def _link_allowed(ctx, shop: dict, row: dict) -> bool:
     if creator is not None:
         return owner_id is not None and creator == owner_id
     ok, acct = await _owner_account_row(ctx, shop.get("owner_admin"))
-    return bool(ok and not acct)
+    is_super = bool(ok and (acct is None or (acct and acct.get("role_name") == "superadmin")))
+    return bool(ok and is_super)
 
 
 async def link_subscription(ctx, shop: dict, token: str, tg_id: int) -> tuple[str, dict]:
@@ -627,15 +628,14 @@ async def link_subscription(ctx, shop: dict, token: str, tg_id: int) -> tuple[st
 
 
 async def _owner_is_superadmin(ctx, shop) -> bool:
-    """True when the shop owner has no admin-account row (panel superadmin).
-    Lookup crashes fail closed (False); a renamed/deleted owner also reads
-    as row-less, which only widens their own NULL-creator pool."""
+    """True when the shop owner has the 'superadmin' role in admin_accounts.
+    All admins have a row; we distinguish by role_name, not row presence."""
     try:
         from web.backend.core.admin_accounts import get_admin_account_by_username
-        acct = await get_admin_account_by_username(shop.get("owner_admin"))
+        acct = await get_admin_account_by_username(shop.get("owner_admin") or "")
     except Exception:
         return False
-    return acct is None
+    return bool(acct and acct.get("role_name") == "superadmin")
 
 
 async def unmapped_users(ctx, shop: dict) -> dict:
