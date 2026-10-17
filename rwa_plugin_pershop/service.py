@@ -807,10 +807,9 @@ def pkg_effect(pkg: dict | None) -> str:
 
 
 def is_timeless(expire_at) -> bool:
-    """Year 2999+ = no expiry. The single predicate behind buttons,
-    dates-as-words, and reminders."""
+    """Year 2099+ = no expiry (long-duration / lifetime)."""
     try:
-        return bool(expire_at) and expire_at.year >= 2999
+        return bool(expire_at) and expire_at.year >= 2099
     except Exception:
         return False
 
@@ -1610,7 +1609,7 @@ async def approval_vars(ctx, shop: dict, order: dict, result: dict) -> dict:
         "status": L(shop, "status_active"),
         "dot": "🟢",
         "hwid": hwid,
-        "expire": format_expire(shop, exp),
+        "expire": format_when(shop, exp),
     }
 
 

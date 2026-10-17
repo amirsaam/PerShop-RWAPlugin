@@ -825,7 +825,7 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
     dot = "🟢" if st["status"] == "ACTIVE" else "🔴"
     plan = st["plan"] or "—"
     text = L(shop, "sub_info", username=sub["username"], status=status,
-             expire=format_expire(shop, st["exp"]), traffic=traffic, plan=plan,
+             expire=format_when(shop, st["exp"]), traffic=traffic, plan=plan,
              dot=dot, hwid=hwid)
     home = [[{"text": L(shop, "back_btn"), "callback_data": "back:subs"},
              {"text": L(shop, "main_menu_btn"), "callback_data": "menu"}]]
