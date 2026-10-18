@@ -840,7 +840,10 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
     except Exception:
         pass
     dot = "🟢" if st["status"] == "ACTIVE" else "🔴"
-    plan = st["plan"] or "—"
+    if sub.get("is_test"):
+        plan = "trial"
+    else:
+        plan = st["plan"] or "—"
     sub_url = L(shop, "url_fallback")
     sub_user_uuid = sub.get("user_uuid")
     try:

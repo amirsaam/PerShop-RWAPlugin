@@ -817,12 +817,13 @@ window.rwaPluginUI['pershop'] = {
         + '<option value="noorders">No purchase yet</option><option value="invited">Invited (referral)</option></select></div>'
         + '<div><label class="' + LBL + '" for="bcphoto">Photo (≤5MB, optional)</label><input id="bcphoto" type="file" accept="image/*" class="' + INP + ' w-64"></div>'
         + '<span id="bcsize" class="text-xs text-dark-300"></span></div>'
-        + '<div><label class="' + LBL + '" for="bctext">Message</label><textarea id="bctext" rows="5" class="' + TA + '" placeholder="You can use Telegram HTML: <b>bold</b>, <a href=&quot;…&quot;>links</a>, <code>…</code>…"></textarea></div>'
+        + '<div><label class="' + LBL + '" for="bctext">Message</label>' + fmtBar('bctext') + '<textarea id="bctext" rows="5" class="' + TA + '" placeholder="You can use Telegram HTML: <b>bold</b>, <a href=&quot;…&quot;>links</a>, <code>…</code>…"></textarea></div>'
         + '<div class="flex items-center gap-3 mt-3"><button id="bcsend" class="' + BTN_P + '">Queue broadcast</button>'
         + '<span id="bcstat" class="text-sm text-dark-300"></span></div>'
         + '<div class="mt-6 border-t border-[var(--glass-border)] pt-4"><h3 class="' + SEC_T + '">History</h3><div id="bcstat2" class="text-sm"><i class="text-dark-300">loading…</i></div></div>'
         + '<div class="mt-6 border-t border-[var(--glass-border)] pt-4"><h3 class="' + SEC_T + '">Tip</h3><p class="' + HELP + '">Promo code + broadcast is a strong combo: announce <code>WELCOME15</code>, buyers type the code at checkout and pay 15% less.</p></div>'
         + '</div>';
+      wireFmt(el);
       q('bcphoto').onchange = () => {
         const f = q('bcphoto').files[0];
         q('bcsize').textContent = f ? (Math.round(f.size / 1024) + ' KB' + (f.size > 5 * 1024 * 1024 ? ' — TOO BIG, 5MB max' : '')) : '';
@@ -914,7 +915,7 @@ window.rwaPluginUI['pershop'] = {
           + '<option value="denied">Denied</option><option value="referral">Referral program</option><option value="support">Support</option></select>'
           + '<p id="bolab" class="' + HELP + '"></p></div>'
           + '<div id="bovars"></div>'
-          + '<textarea id="botext" rows="4" class="' + TA + '"></textarea>'
+          + fmtBar('botext') + '<textarea id="botext" rows="4" class="' + TA + '"></textarea>'
           + '<div class="flex items-center gap-2 mt-2"><button id="bodef" class="' + BTN_M + '" title="Load the bundled default for the selected bot language">Reset to default</button></div>'
           + '<p class="' + HELP + '" id="bostate"></p></div>'
           + '<div class="flex items-center gap-3"><button id="save" class="' + BTN_P + '">Save shop</button><span id="savmsg" class="text-sm text-dark-300"></span></div>'
@@ -1017,9 +1018,9 @@ window.rwaPluginUI['pershop'] = {
     };
     let BOTXT = {welcome: '', thanks: '', approved: '', denied: '', referral: '', support: ''};
     const botextInit = () => {
-      const BOTEXT_VARS = {welcome: ['shop'], thanks: ['order'],
-        approved: ['username', 'dot', 'status', 'plan', 'price', 'when', 'traffic', 'hwid', 'url'],
-        denied: ['reason', 'username', 'plan'], referral: ['percent', 'link']};
+      const BOTEXT_VARS = {welcome: ['shop', 'invitee_discount'], thanks: ['order', 'invitee_discount'],
+        approved: ['username', 'dot', 'status', 'plan', 'price', 'when', 'traffic', 'hwid', 'url', 'invitee_discount'],
+        denied: ['reason', 'username', 'plan', 'invitee_discount'], referral: ['percent', 'link', 'invitee_discount'], support: ['invitee_discount']};
       if (!shopCache) { if (q('botext')) q('botext').value = ''; return; }
       BOTXT = {welcome: shopCache.welcome_text || '', thanks: shopCache.thank_you_text || '',
         approved: shopCache.approved_text || '', denied: shopCache.denied_text || '',
