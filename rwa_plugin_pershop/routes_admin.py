@@ -889,7 +889,7 @@ def build_admin_router(ctx):
                    WHERE o.shop_id=$1 ORDER BY o.id DESC LIMIT 200""", shop["id"])
         else:
             filt = ("o.status IN ('pending','withdraw_requested')" if status == "pending"
-                    else "o.status='withdrawn'" if status == "withdrawn" else "o.status=$2")
+                    else "o.status=$2")
             rows = await ctx.db.fetch(
                 f"""SELECT o.*, COALESCE(p.name, v.name) AS package_name,
                             COALESCE(p.price_units, v.price_units) AS package_units,

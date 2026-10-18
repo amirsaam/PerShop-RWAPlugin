@@ -689,7 +689,7 @@ async def unmapped_users(ctx, shop: dict) -> dict:
     orphans = await ctx.db.fetch(
         """SELECT uuid, username, expire_at, traffic_limit_bytes FROM users
            WHERE created_by_admin_id IS NOT DISTINCT FROM $1 AND NOT EXISTS
-           (SELECT 1 FROM plugin_pershop_subs s WHERE s.shop_id=$2 AND s.user_uuid=users.uuid)
+           (SELECT 1 FROM plugin_pershop_subs s WHERE s.shop_id=$2 AND s.user_uuid=users.uuid::text)
            ORDER BY username""",
         owner_id, shop["id"])
     unplanned = await ctx.db.fetch(
