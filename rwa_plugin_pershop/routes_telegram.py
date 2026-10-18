@@ -824,9 +824,19 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
         hwid = str(st.get("hwid"))
     dot = "🟢" if st["status"] == "ACTIVE" else "🔴"
     plan = st["plan"] or "—"
+    sub_url = L(shop, "url_fallback")
+    sub_user_uuid = sub.get("user_uuid")
+    try:
+        user_row = await ctx.db.get_user_by_uuid(sub_user_uuid) if sub_user_uuid else None
+        if user_row:
+            real_url = user_row.get("subscription_url") or user_row.get("subscriptionUrl")
+            if real_url:
+                sub_url = real_url
+    except Exception:
+        pass
     text = L(shop, "sub_info", username=sub["username"], status=status,
              expire=format_when(shop, st["exp"]), traffic=traffic, plan=plan,
-             dot=dot, hwid=hwid)
+             dot=dot, hwid=hwid, url=sub_url)
     home = [[{"text": L(shop, "back_btn"), "callback_data": "back:subs"},
              {"text": L(shop, "main_menu_btn"), "callback_data": "menu"}]]
     if st["pending"]:
