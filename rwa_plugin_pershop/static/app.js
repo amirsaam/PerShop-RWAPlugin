@@ -893,7 +893,8 @@ window.rwaPluginUI['pershop'] = {
           + '<div><label class="' + LBL + '" for="lang">Bot language</label><select id="lang" class="' + INP + '">'
           + '<option value="en">English</option><option value="fa">فارسی</option><option value="ru">Русский</option><option value="zh">中文</option></select></div>'
           + '</div>'
-          + '<div class="flex items-center gap-3 mt-4"><button id="connect" class="' + BTN_S + '">Connect bot</button>'
+          + '<div class="flex items-center gap-3 mt-4"><button id="save_conn" class="' + BTN_P + '">Save connection</button><span id="sec" class="text-sm text-dark-300"></span></div>'
+          + '<div class="flex items-center gap-3 mt-3"><button id="connect" class="' + BTN_S + '">Connect bot</button>'
           + '<button id="disconnect" class="' + BTN_S + '">Disconnect bot</button></div>'
           + '<p id="sec" class="' + HELP + ' mt-2"></p></div>'
           + '<div class="' + CARD + '"><h2 class="' + CARD_T + '">Shop texts &amp; pricing</h2>'
@@ -907,6 +908,8 @@ window.rwaPluginUI['pershop'] = {
           + '<div class="grid gap-3 sm:grid-cols-2 mt-4">'
           + '<div><label class="flex items-center gap-2 text-sm"><input type="checkbox" id="teston" class="h-4 w-4 accent-primary"> Trial subscription enabled</label></div>'
           + '<div><label class="flex items-center gap-2 text-sm"><input type="checkbox" id="tierint" class="h-4 w-4 accent-primary"> Internal tiers (skip public tiers)</label></div>'
+          + '<div>'
+          + '<div class="flex items-center gap-3 mt-3"><button id="save_price" class="' + BTN_P + '">Save pricing</button><span id="msg_price" class="text-sm text-dark-300"></span></div>'
           + '</div>'
           + '</div>'
           + '<div class="' + CARD + '"><h2 class="' + CARD_T + '">Bot texts</h2>'
@@ -917,8 +920,8 @@ window.rwaPluginUI['pershop'] = {
           + '<div id="bovars"></div>'
           + fmtBar('botext') + '<textarea id="botext" rows="4" class="' + TA + '"></textarea>'
           + '<div class="flex items-center gap-2 mt-2"><button id="bodef" class="' + BTN_M + '" title="Load the bundled default for the selected bot language">Reset to default</button></div>'
-          + '<p class="' + HELP + '" id="bostate"></p></div>'
-          + '<div class="flex items-center gap-3"><button id="save" class="' + BTN_P + '">Save shop</button><span id="savmsg" class="text-sm text-dark-300"></span></div>'
+          + '<p class="' + HELP + '" id="bostate"></p>'
+          + '<div class="flex items-center gap-3 mt-2"><button id="save_text" class="' + BTN_P + '">Save bot texts</button><span id="msg_text" class="text-sm text-dark-300"></span></div></div>'
           + '<div class="' + CARD + '" id="extcard"><h2 class="' + CARD_T + '">External API — reuse the bot catalog elsewhere</h2><div class="max-w-xl">'
           + '<p class="text-xs text-dark-300 mb-3">Read-only JSON of exactly what buyers see (tiers, packages, services, converted prices) for your own website or widget. Send it as <code>X-Shop-Key</code> header or <code>?key=</code>. Anyone holding the key can read the catalog — rotate it if it leaks.</p>'
           + '<button id="xshow" class="' + BTN_M + '">Show my key</button><div id="xout" class="text-sm mt-3 break-all"></div></div></div>'
@@ -962,7 +965,42 @@ window.rwaPluginUI['pershop'] = {
           if (t) t.textContent = 'Save failed: ' + e.message; else alert('Save failed: ' + e.message);
         }
       };
-      q('save').onclick = save;
+      q('save_conn').onclick = async () => {
+        if (q('sec')) q('sec').textContent = 'Saving…';
+        try {
+          const body = {prefix: q('prefix').value, admin_tg_id: Number(q('tgid').value), lang: q('lang').value};
+          if (q('token').value) body.bot_token = q('token').value;
+          const {r, w} = await saveShop(body);
+          if (q('sec')) q('sec').textContent = w.ok ? 'Saved + bot connected ✓ ' + w.url
+            : (w.error ? 'Saved. Bot NOT connected: ' + w.error + ' — press Connect bot to retry.'
+              : 'Saved. Webhook secret: ' + r.webhook_secret);
+          q('token').value = '';
+        } catch (e) { if (q('sec')) q('sec').textContent = 'Save failed: ' + e.message; else alert('Save failed: ' + e.message); }
+      };
+      q('save_price').onclick = async () => {
+        if (q('msg_price')) q('msg_price').textContent = 'Saving…';
+        try {
+          const body = {card_text: q('cardnum').value.trim(), currency_label: q('currency').value,
+            unit_rate: q('rate').value ? Number(q('rate').value) : null,
+            test_enabled: q('teston').checked, tiers_internal: q('tierint').checked,
+            pending_nag_hours: Math.max(0, Math.min(168, Number(q('naghours').value) || 0))};
+          const {r, w} = await saveShop(body);
+          if (q('msg_price')) q('msg_price').textContent = w.ok ? 'Saved.' : ('Save failed: ' + (w.error || 'unknown'));
+        } catch (e) { if (q('msg_price')) q('msg_price').textContent = 'Save failed: ' + e.message; }
+      };
+      q('save_text').onclick = async () => {
+        if (q('msg_text')) q('msg_text').textContent = 'Saving…';
+        try {
+          const body = {};
+          if (shopCache) {
+            body.welcome_text = BOTXT.welcome; body.thank_you_text = BOTXT.thanks;
+            body.approved_text = BOTXT.approved; body.denied_text = BOTXT.denied;
+            body.referral_text = BOTXT.referral; body.support_text = BOTXT.support;
+          }
+          const {r, w} = await saveShop(body);
+          if (q('msg_text')) q('msg_text').textContent = w.ok ? 'Saved.' : ('Save failed: ' + (w.error || 'unknown'));
+        } catch (e) { if (q('msg_text')) q('msg_text').textContent = 'Save failed: ' + e.message; }
+      };
       q('connect').onclick = async () => {
         if (q('sec')) q('sec').textContent = 'Connecting…';
         try {
