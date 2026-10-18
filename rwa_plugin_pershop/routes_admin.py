@@ -1170,7 +1170,10 @@ def build_admin_router(ctx):
                 photo = None
         if not html_text.strip() and not photo:
             raise HTTPException(400, "empty broadcast")
-        return await queue_broadcast(ctx, shop["id"], html_text, photo)
+        target = str(form.get("target") or "all").strip() or "all"
+        if target not in ("all", "buyers", "subs", "invited", "expired", "noorders"):
+            raise HTTPException(400, "unknown target")
+        return await queue_broadcast(ctx, shop["id"], html_text, photo, target)
 
     @router.get("/broadcasts")
     async def broadcasts(_a: AdminUser = Depends(require_permission("pershop", "view"))):
@@ -1184,6 +1187,30 @@ def build_admin_router(ctx):
                FROM plugin_pershop_broadcasts WHERE shop_id=$1
                ORDER BY id DESC LIMIT 10""", shop["id"])
         return {"broadcasts": [dict(r) for r in rows]}
+
+    @router.get("/events")
+    async def events(_a: AdminUser = Depends(require_permission("pershop", "view"))):
+        """Recent activity feed for the owner's shop (newest first)."""
+        from rwa_plugin_pershop.service import list_events
+
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me)
+        if not shop:
+            return {"events": []}
+        return {"events": await list_events(ctx, shop["id"])}
+
+    @router.get("/health")
+    async def health(_a: AdminUser = Depends(require_permission("pershop", "view"))):
+        """Cheap probes: bot configured, panel reachable, pending/stuck
+        orders. Feeds the health chips in the owner UI."""
+        from rwa_plugin_pershop.service import shop_health
+
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me)
+        if not shop:
+            return {"bot_ok": False, "panel_ok": False,
+                    "pending": 0, "pending_old": 0}
+        return await shop_health(ctx, shop)
 
     @router.get("/app")
     async def app_bundle(_a: AdminUser = Depends(require_permission("pershop", "view"))):

@@ -57,10 +57,11 @@ class FakeDB:
         self.bcs = {}
         self.promos = {}  # id -> promo row
         self.promo_uses = set()  # (promo_id, buyer_tg_id)
+        self.events = []  # activity-feed rows
         self.versions = {"pershop_001"}  # fake alembic_version rows
         self.dropped = False
         self.seq = {"shop": 0, "pkg": 0, "order": 0, "sub": 0, "tier": 0,
-                    "scat": 0, "svc": 0, "bc": 0, "promo": 0}
+                    "scat": 0, "svc": 0, "bc": 0, "promo": 0, "event": 0}
 
     def _next(self, k):
         self.seq[k] += 1
@@ -81,6 +82,12 @@ class FakeDB:
             return [s] if s else []
         if "FROM plugin_pershop_shops" in q:
             return list(self.shops.values())
+        if "FROM plugin_pershop_subs WHERE shop_id" in q and "expire_at IS NOT NULL" in q:
+            return [dict(s) for s in self.subs.values()
+                    if s["shop_id"] == a[0] and s.get("expire_at")]
+        if "DISTINCT buyer_tg_id FROM plugin_pershop_subs WHERE shop_id" in q:
+            return [{"buyer_tg_id": s["buyer_tg_id"]} for s in self.subs.values()
+                    if s["shop_id"] == a[0] and s.get("buyer_tg_id")]
         if "FROM plugin_pershop_subs WHERE shop_id" in q and "package_id IS NULL" in q:
             return [s for s in self.subs.values() if s["shop_id"] == a[0] and not s.get("package_id")]
         if "FROM plugin_pershop_subs WHERE shop_id" in q and "user_uuid" in q:
@@ -268,6 +275,13 @@ class FakeDB:
                          created_at=o.get("created_at"))
                     for o in self.orders.values()
                     if o["shop_id"] == a[0] and o["status"] in ("pending", "withdraw_requested")]
+        if "FROM plugin_pershop_events WHERE shop_id" in q:
+            rows = [e for e in self.events if e["shop_id"] == a[0]]
+            rows.sort(key=lambda e: e["id"], reverse=True)
+            return rows[: a[1]]
+        if "DISTINCT buyer_tg_id FROM plugin_pershop_orders WHERE shop_id" in q and "status='approved'" in q:
+            return [{"buyer_tg_id": o["buyer_tg_id"]} for o in self.orders.values()
+                    if o["shop_id"] == a[0] and o["status"] == "approved"]
         if "DISTINCT buyer_tg_id FROM plugin_pershop_orders WHERE shop_id" in q:
             return [{"buyer_tg_id": o["buyer_tg_id"]} for o in self.orders.values()
                     if o["shop_id"] == a[0] and o.get("buyer_tg_id")]
@@ -424,6 +438,12 @@ class FakeDB:
         if "status IN (" in q and "plugin_pershop_orders" in q:
             return sum(1 for o in self.orders.values()
                        if o["shop_id"] == a[0] and o["status"] in ("pending", "withdraw_requested"))
+        if "COUNT(*)" in q and "plugin_pershop_orders" in q and "created_at <" in q:
+            thr = datetime.now(timezone.utc) - timedelta(hours=24)
+            return sum(1 for o in self.orders.values()
+                       if o["shop_id"] == a[0] and o["status"] == "pending"
+                       and isinstance(o.get("created_at"), datetime)
+                       and o["created_at"] < thr)
         if "status='" in q and "plugin_pershop_orders" in q:
             st = q.split("status='")[1].split("'")[0]
             return sum(1 for o in self.orders.values() if o["shop_id"] == a[0] and o["status"] == st)
@@ -696,6 +716,11 @@ class FakeDB:
         if "UPDATE plugin_pershop_shops SET campaign_percent" in q:
             self.shops[a[1]]["campaign_percent"] = float(a[0])
             return
+        if "INSERT INTO plugin_pershop_events" in q:
+            self.events.append({"id": self._next("event"), "shop_id": a[0],
+                                "kind": a[1], "buyer_tg_id": a[2], "detail": a[3],
+                                "created_at": datetime.now(timezone.utc)})
+            return []
         raise AssertionError(f"unhandled execute: {q}")
 
 
@@ -2546,6 +2571,36 @@ async def _broadcast_flow():
     assert all(c == "<b>Hi all</b>" for v in got.values() for _, c in v), got
     bc = db.bcs[res["id"]]
     assert bc["status"] == "done" and bc["done"] == 3 and bc["failed"] == 0, bc
+
+    # --- broadcast segments narrow the audience (Bedolaga-style) ---
+    r_sub = await queue_broadcast(ctx, sid, "s", None, "subs")
+    assert r_sub["recipients"] == 1, r_sub  # buyer 111 has the sub row
+    r_inv = await queue_broadcast(ctx, sid, "i", None, "invited")
+    assert r_inv["recipients"] == 1, r_inv  # buyer 333 was invited
+    r_buy = await queue_broadcast(ctx, sid, "b", None, "buyers")
+    assert r_buy["recipients"] == 1, r_buy  # only 111 chose a language
+    r_no = await queue_broadcast(ctx, sid, "n", None, "noorders")
+    assert r_no["recipients"] == 1, r_no  # nobody has an approved order yet
+    import rwa_plugin_pershop.service as svc_mod
+    svc_mod._panel_client = lambda: FakePanel()
+    db.subs[1]["expire_at"] = datetime.now(timezone.utc) - timedelta(days=3)
+    r_exp = await queue_broadcast(ctx, sid, "e", None, "expired")
+    assert r_exp["recipients"] == 1, r_exp
+    db.subs[1]["expire_at"] = future
+
+    # --- health probes ---
+    from rwa_plugin_pershop.service import shop_health, list_events
+    h = await shop_health(ctx, {"id": sid, "bot_token_enc": "DUMMY"})
+    assert h["bot_ok"] is True, h
+    assert h["pending"] == 1, h  # the one pending receipt order
+    assert h["pending_old"] == 0, h
+
+    # --- activity feed rows (events) ---
+    evs = await list_events(ctx, sid)
+    kinds = [e["kind"] for e in evs]
+    assert kinds.count("broadcast") >= 6, kinds
+    # newest first
+    assert evs == sorted(evs, key=lambda e: e["id"], reverse=True), evs
     print("BROADCAST FLOW PASSED")
 
 
@@ -3594,7 +3649,7 @@ async def _shop_admin_flow():
     await ctx.settings.set("tg_offset:1", 42)
     assert len(db.shops) == 1
     res = await svc.reset_all(ctx)
-    assert res["ok"] is True and len(res["dropped"]) == 15, res
+    assert res["ok"] is True and len(res["dropped"]) == 16, res
     assert db.dropped is True and db.versions == set(), res
     assert db.shops == {} and db.pkgs == {} and db.subs == {}, db
     assert ctx.settings.d == {}, ctx.settings.d

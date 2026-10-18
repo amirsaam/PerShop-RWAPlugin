@@ -598,6 +598,8 @@ async def _submit_svc_receipt(ctx, shop, tg, msg, text, buyer_id, buyer_un, chat
            VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id""",
         shop["id"], svc["id"], buyer_id, buyer_un, receipt_ref, kind, total, snapshot)
     await _clear_session(ctx, shop["id"], buyer_id, "buyer")
+    from rwa_plugin_pershop.service import log_event as _le1
+    await _le1(ctx, shop["id"], "order_new", buyer_id, f"#{row['id']} {buyer_un}")
     await _maybe_scam_warn(ctx, shop, tg, buyer_id, buyer_un)
     osh = _owner_shop(shop)
     header = L(osh, "order_header", id=row["id"], action=L(osh, "action_service"),
@@ -1781,6 +1783,8 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
             data.get("renew_username"), total, snapshot,
         )
         await _clear_session(ctx, shop["id"], buyer_id, "buyer")
+        from rwa_plugin_pershop.service import log_event as _le2
+        await _le2(ctx, shop["id"], "order_new", buyer_id, f"#{row['id']} {buyer_un}")
         await _maybe_scam_warn(ctx, shop, tg, buyer_id, buyer_un)
         osh = _owner_shop(shop)
         action = L(osh, "action_renew") if data.get("renew_username") else L(osh, "action_new")
@@ -2156,6 +2160,8 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
             shop["id"], item["id"], sender, buyer_un, None, "credit",
             saved.get("renew_username"), total, snapshot)
     await _ac4(ctx, shop["id"], sender, -total)
+    from rwa_plugin_pershop.service import log_event as _le3
+    await _le3(ctx, shop["id"], "order_credit", sender, f"#{row['id']} {buyer_un}")
     order = await ctx.db.fetchrow(
         "SELECT * FROM plugin_pershop_orders WHERE id=$1", row["id"])
     sub_pre = None
@@ -2680,18 +2686,21 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                       "callback_data": f"sub:{sub_id}"}],
                     [{"text": L(shop, "main_menu_btn"), "callback_data": "menu"}]]
         if kind == "devreset":
-            from rwa_plugin_pershop.service import panel_reset_devices
+            from rwa_plugin_pershop.service import panel_reset_devices, log_event as _le4
 
             res = await panel_reset_devices(ctx, sub.get("user_uuid") or "")
             key = "devreset_done" if res.get("ok") else "devreset_fail"
+            if res.get("ok"):
+                await _le4(ctx, shop["id"], "devreset", sender, sub["username"])
         else:
-            from rwa_plugin_pershop.service import panel_reissue_subscription
+            from rwa_plugin_pershop.service import panel_reissue_subscription, log_event as _le5
 
             res = await panel_reissue_subscription(ctx, sub.get("user_uuid") or "")
             if not res.get("ok"):
                 await _show(ctx, shop, tg, sender, mid,
                             L(shop, "reissue_fail"), kb(end_btns))
                 return
+            await _le5(ctx, shop["id"], "reissue", sender, sub["username"])
             url = res.get("url") or L(shop, "url_fallback")
             await _show(ctx, shop, tg, sender, mid,
                         L(shop, "reissue_done", username=sub["username"], url=url),

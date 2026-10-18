@@ -215,6 +215,7 @@ async def disconnect_shop(ctx, owner_admin: str) -> dict:
 
 
 _PERSHOP_TABLES = [
+    "plugin_pershop_events",
     "plugin_pershop_broadcasts",
     "plugin_pershop_referrals",
     "plugin_pershop_test_claims",
@@ -274,6 +275,11 @@ async def reset_all(ctx) -> dict:
     try:
         await ctx.db.execute(
             "DELETE FROM alembic_version WHERE version_num = 'pershop_002'")
+    except Exception:
+        pass
+    try:
+        await ctx.db.execute(
+            "DELETE FROM alembic_version WHERE version_num = 'pershop_003'")
     except Exception:
         pass
     keys = list(_PERSHOP_SETTING_KEYS)
@@ -657,6 +663,7 @@ async def link_subscription(ctx, shop: dict, token: str, tg_id: int) -> tuple[st
     except Exception as e:
         ctx.logger.error("shop link row failed for %s: %s", username, e)
         return ("failed", {"username": username})
+    await log_event(ctx, shop["id"], "linked", tg_id, username)
     return ("linked", {"username": username, "expire_at": exp})
 
 
@@ -1133,10 +1140,77 @@ async def cancel_credit_sub(ctx, sub_id: int, buyer_tg_id: int) -> dict:
     return {"order_id": order["id"], "amount": amount, "username": sub["username"]}
 
 
-async def broadcast_audience(ctx, shop_id: int) -> list[int]:
-    """Every Telegram id that ever bought, linked, chose a language, or was
-    referred in this shop. Best-effort parts never break the whole list."""
+async def broadcast_audience(ctx, shop_id: int, target: str = "all") -> list[int]:
+    """Telegram ids picked per broadcast segment. 'all' = every id that
+    ever bought, linked, chose a language, or was referred in this shop;
+    the other segments narrow that pool by purchase state. Best-effort
+    parts never break the whole list."""
     ids: set[int] = set()
+    if target == "buyers":
+        # Only people who actually opened the bot's language step.
+        try:
+            for r in await ctx.db.fetch(
+                    "SELECT DISTINCT tg_id FROM plugin_pershop_buyers WHERE shop_id=$1", shop_id):
+                if r.get("tg_id"):
+                    ids.add(int(r["tg_id"]))
+        except Exception:
+            pass
+        return sorted(ids)
+    if target == "subs":
+        try:
+            for r in await ctx.db.fetch(
+                    "SELECT DISTINCT buyer_tg_id FROM plugin_pershop_subs WHERE shop_id=$1",
+                    shop_id):
+                if r.get("buyer_tg_id"):
+                    ids.add(int(r["buyer_tg_id"]))
+        except Exception:
+            pass
+        return sorted(ids)
+    if target == "invited":
+        try:
+            for r in await ctx.db.fetch(
+                    "SELECT DISTINCT referred_tg_id FROM plugin_pershop_referrals WHERE shop_id=$1",
+                    shop_id):
+                if r.get("referred_tg_id"):
+                    ids.add(int(r["referred_tg_id"]))
+        except Exception:
+            pass
+        return sorted(ids)
+    if target == "expired":
+        had = []
+        try:
+            had = [r for r in await ctx.db.fetch(
+                "SELECT buyer_tg_id, expire_at FROM plugin_pershop_subs WHERE shop_id=$1 "
+                "AND expire_at IS NOT NULL", shop_id)]
+        except Exception:
+            had = []
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        for r in had:
+            exp = r.get("expire_at")
+            if not r.get("buyer_tg_id") or exp is None:
+                continue
+            if getattr(exp, "tzinfo", None) is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp <= now:
+                ids.add(int(r["buyer_tg_id"]))
+        return sorted(ids)
+    if target == "noorders":
+        try:
+            for r in await ctx.db.fetch(
+                    "SELECT DISTINCT tg_id FROM plugin_pershop_buyers WHERE shop_id=$1", shop_id):
+                if r.get("tg_id"):
+                    ids.add(int(r["tg_id"]))
+        except Exception:
+            pass
+        try:
+            for r in await ctx.db.fetch(
+                    "SELECT DISTINCT buyer_tg_id FROM plugin_pershop_orders "
+                    "WHERE shop_id=$1 AND status='approved'", shop_id):
+                ids.discard(int(r["buyer_tg_id"]))
+        except Exception:
+            pass
+        return sorted(ids)
     try:
         for r in await ctx.db.fetch(
                 "SELECT DISTINCT buyer_tg_id FROM plugin_pershop_subs WHERE shop_id=$1", shop_id):
@@ -1160,18 +1234,74 @@ async def broadcast_audience(ctx, shop_id: int) -> list[int]:
     return sorted(ids)
 
 
-async def queue_broadcast(ctx, shop_id: int, html_text: str, photo: bytes | None) -> dict:
-    """Queue a send-to-all broadcast. The owner writes it in whatever
-    language fits their buyers — the bot forwards it verbatim (HTML
-    formatting intact). A 30s tick fans it out in small chunks."""
-    audience = await broadcast_audience(ctx, shop_id)
+async def queue_broadcast(ctx, shop_id: int, html_text: str, photo: bytes | None,
+                          target: str = "all") -> dict:
+    """Queue a broadcast. The owner writes it in whatever language fits
+    their buyers — the bot forwards it verbatim (HTML formatting intact).
+    A 30s tick fans it out in small chunks. target picks the segment
+    (see broadcast_audience)."""
+    audience = await broadcast_audience(ctx, shop_id, target)
     import json
 
     row = await ctx.db.fetchrow(
         """INSERT INTO plugin_pershop_broadcasts(shop_id,html_text,photo,recipients,total)
            VALUES($1,$2,$3,$4,$5) RETURNING id""",
         shop_id, (html_text or "")[:4000], photo, json.dumps(audience), len(audience))
-    return {"id": row["id"], "recipients": len(audience)}
+    await log_event(ctx, shop_id, "broadcast", None,
+                    f"target={target} recipients={len(audience)}")
+    return {"id": row["id"], "recipients": len(audience), "target": target}
+
+
+async def log_event(ctx, shop_id: int, kind: str, buyer_tg_id=None, detail: str = "") -> None:
+    """Append one activity-feed row. Never raises — the feed is cosmetic
+    and must never break a real flow."""
+    try:
+        await ctx.db.execute(
+            "INSERT INTO plugin_pershop_events(shop_id, kind, buyer_tg_id, detail) "
+            "VALUES($1,$2,$3,$4)",
+            shop_id, kind, buyer_tg_id, (detail or "")[:500])
+    except Exception:
+        pass
+
+
+async def list_events(ctx, shop_id: int, limit: int = 120) -> list[dict]:
+    """Newest-first activity rows for a shop."""
+    try:
+        rows = await ctx.db.fetch(
+            "SELECT * FROM plugin_pershop_events WHERE shop_id=$1 "
+            "ORDER BY id DESC LIMIT $2", shop_id, max(1, min(int(limit), 300)))
+        return [dict(r) for r in (rows or [])]
+    except Exception:
+        return []
+
+
+async def shop_health(ctx, shop: dict) -> dict:
+    """Cheap probes for the panel's health chips: bot configured, panel API
+    reachable, pending orders (total + older than 24h = stuck)."""
+    out = {"bot_ok": bool((shop or {}).get("bot_token_enc")),
+           "panel_ok": False, "pending": 0, "pending_old": 0}
+    try:
+        total = await ctx.db.fetchval(
+            "SELECT COUNT(*) FROM plugin_pershop_orders "
+            "WHERE shop_id=$1 AND status='pending'", shop["id"])
+        out["pending"] = int(total or 0)
+    except Exception:
+        pass
+    try:
+        old = await ctx.db.fetchval(
+            "SELECT COUNT(*) FROM plugin_pershop_orders WHERE shop_id=$1 "
+            "AND status='pending' AND created_at < NOW() - INTERVAL '24 hours'",
+            shop["id"])
+        out["pending_old"] = int(old or 0)
+    except Exception:
+        pass
+    try:
+        client = _panel_client()
+        await client.get_internal_squads()
+        out["panel_ok"] = True
+    except Exception:
+        pass
+    return out
 
 
 async def resolve_applied(ctx, pkg: dict, hwid_value=None) -> dict:
@@ -1340,6 +1470,8 @@ async def approve_order(ctx, order_id: int, decided_by: str) -> dict:
     if order["status"] != "pending":
         raise ValueError(f"order already {order['status']}")
     await count_promo_use(ctx, order)
+    await log_event(ctx, order["shop_id"], "approved", order.get("buyer_tg_id"),
+                    f"#{order_id} {order.get('buyer_username')}")
     if order.get("service_id"):
         # Other-service order: no panel account, no subscription — the
         # buyer's completion text is delivered by the caller.
@@ -1552,6 +1684,8 @@ async def deny_order(ctx, order_id: int, decided_by: str, reason: str) -> None:
         "UPDATE plugin_pershop_orders SET status='denied', deny_reason=$1, decided_at=NOW(), decided_by=$2 WHERE id=$3",
         reason, decided_by, order_id,
     )
+    await log_event(ctx, order["shop_id"], "denied", order.get("buyer_tg_id"),
+                    f"#{order_id} {order.get('buyer_username')}")
     return await _refund_order_credit(ctx, dict(order))
 
 
@@ -2024,6 +2158,8 @@ async def count_promo_use(ctx, order: dict | None) -> None:
                VALUES($1,$2,$3,$4) ON CONFLICT (promo_id, buyer_tg_id) DO NOTHING""",
             promo["id"], shop_id, (order or {}).get("id"),
             (order or {}).get("buyer_tg_id"))
+        await log_event(ctx, shop_id, "promo", (order or {}).get("buyer_tg_id"),
+                        f"{code} on #{(order or {}).get('id')}")
     except Exception:
         pass
 

@@ -265,6 +265,7 @@ window.rwaPluginUI['pershop'] = {
 
     const renderShops = (isAdmin) => {
       q('tabbody').innerHTML = '<div id="stats" class="grid grid-cols-2 sm:grid-cols-4 gap-3"></div>'
+        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Shop health</h2><div id="health" class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm"><span class="text-dark-300">checking…</span></div><div class="mt-3"><button id="hcheck" class="' + BTN_M + '">Recheck</button></div></div>'
         + (isAdmin ? '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">All shops</h2><div id="all" class="text-sm text-dark-300">Loading…</div></div>' : '')
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">My shop</h2><div id="mine" class="grid gap-4 sm:grid-cols-2">'
         + '<div><label class="' + LBL + '" for="prefix">Username prefix</label><input id="prefix" class="' + INP + '" placeholder="e.g. vip — every account name starts with this"><p class="' + HELP + '">Accounts are named prefix-telegramusername, numbered when taken.</p></div>'
@@ -294,9 +295,10 @@ window.rwaPluginUI['pershop'] = {
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Packages</h2><p class="text-xs text-dark-300 mb-3">Standalone sellables, sorted by Sort order. Each package belongs to a tier (that decides its squad); change the tier any time to move it.</p><div id="pkgs" class="space-y-1.5"></div><button id="addpkg" class="' + BTN_M + ' mt-3">Add package</button></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Other Services — categories → items</h2><p class="text-xs text-dark-300 mb-3">Non-VPN sellables. No duration, traffic or device limits. Categories group items for buyers; items live on their own and can move between categories any time.</p><h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Categories</h5><div id="scats" class="space-y-1.5"></div><button id="addscat" class="' + BTN_M + ' mt-3">Add category</button><h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2 mt-5">Items</h5><div id="svcs" class="space-y-1.5"></div><button id="addsvc" class="' + BTN_M + ' mt-3">Add item</button></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Plan matching — users without a plan</h2><div id="unmapped"><button id="uload" class="' + BTN_M + '">Load users</button></div></div>'
-        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Broadcast — send to all buyers</h2><div class="grid gap-3 max-w-xl">'
+        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Broadcast</h2><div class="grid gap-3 max-w-xl">'
         + fmtBar('bctext')
         + '<textarea id="bctext" rows="4" class="' + TA + '" placeholder="Message for EVERY buyer, in your buyers language. HTML tags allowed: <b> <i> <u> <s> <code> <a href=&quot;...&quot;>"></textarea>'
+        + '<div><label class="' + LBL + '" for="bccat">Send to</label><select id="bccat" class="' + INP + '"><option value="all">Everyone</option><option value="buyers">Only buyers who opened the bot</option><option value="subs">Only buyers with a subscription</option><option value="expired">Only buyers with an EXPIRED subscription</option><option value="noorders">Only buyers with no purchase yet</option><option value="invited">Only invited (referral) buyers</option></select><p class="' + HELP + '">Segments narrow the recipients; the bot fans out ~25 per 30s.</p></div>'
         + '<input id="bcphoto" type="file" accept="image/*" class="text-sm text-dark-300"><div id="bcsize" class="text-xs text-dark-300"></div>'
         + '<div><button id="bcsend" class="' + BTN_P + '">Queue broadcast</button></div><div id="bcstat" class="text-xs text-dark-300"></div></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Buyers — scammer flags &amp; credit balances</h2>'
@@ -496,6 +498,22 @@ window.rwaPluginUI['pershop'] = {
       };
       q('bgo').onclick = loadBuyers;
       loadBuyers();
+      const chip = (ok, label) => '<span class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 '
+        + (ok === null ? 'text-dark-300' : ok ? 'text-green-400 border-green-500/30' : 'text-red-400 border-red-500/30')
+        + '">' + (ok === null ? '•' : (ok ? '🟢' : '🔴')) + ' ' + label + '</span>';
+      const loadHealth = async () => {
+        q('health').innerHTML = '<span class="text-dark-300">checking…</span>';
+        try {
+          const h = await j(api + '/health');
+          q('health').innerHTML = chip(h.bot_ok, 'Bot connected') + chip(h.panel_ok, 'Panel API')
+            + '<span class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-dark-300">Pending orders: ' + h.pending + '</span>'
+            + '<span class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 '
+            + (h.pending_old ? 'text-amber-400 border-amber-500/30' : 'text-dark-300')
+            + '">Stuck over 24h: ' + h.pending_old + '</span>';
+        } catch (e) { q('health').innerHTML = '<span class="text-red-400">unavailable</span>'; }
+      };
+      q('hcheck').onclick = loadHealth;
+      loadHealth();
       wireFmt(el);
       q('bcphoto').onchange = () => {
         const f = q('bcphoto').files[0];
@@ -514,6 +532,7 @@ window.rwaPluginUI['pershop'] = {
         if (f && f.size > 5 * 1024 * 1024) { alert('Photo must be under 5MB'); return; }
         const fd = new FormData();
         fd.append('text', q('bctext').value);
+        if (q('bccat')) fd.append('target', q('bccat').value);
         if (f) fd.append('photo', f);
         q('bcstat').textContent = 'Queueing…';
         try {
@@ -798,7 +817,19 @@ window.rwaPluginUI['pershop'] = {
         + ['pending', 'approved', 'denied', 'withdrawn'].map((s) =>
           '<button data-s="' + s + '" class="inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium capitalize transition-all'
           + (s === 'pending' ? ' bg-background text-foreground shadow' : ' hover:text-foreground') + '">' + s + '</button>').join('')
-        + '</div><div id="o" class="mt-4"></div>';
+        + '</div><div id="o" class="mt-4"></div>'
+        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Recent activity</h2><p class="text-xs text-dark-300 mb-3">Live feed for this shop — newest first. Codes: 🛒 order, 💰 auto-approved (credit), ✅ approved, ❌ denied, ✉️ receipt, 🔗 sub linked, 🎟️ promo burned, 📣 broadcast, 📱 device reset, ♻️ reissue.</p><div id="events" class="text-sm text-dark-300"><i>loading…</i></div></div>';
+      const loadEvents = async () => {
+        try {
+          const {events} = await j(api + '/events');
+          const kinds = {order_new: '🛒', order_credit: '💰', approved: '✅', denied: '❌',
+                         linked: '🔗', promo: '🎟️', broadcast: '📣', devreset: '📱', reissue: '♻️'};
+          q('events').innerHTML = (events || []).map((ev) => '<div class="py-1 border-b border-border/40 last:border-0">'
+            + (kinds[ev.kind] || '•') + ' ' + esc(String(ev.created_at).slice(0, 16).replace('T', ' '))
+            + (ev.detail ? ' · ' + esc(ev.detail) : '') + '</div>').join('') || '<i>nothing yet</i>';
+        } catch (e) { q('events').textContent = 'unavailable'; }
+      };
+      loadEvents();
       const load = async (status) => {
         const {orders} = await j(api + '/orders?status=' + status);
         q('o').innerHTML = orders.length ? '<div class="' + CARD + ' !p-0 overflow-hidden"><table class="table"><thead><tr><th>Order</th><th>Item</th><th>Buyer</th><th>Amount</th><th>Type</th><th>Status</th><th></th></tr></thead><tbody>'
