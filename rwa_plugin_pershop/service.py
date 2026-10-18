@@ -568,14 +568,11 @@ async def _link_allowed(ctx, shop: dict, row: dict) -> bool:
     #   - explicit superadmin creator ("superadmin")
     #   - empty creator + superadmin-owned shop
     if creator_str == "superadmin":
-        print("DEBUG superadmin")
         return True
     if creator_str is None:
         ok2, acct2 = await _owner_account_row(ctx, shop.get("owner_admin"))
         is_s = bool(ok2 and (acct2 is None or (acct2 and acct2.get("role_name") == "superadmin")))
-        print("DEBUG empty creator superadmin:", ok2, acct2, "is_super=", is_s)
     if creator_num is not None:
-        print("DEBUG: numeric creator", creator_num, "-> allowed=False (foreign)")
         return False  # any non-empty, non-superadmin creator = foreign
     ok, acct = await _owner_account_row(ctx, shop.get("owner_admin"))
     is_super = bool(ok and (acct is None or (acct and acct.get("role_name") == "superadmin")))
