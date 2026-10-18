@@ -225,12 +225,22 @@ window.rwaPluginUI['pershop'] = {
       const s = {subs_active: 0, orders_pending: 0, orders_approved: 0, units_sold: 0,
         orders_denied: 0, orders_withdrawn: 0, tests_claimed: 0, subs_linked: 0, referral_earned: 0};
       const renderKPIs = () => {
-        const cell = (v, l) => '<div class="glass-card p-4"><div class="text-xl font-bold text-white">' + v + '</div><div class="text-xs text-dark-300 mt-0.5">' + l + '</div></div>';
-        q('stats').innerHTML = cell(s.subs_active || 0, 'Active subs') + cell(s.orders_pending || 0, 'Pending orders')
-          + cell((s.orders_approved || 0) + ' · ' + (s.units_sold || 0) + 'u', 'Approved · units sold')
-          + cell(s.orders_denied || 0, 'Denied') + cell(s.orders_withdrawn || 0, 'Withdrawn')
-          + cell(s.tests_claimed || 0, 'Trials') + cell(s.subs_linked || 0, 'Linked')
-          + cell(fmtU(s.referral_earned || 0), 'Referral paid');
+        // Bedolaga-style MiniStat: label top-left, big value, tinted icon bubble top-right.
+        const kpis = [
+          [s.subs_active || 0, 'Active subs', '🟢', 'text-emerald-400'],
+          [s.orders_pending || 0, 'Pending orders', '⏳', 'text-amber-400'],
+          [(s.orders_approved || 0) + ' · ' + (s.units_sold || 0) + 'u', 'Approved · units sold', '✅', 'text-teal-400'],
+          [s.orders_denied || 0, 'Denied', '❌', 'text-rose-400'],
+          [s.orders_withdrawn || 0, 'Withdrawn', '↩️', 'text-dark-300'],
+          [s.tests_claimed || 0, 'Trials', '🧪', 'text-cyan-400'],
+          [s.subs_linked || 0, 'Linked', '🔗', 'text-violet-400'],
+          [fmtU(s.referral_earned || 0), 'Referral paid', '💰', 'text-blue-400'],
+        ];
+        const cell = (v, l, icon, color) => '<div class="glass-card p-4 flex items-start justify-between">'
+          + '<div class="min-w-0"><div class="text-[10px] text-dark-300 uppercase tracking-wider truncate">' + l + '</div>'
+          + '<div class="text-xl font-bold text-white mt-0.5 truncate">' + v + '</div></div>'
+          + '<div class="p-2 rounded-lg bg-[var(--glass-bg)] flex-shrink-0 ' + color + '">' + icon + '</div></div>';
+        q('stats').innerHTML = kpis.map((k) => cell(k[0], k[1], k[2], k[3])).join('');
       };
       Promise.all([
         j(api + '/stats'), adminMode ? j(api + '/shops/all') : Promise.resolve({shops: adminMode ? [] : undefined}),
