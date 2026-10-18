@@ -1275,6 +1275,83 @@ async def list_events(ctx, shop_id: int, limit: int = 120) -> list[dict]:
         return []
 
 
+async def buyer_detail(ctx, shop: dict, buyer_tg_id: int) -> dict:
+    """Everything the shop knows about one buyer, in one payload: language,
+    credit, scammer flag, every order and every sub. Never raises so the
+    detail page always renders something."""
+    import json as _json
+
+    tg = int(buyer_tg_id)
+    out = {"tg_id": tg, "lang": None, "credit_units": 0.0,
+           "orders": [], "subs": [], "flag": None}
+    try:
+        b = await ctx.db.fetchrow(
+            "SELECT tg_id, lang, credit_units FROM plugin_pershop_buyers"
+            " WHERE shop_id=$1 AND tg_id=$2", shop["id"], tg)
+        if b:
+            out["lang"] = b.get("lang")
+            out["credit_units"] = float(b.get("credit_units") or 0)
+    except Exception:
+        pass
+    try:
+        orders = await ctx.db.fetch(
+            "SELECT id, package_id, service_id, status, total_units, created_at,"
+            " renew_username, options_snapshot FROM plugin_pershop_orders"
+            " WHERE shop_id=$1 AND buyer_tg_id=$2 ORDER BY id DESC LIMIT 50",
+            shop["id"], tg)
+        for o in (orders or []):
+            row = dict(o)
+            try:
+                snap = _json.loads(row.pop("options_snapshot")) if isinstance(
+                    row.get("options_snapshot"), str) else {}
+                row["promo_code"] = snap.get("promo_code")
+                row["credit_used"] = snap.get("credit_used") or 0
+            except Exception:
+                row["promo_code"] = None
+                row["credit_used"] = 0
+            out["orders"].append(row)
+    except Exception:
+        pass
+    try:
+        subs = await ctx.db.fetch(
+            "SELECT id, username, expire_at, cancelled, is_test FROM"
+            " plugin_pershop_subs WHERE shop_id=$1 AND buyer_tg_id=$2"
+            " ORDER BY id DESC", shop["id"], tg)
+        out["subs"] = [dict(s) for s in (subs or [])]
+    except Exception:
+        pass
+    try:
+        flag = await is_scammer(ctx, tg)
+        out["flag"] = flag or None
+    except Exception:
+        pass
+    return out
+
+
+async def referral_pairs(ctx, shop: dict) -> dict:
+    """Referral program page data: every invite with the credit it minted
+    (sum of approved orders' referral credit for the invited buyer) plus
+    the shop's current referral/campaign percentages."""
+    pct = {"referral_percent": float((shop or {}).get("referral_percent") or 0),
+           "campaign_percent": float((shop or {}).get("campaign_percent") or 0)}
+    try:
+        rows = await ctx.db.fetch(
+            "SELECT r.referrer_tg_id AS referrer, r.referred_tg_id AS invited,"
+            " COALESCE(SUM(o.credit_units), 0) AS earned, COUNT(o.id) AS buys"
+            " FROM plugin_pershop_referrals r"
+            " LEFT JOIN plugin_pershop_orders o ON o.shop_id = r.shop_id"
+            "  AND o.buyer_tg_id = r.referred_tg_id AND o.status = 'approved'"
+            " WHERE r.shop_id = $1"
+            " GROUP BY r.referrer_tg_id, r.referred_tg_id"
+            " ORDER BY earned DESC, r.referred_tg_id", shop["id"])
+        pairs = [dict(r) for r in (rows or [])]
+    except Exception:
+        pairs = []
+    return {"pairs": pairs, "invited": len(pairs),
+            "earned_units": round(sum(float(p.get("earned") or 0) for p in pairs), 4),
+            **pct}
+
+
 async def shop_health(ctx, shop: dict) -> dict:
     """Cheap probes for the panel's health chips: bot configured, panel API
     reachable, pending orders (total + older than 24h = stuck)."""

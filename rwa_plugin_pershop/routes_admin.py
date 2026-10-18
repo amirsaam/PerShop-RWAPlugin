@@ -100,6 +100,11 @@ class PromoIn(BaseModel):
     active: bool = True
 
 
+class CreditIn(BaseModel):
+    """Owner credit adjustment. Negative = deduct (floors at 0)."""
+    units: float
+
+
 class SvcCatIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     sort: int = 0
@@ -921,14 +926,18 @@ def build_admin_router(ctx):
             "SELECT id, buyer_tg_id FROM plugin_pershop_subs WHERE shop_id=$1", shop["id"])
         ords = await ctx.db.fetch(
             "SELECT buyer_tg_id FROM plugin_pershop_orders WHERE shop_id=$1", shop["id"])
-        counts: dict = {}
+        sub_counts: dict = {}
+        order_counts: dict = {}
         for s in subs or []:
             if s.get("buyer_tg_id"):
-                counts[int(s["buyer_tg_id"])] = counts.get(int(s["buyer_tg_id"]), 0) + 1
-        tgs = set(counts)
+                tg = int(s["buyer_tg_id"])
+                sub_counts[tg] = sub_counts.get(tg, 0) + 1
+        tgs = set(sub_counts)
         for o in ords or []:
             if o.get("buyer_tg_id"):
-                tgs.add(int(o["buyer_tg_id"]))
+                tg = int(o["buyer_tg_id"])
+                tgs.add(tg)
+                order_counts[tg] = order_counts.get(tg, 0) + 1
         prefs = await ctx.db.fetch(
             "SELECT tg_id, lang, credit_units FROM plugin_pershop_buyers WHERE shop_id=$1",
             shop["id"])
@@ -942,12 +951,54 @@ def build_admin_router(ctx):
             flag = await is_scammer(ctx, tg)
             out.append({"tg_id": tg, "lang": p.get("lang") or shop.get("lang") or "en",
                         "credit_units": float(p.get("credit_units") or 0),
-                        "subs": counts.get(tg, 0),
+                        "subs": sub_counts.get(tg, 0),
+                        "orders": order_counts.get(tg, 0),
                         "flagged": bool(flag),
                         "flag_reason": (flag or {}).get("reason") or ""})
             if len(out) >= 50:
                 break
         return {"buyers": out}
+
+    @router.get("/buyers/{tg_id}")
+    async def buyer_detail_route(tg_id: int, _a: AdminUser = Depends(require_permission("pershop", "view"))):
+        """One buyer's full picture: language, credit, every order and sub.
+        Feeds the buyer detail page (one click from the buyers list)."""
+        from rwa_plugin_pershop.service import buyer_detail
+
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me)
+        if not shop:
+            raise HTTPException(404, "create shop first")
+        return await buyer_detail(ctx, dict(shop), tg_id)
+
+    @router.post("/buyers/{tg_id}/credit")
+    async def buyer_credit(tg_id: int, body: CreditIn,
+                           _a: AdminUser = Depends(require_permission("pershop", "moderate"))):
+        """Owner credit adjustment: dispute settlements, refunds outside
+        the order flow, gifts. Floors at 0 like every credit move."""
+        from rwa_plugin_pershop.service import add_credit, credit_balance, log_event
+
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me)
+        if not shop:
+            raise HTTPException(404, "create shop first")
+        await add_credit(ctx, shop["id"], tg_id, float(body.units))
+        await log_event(ctx, shop["id"], "credit", tg_id,
+                        f"{'+' if body.units >= 0 else ''}{body.units:g} by {_a.username}")
+        return {"credit_units": await credit_balance(ctx, shop["id"], tg_id)}
+
+    @router.get("/referrals")
+    async def referrals(_a: AdminUser = Depends(require_permission("pershop", "view"))):
+        """Referral pairs with their earned credit totals (referrer-inspired
+        view; earned comes from approved orders the invitee made)."""
+        from rwa_plugin_pershop.service import referral_pairs
+
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me)
+        if not shop:
+            return {"pairs": [], "invited": 0, "earned_units": 0,
+                    "referral_percent": 0, "campaign_percent": 0}
+        return await referral_pairs(ctx, dict(shop))
 
     @router.get("/scammers")
     async def scammers_list(_a: AdminUser = Depends(require_permission("pershop", "view"))):

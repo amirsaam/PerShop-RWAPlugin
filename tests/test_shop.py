@@ -148,6 +148,12 @@ class FakeDB:
                     and o.get("renew_username") == a[2]]
             rows.sort(key=lambda o: o["id"], reverse=True)
             return rows[:1]
+        if "FROM plugin_pershop_orders WHERE shop_id" in q and "buyer_tg_id" in q \
+                and "ORDER BY id DESC" in q:
+            rows = [dict(o) for o in self.orders.values()
+                    if o["shop_id"] == a[0] and o["buyer_tg_id"] == a[1]]
+            rows.sort(key=lambda o: -o["id"])
+            return rows[:50] if "LIMIT 50" in q else rows
         if "FROM plugin_pershop_orders WHERE shop_id" in q and "renew_username" in q:
             return [o for o in self.orders.values()
                     if o["shop_id"] == a[0] and o.get("renew_username") == a[1]
@@ -264,6 +270,9 @@ class FakeDB:
         if "SELECT buyer_tg_id FROM plugin_pershop_orders WHERE shop_id" in q:
             return [{"buyer_tg_id": o["buyer_tg_id"]} for o in self.orders.values()
                     if o["shop_id"] == a[0] and o.get("buyer_tg_id")]
+        if "SELECT tg_id, lang, credit_units FROM plugin_pershop_buyers" in q and "AND tg_id=$2" in q:
+            return [{"tg_id": a[1], "lang": self.buyers.get((a[0], a[1])),
+                     "credit_units": self.credits.get((a[0], a[1]), 0.0)}]
         if "SELECT tg_id, lang, credit_units FROM plugin_pershop_buyers WHERE shop_id" in q:
             tgs = {tg for (s, tg) in list(self.buyers) + list(self.credits) if s == a[0]}
             return [{"tg_id": tg, "lang": self.buyers.get((a[0], tg)),
@@ -309,6 +318,20 @@ class FakeDB:
                 out.append({"referred_tg_id": referred, "earned": earned, "uname": uname})
             out.sort(key=lambda r: float(r["earned"]), reverse=True)
             return out
+        if "FROM plugin_pershop_referrals r LEFT JOIN" in q:
+            pairs = []
+            for r in self.referrals:
+                if r[0] != a[0]:
+                    continue
+                olist = [o for o in self.orders.values()
+                         if o["shop_id"] == a[0] and o["buyer_tg_id"] == r[2]
+                         and o["status"] == "approved"]
+                pairs.append({"referrer": r[1], "invited": r[2],
+                              "earned": round(sum(float(o.get("credit_units") or 0)
+                                                  for o in olist), 4),
+                              "buys": len(olist)})
+            pairs.sort(key=lambda p: (-p["earned"], p["invited"]))
+            return pairs
         if "DISTINCT referred_tg_id FROM plugin_pershop_referrals WHERE shop_id" in q:
             return [{"referred_tg_id": r[2]} for r in self.referrals if r[0] == a[0]]
         if "FROM plugin_pershop_referrals WHERE shop_id" in q:
@@ -3928,6 +3951,54 @@ def test_promo_campaign_flow():
     asyncio.run(_promo_campaign_flow())
 
 
+async def _buyer_referral_flow():
+    import rwa_plugin_pershop.service as svc
+    from rwa_plugin_pershop.service import (add_credit, buyer_detail,
+                                            credit_balance, referral_pairs)
+
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, pid = make_shop(db)
+    shop = {"id": sid, "lang": "en", "referral_percent": 10, "campaign_percent": 5}
+    db.buyers[(sid, 222)] = "fa"
+    db.referrals.add((sid, 111, 222))
+    ins = ("INSERT INTO plugin_pershop_orders(shop_id,package_id,buyer_tg_id,"
+           "buyer_username,receipt_file_id,receipt_kind,renew_username,"
+           "total_units,options_snapshot) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)"
+           " RETURNING id")
+    await db.fetchrow(ins, sid, pid, 222, "invited-one", "f", "photo", None,
+                      5.0, "{}")
+    db.orders[1]["status"] = "approved"
+    db.orders[1]["credit_units"] = 2.5
+
+    res = await referral_pairs(ctx, shop)
+    assert res["invited"] == 1 and len(res["pairs"]) == 1, res
+    p = res["pairs"][0]
+    assert p["referrer"] == 111 and p["invited"] == 222, p
+    assert p["buys"] == 1 and float(p["earned"]) == 2.5, p
+    assert float(res["earned_units"]) == 2.5 and res["referral_percent"] == 10, res
+
+    det = await buyer_detail(ctx, shop, 222)
+    assert det["tg_id"] == 222 and det["lang"] == "fa", det
+    assert len(det["orders"]) == 1 and det["orders"][0]["status"] == "approved", det
+    assert det["orders"][0]["credit_used"] == 0 and det["subs"] == [], det
+    assert det["flag"] in (None, {}), det
+
+    await add_credit(ctx, sid, 222, 3.0)
+    assert await credit_balance(ctx, sid, 222) == 3.0, db.credits
+    det = await buyer_detail(ctx, shop, 222)
+    assert det["credit_units"] == 3.0, det
+
+    det2 = await buyer_detail(ctx, shop, 999999)
+    assert det2["orders"] == [] and det2["subs"] == [] and det2["credit_units"] == 0.0, det2
+
+    print("BUYER REFERRAL FLOW PASSED")
+
+
+def test_buyer_referral_flow():
+    asyncio.run(_buyer_referral_flow())
+
+
 if __name__ == "__main__":
     test_naming()
     test_templates()
@@ -3968,3 +4039,4 @@ if __name__ == "__main__":
     test_admin_preview_flow()
     test_empty_texts_flow()
     test_promo_campaign_flow()
+    test_buyer_referral_flow()
