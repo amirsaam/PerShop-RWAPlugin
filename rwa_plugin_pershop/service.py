@@ -4,10 +4,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from rwa_plugin_pershop.lang_extra import apply as _apply_lang_extra
-
-_apply_lang_extra()
-
 from rwa_plugin_pershop.naming import allocate_username
 
 

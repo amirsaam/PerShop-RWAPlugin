@@ -864,17 +864,10 @@ def test_lang():
     assert normalize_lang(None) == "en"
     # every locale covers every English key
     from rwa_plugin_pershop.lang import LOCALES
-    from rwa_plugin_pershop.lang_extra import NEW_LOCALES
 
     for lang, table in LOCALES.items():
         for key in LOCALES["en"]:
-            if key in table:
-                continue
-            # post-freeze keys (lang_extra.py) fall back to the English text
-            # until the user hand-writes them into lang.py
-            assert key in NEW_LOCALES.get("en", {}), f"{lang} missing {key}"
-    # hand-edited lang.py wording always wins over the fallback merge
-    assert L({"lang": "fa"}, "promo_btn") == NEW_LOCALES["en"]["promo_btn"]
+            assert key in table, f"{lang} missing {key}"
     # spot checks: no English leaks in chrome strings
     assert "اشتراک" in L({"lang": "fa"}, "my_subs_btn")
     assert "подписки" in L({"lang": "ru"}, "my_subs_btn")
@@ -1836,7 +1829,7 @@ async def _menu_flow():
          {"text": "Docs", "url": "https://d.io"}]]
     # a bad chunk inside a line doesn't poison the good ones
     assert _tlr("Good | https://g.io || junk\n") == [[{"text": "Good", "url": "https://g.io"}]]
-    await txt("🆘 Request Support")
+    await txt("☎️ Request Support")
     assert "@support" in texts()[-1], texts()[-1]
     # disabled test + unconfigured texts hide their panel buttons
     shop.update({"test_enabled": False, "referral_text": "", "referral_percent": 0,
