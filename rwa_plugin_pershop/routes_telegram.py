@@ -291,16 +291,7 @@ async def _send_buyer_menu(ctx, shop, tg, chat_id, edit=None) -> None:
     from rwa_plugin_pershop.telegram import reply_kb
 
     labels = [L(shop, "buy_subs_btn")]
-    if shop.get("test_enabled"):
-        labels.append(L(shop, "test_sub_btn"))
     labels.append(L(shop, "my_subs_btn"))
-    try:
-        from rwa_plugin_pershop.service import has_services
-
-        if await has_services(ctx, shop["id"]):
-            labels.append(L(shop, "services_btn"))
-    except Exception:
-        pass
     try:
         _ref_pct = float(shop.get("referral_percent") or 0)
     except Exception:
@@ -310,6 +301,15 @@ async def _send_buyer_menu(ctx, shop, tg, chat_id, edit=None) -> None:
     tutorial = await ctx.settings.get("tutorial_text", default="")
     if (tutorial or "").strip():
         labels.append(L(shop, "tutorial_btn"))
+    if shop.get("test_enabled"):
+        labels.append(L(shop, "test_sub_btn"))
+    try:
+        from rwa_plugin_pershop.service import has_services
+
+        if await has_services(ctx, shop["id"]):
+            labels.append(L(shop, "services_btn"))
+    except Exception:
+        pass
     if (shop.get("support_text") or "").strip():
         labels.append(L(shop, "support_btn"))
     labels.append(L(shop, "account_btn"))
