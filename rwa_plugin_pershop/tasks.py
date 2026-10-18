@@ -183,22 +183,30 @@ async def _say(ctx, tg, shop: dict, chat_id: int, text: str,
 
 
 async def _notify_expiry(ctx, tg, shop: dict, sub: dict, exp, now: datetime) -> None:
-    """Expired (once) + 72h warning (once, re-arms) — each with its fix button."""
+    """Expired (once) + 72h warning (once, re-arms) — each with its fix button.
+    Test subs never get the 72h warning, and every fix button opens the Buy
+    flow (a trial can only be replaced by a real plan, never renewed)."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
 
+    is_test = bool(sub.get("is_test"))
     # Expired (once).
     if exp and exp <= now:
         if not sub["notified_expired"]:
+            btn = ({"text": L(shop, "buy_subs_btn"), "callback_data": "pershop:buy"}
+                   if is_test
+                   else {"text": L(shop, "reactivate_btn"),
+                         "callback_data": f"qrenew:{sub['id']}"})
             await _say(ctx, tg, shop, sub["buyer_tg_id"],
                 L(shop, "expired_notice", username=sub["username"]), reply_markup=kb(
-                [[{"text": L(shop, "reactivate_btn"),
-                   "callback_data": f"qrenew:{sub['id']}"}]]))
+                [[btn]]))
             await ctx.db.execute(
                 "UPDATE plugin_pershop_subs SET notified_expired=TRUE WHERE id=$1", sub["id"])
         return
 
     # 72h pre-expiry warning (once; re-arms if expiry moves away).
+    if is_test:
+        return  # Trial subscriptions get no 72h reminder — they simply expire.
     if exp:
         remaining = (exp - now).total_seconds()
         if 0 < remaining <= HOURS_72 and not sub["notified_72h"]:
@@ -215,13 +223,19 @@ async def _notify_expiry(ctx, tg, shop: dict, sub: dict, exp, now: datetime) -> 
 
 
 async def _notify_traffic(ctx, tg, shop: dict, sub: dict, ratio: float) -> None:
-    """80% warning with an Add-traffic button when the shop sells top-ups."""
+    """80% warning. Paid subs get an Add-traffic button when the shop sells
+    top-ups; test subs are pointed at the Buy flow instead."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
 
-    markup = (kb([[{"text": L(shop, "add_traffic_btn"),
-                            "callback_data": f"addtraffic:{sub['id']}"}]])
-              if await _traffic_offers(ctx, shop) else None)
+    if sub.get("is_test"):
+        markup = kb([[{"text": L(shop, "buy_subs_btn"),
+                       "callback_data": "pershop:buy"}]])
+    elif await _traffic_offers(ctx, shop):
+        markup = kb([[{"text": L(shop, "add_traffic_btn"),
+                       "callback_data": f"addtraffic:{sub['id']}"}]])
+    else:
+        markup = None
     await _say(ctx, tg, shop, sub["buyer_tg_id"],
         L(shop, "traffic_notice", username=sub["username"], percent=f"{ratio:.0%}"),
         reply_markup=markup)
@@ -230,11 +244,14 @@ async def _notify_traffic(ctx, tg, shop: dict, sub: dict, ratio: float) -> None:
 
 
 async def _notify_out_of_traffic(ctx, tg, shop: dict, sub: dict) -> None:
-    """100% exhausted — the traffic twin of the expired notice, with a fix button."""
+    """100% exhausted — the traffic twin of the expired notice, with a fix
+    button. Test subs buy a real plan instead of renewing/topping up."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.telegram import kb
 
-    if await _traffic_offers(ctx, shop):
+    if sub.get("is_test"):
+        btn = {"text": L(shop, "buy_subs_btn"), "callback_data": "pershop:buy"}
+    elif await _traffic_offers(ctx, shop):
         btn = {"text": L(shop, "add_traffic_btn"),
                "callback_data": f"addtraffic:{sub['id']}"}
     else:

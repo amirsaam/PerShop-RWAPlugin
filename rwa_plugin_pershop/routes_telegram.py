@@ -872,10 +872,11 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
         await _show(ctx, shop, tg, sender, edit, text, kb(home))
         return
     if sub.get("is_test"):
-        # Trial accounts are info-only: no renew, no top-ups. A full plan
-        # is bought through the Buy menu like any new subscription.
+        # Trial accounts are info-only: no renew, no top-ups. The only
+        # forward path is buying a full plan, so that button is right here.
         text += "\n\n" + L(shop, "test_no_renew")
-        await _show(ctx, shop, tg, sender, edit, text, kb(home))
+        btns = [[{"text": L(shop, "buy_subs_btn"), "callback_data": "pershop:buy"}]] + home
+        await _show(ctx, shop, tg, sender, edit, text, kb(btns))
         return
     offer = None
     if sub.get("buyer_tg_id"):

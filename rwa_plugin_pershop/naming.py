@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import re
 
-_USERNAME_CLEAN = re.compile(r"[^a-z0-9_]")
+_USERNAME_CLEAN = re.compile(r"[^a-zA-Z0-9_]")
 
 
 def sanitize_fragment(value: str) -> str:
-    value = (value or "").lower().strip().lstrip("@")
+    value = (value or "").strip().lstrip("@")
     value = _USERNAME_CLEAN.sub("", value)
     return value or "user"
 

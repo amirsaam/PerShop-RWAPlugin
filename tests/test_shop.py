@@ -888,6 +888,10 @@ def make_stepped(db, sid):
 def test_naming():
     assert allocate_username("vip", "alice", 1, {"vip-alice", "vip-alice2"}) == "vip-alice3"
     assert allocate_username("vip", "bob", 2, set()) == "vip-bob"
+    # Owners type prefixes in any case — no lowercase forcing anymore.
+    assert allocate_username("VIP", "alice", 3, {"VIP-alice"}) == "VIP-alice2"
+    from rwa_plugin_pershop.naming import sanitize_fragment
+    assert sanitize_fragment("My Shop") == "MyShop"
     assert traffic_ratio(80, 100) == 0.8
     assert traffic_ratio(5, 0) is None
 
@@ -2719,13 +2723,58 @@ async def _followup6_flow():
     assert payload.get("active_internal_squads") == ["sqT"], payload
     assert payload.get("hwid_device_limit") == 3, payload
 
-    # --- task 3: test subs show info, never renew buttons ---
+    # --- task 3: test subs show info, never renew buttons; buy-new instead ---
     await cb("my_subs", "f6a")
     assert "sub:1" in flat(rms()[-1]), rms()[-1]
     await cb("sub:1", "f6b")
     assert "can't be renewed" in texts()[-1], texts()[-1]
     assert not any((d or "").startswith(("renew:", "qrenew:"))
                    for d in flat(rms()[-1])), rms()[-1]
+    assert "pershop:buy" in flat(rms()[-1]), rms()[-1]
+
+    # test sub notifications: no 72h warning at all; expired + traffic
+    # notices point at the Buy flow, never at renew/top-up.
+    from datetime import timedelta as _td
+    now = datetime.now(timezone.utc)
+    sub1 = db.subs[1]
+    uuid1 = sub1["user_uuid"]
+    db.users[uuid1]["expire_at"] = now + _td(hours=24)
+    sub1["expire_at"] = now + _td(hours=24)
+    sub1["notified_72h"] = False
+    sub1["notified_expired"] = False
+    tg3b = FakeTg("DUMMY")
+    await _notify_sub(ctx, tg3b, shop, sub1, now)
+    assert tg3b.sent == [], tg3b.sent
+
+    uuid1_exp = now - _td(hours=1)
+    db.users[uuid1]["expire_at"] = uuid1_exp
+    sub1["expire_at"] = uuid1_exp
+    tg3c = FakeTg("DUMMY")
+    await _notify_sub(ctx, tg3c, shop, sub1, now)
+    exp_rm = [p.get("rm") for m, p in tg3c.sent
+              if m == "sendMessage" and p.get("chat_id") == 111]
+    assert exp_rm, tg3c.sent
+    assert any(d == "pershop:buy" for d in flat(exp_rm[-1])), exp_rm[-1]
+    assert not any((d or "").startswith(("qrenew:", "addtraffic:"))
+                   for d in flat(exp_rm[-1])), exp_rm[-1]
+
+    # out-of-traffic on a test sub: buy-new button, no traffic top-up.
+    future = now + _td(days=30)
+    db.users[uuid1]["expire_at"] = future
+    sub1["expire_at"] = future
+    db.users[uuid1]["traffic_limit_bytes"] = 1073741824
+    db.users[uuid1]["used_traffic_bytes"] = 1073741824
+    sub1["notified_out"] = False
+    tg3d = FakeTg("DUMMY")
+    await _notify_sub(ctx, tg3d, shop, sub1, now)
+    out_rm = [p.get("rm") for m, p in tg3d.sent
+              if m == "sendMessage" and p.get("chat_id") == 111]
+    assert out_rm, tg3d.sent
+    assert any(d == "pershop:buy" for d in flat(out_rm[-1])), out_rm[-1]
+    assert not any((d or "").startswith(("qrenew:", "addtraffic:"))
+                   for d in flat(out_rm[-1])), out_rm[-1]
+    db.users[uuid1]["traffic_limit_bytes"] = 0
+    db.users[uuid1]["used_traffic_bytes"] = 0
 
     # --- task 1: cancelled subs stay silent; nag is one friendly summary ---
     sub = db.subs[1]
