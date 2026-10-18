@@ -50,8 +50,23 @@ window.rwaPluginUI['pershop'] = {
       s: ['<s>', '</s>'], code: ['<code>', '</code>'], link: ['<a href="URL">', '</a>']};
     const FMT_NAMES = {b: 'Bold', i: 'Italic', u: 'Underline', s: 'Strike', code: 'Code', link: 'Link'};
     const FULL_EMOJIS = ['🛒','🔁','👥','📖','🎁','☎️','👤','💰','📦','🏷️','🏆','🔗','✅','❌','⏳','🟢','🔴','🟡','📊','📈','📝','💬','📢','📣','⚠️','🔔','🔕','💡','🎯','🚀','🔥','💎','⭐','✨','💼','📋','🗂️','📁','📂','☀️','🌙','❤️','💔','💘','💊','💉','🩹','🩺','⚕️','🧬','🩻','🩼','🧫','🧪','🌡️','🚽','🚰','🚿','🛁','🛀','🧴','🧷','🧹','🧺','🧻','🧼','🧽','🎧','🎈','🎉','🎊','🎤','🎸','🎹','🎻','🎮','🎯','🎲','🧸','🪀','🪁','🎪','🎭','🩰','🩱','🩲','🩳','👑','👒','🎩','🎓','🧢','👔','📔','📕','📖','📗','📘','📙','📚','📓','📒','📃','📜','📄','🗂️','🗃️','🗄️','🗑️','🔑','🗝️','🔐','🔒','🔓','💎','💍','💄','💅','🐵','🐒','🦍','🐶','🐕','🐩','🐺','🦊','🐱','🐈','🐈‍⬛','🦁','🐯','🐅','🐆','🐴','🐎','🦄','🦓','🦌','🐮','🐂','🐃','🐄','🐷','🐖','🐗','🐏','🐑','🐐','🐬','🐟','🐠','🐡','🐙','🐚','🐌','🦋','🐛','🐜','🐝','🐞','🕷️','🦂','🐉','🐲','🌵','🎄','🌲','🌳','🍀','🍁','🍂','🍃','🍇','🍈','🍉','🍊','🍋','🍌','🍍','🍎','🍏','🍑','🍒','🍓','🍅','🍆','🥑','🍖','🍗','🍘','🍙','🍚','🍛','🍜','🍝','🍞','🍟','🍕','🫓','🥪','🥨','🥯','🧀','🥚','🍳','🧈','🥘','🍲','🥣','🥗','🍿','🍱','🍫','🍬','🍭','🍮','🍯','🍼','🥛','☕','🍵','🍶','🍾','🍴','🍽️','🍸','🍹','🍺','🍻','🍷','💐','🌸','💮','🏵️','🌹','🌺','🌻','🌼','🌷','☘️','🍀','🍁','🍂','🍃','🍇','🍈','🍉','🍊','🍋','🍌','🍍','🍎','🍏','🍑','🍒','🍓','🍅','🍆','🥑','🍖','🍗','🍘','🍙','🍚','🍛','🍜','🍝','🍞','🍟','🍕','🫓','🥪','🥨','🥯','🧀','🥚','🍳','🧈','🥘','🍲','🥣','🥗','🍿','🍱','🍫','🍬','🍭','🍮','🍯','🍼','🥛','☕','🍵','🍶','🍾','🍴','🍽️','🍸','🍹','🍺','🍻','🍷','🟢','🔴','🟡','⚪','⚫','🟤','🟥','🟧','🟨','🟩','🟦','🟪','🟫','📢','📣','⚠️','🔔','🔕','💡','🎯','🚀','🔥','💎','⭐','✨','💼','📋','🗂️','📁','📂','☀️','🌙','📊','📈','📝','💬'];
-    const emojiPicker = (targetId) => '<span class="emoji-wrap relative inline-block"><button type="button" onclick="const d=document.getElementById(\'emoji_\' + \'' + targetId + '\'); d.classList.toggle(\'hidden\'); event.stopPropagation();" class="' + BTN_M + '">😀</button><div id="emoji_' + targetId + '" class="hidden fixed z-[60] bg-[var(--glass-bg)] border border-[var(--glass-border)] rounded-lg p-2 shadow-2xl w-64 max-h-72 overflow-y-auto overflow-x-hidden" style="top:auto;left:auto;">' + FULL_EMOJIS.map((e) => '<button type="button" onclick="const f=document.getElementById(\'' + targetId + '\'); if(f){f.value+=(f.value ? \' \':\'\')+\'' + e + '\'; f.focus(); this.closest(\'div.fixed\').classList.add(\'hidden\');}" class="hover:bg-[var(--glass-bg-hover)] rounded px-1 text-xl leading-none">' + e + '</button>').join('') + '</div></span>';
+    const emojiPicker = (targetId) => '<button type="button" onclick="window.__emojiOpen(\'' + targetId + '\', this)" class="' + BTN_M + '">😀</button>';
 
+    window.__emojiOpen = function(targetId, btn) {
+      const rect = btn.getBoundingClientRect();
+      const existing = document.getElementById('emoji_' + targetId);
+      if (existing) { existing.remove(); return; }
+      const drop = document.createElement('div');
+      drop.id = 'emoji_' + targetId;
+      drop.className = 'fixed z-[70] bg-[var(--glass-bg)]/95 backdrop-blur border border-[var(--glass-border)] rounded-xl p-3 shadow-2xl w-72 max-h-72 overflow-y-auto overflow-x-hidden';
+      drop.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+      drop.style.left = Math.max(8, rect.left + window.scrollX) + 'px';
+      const list = FULL_EMOJIS;
+      drop.innerHTML = list.map(e => '<button type="button" onclick="const f=document.getElementById(\'' + targetId + '\'); if(f){f.value+=(f.value ? \' \':\'\')+\'' + e + '\'; f.focus(); this.closest(\'div\').remove();}" class="hover:bg-[var(--glass-bg-hover)] rounded px-1 text-xl leading-none">' + e + '</button>').join('');
+      document.body.appendChild(drop);
+      window.__emojiClose = function() { const d = document.getElementById('emoji_' + targetId); if (d) d.remove(); };
+      document.addEventListener('click', function closeEmoji(e) { if (!drop.contains(e.target) && e.target !== btn) { drop.remove(); document.removeEventListener('click', closeEmoji); } }, {once:true});
+    };
     const fmtBar = (id) => '<div class="flex flex-wrap gap-1.5 mb-2">' + Object.keys(FMT_TAGS).map((t) =>
       '<button data-fmt="' + t + '" data-for="' + id + '" class="' + BTN_M + '">' + FMT_NAMES[t] + '</button>').join('')
       + '<button data-br data-for="' + id + '" class="' + BTN_M + '" title="Insert a blank line">⏎ Break</button>'
