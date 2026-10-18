@@ -2145,9 +2145,9 @@ async def _notify_approval(ctx, shop, tg, order, res, sub_pre=None, edit=None) -
                         L(shop, "contract_traffic_roll", left=_fmt_gb(left),
                           cap=_fmt_gb(res["traffic_limit_bytes"])))
         else:
-            url = res.get("subscription_url") or L(shop, "url_fallback")
+            # _card already carries `url` (subscription_url or url_fallback)
             await _show(ctx, shop, tg, order["buyer_tg_id"], bmid,
-                _mt(shop, "approved", username=res["username"], url=url, **_card))
+                _mt(shop, "approved", username=res["username"], **_card))
     except Exception as e:
         ctx.logger.warning("shop.notify_buyer_failed", extra={"err": str(e)})
     try:

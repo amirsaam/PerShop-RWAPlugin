@@ -1235,8 +1235,24 @@ async def _match_topup_flow():
     svc._owner_account_row = lambda _c, _o: (True, None)
     status2, info2 = await svc.link_subscription(ctx, shop, "tokS", 222)
     assert status2 == "linked" and info2["username"] == "super-bob", (status2, info2)
+    # superadmin-created token: the buyer himself can claim his premapped user
+    # (numerics stay foreign, but "superadmin" creator links regardless of owner)
+    db.short_users["tok1S"] = {"uuid": "uu-1", "username": "own-one", "shortUuid": "tok1S",
+                               "telegramId": None, "createdByAdminId": "superadmin",
+                               "expireAt": exp.isoformat(), "trafficLimitBytes": 64 * GB,
+                               "activeInternalSquads": [{"uuid": "sqT"}]}
+    status3, info3 = await svc.link_subscription(ctx, shop, "tok1S", 111)
+    assert status3 == "linked" and info3["username"] == "own-one", (status3, info3)
     res3 = await svc.assign_plan(ctx, shop, "uu-1", pid)
     assert res3["created"] is False and res3["buyer_tg_id"] == 111, res3
+    sub = [s for s in db.subs.values() if s["username"] == "own-one"][0]
+    assert sub["buyer_tg_id"] == 111 and sub["package_id"] == pid, sub
+    # plan the superadmin-linked user too, so only own-two stays unplanned below
+    db.users["uu-s"] = {"uuid": "uu-s", "username": "super-bob", "status": "ACTIVE",
+                        "expire_at": exp, "used_traffic_bytes": 0,
+                        "traffic_limit_bytes": 64 * GB, "created_by_admin_id": 42}
+    res4 = await svc.assign_plan(ctx, shop, "uu-s", pid)
+    assert res4["created"] is False and res4["buyer_tg_id"] == 222, res4
 
     # overuse clamps to the fresh cap (no negative rollover)
     db.users["uu-1"]["used_traffic_bytes"] = 200 * GB
@@ -1355,12 +1371,12 @@ async def _effects_flow():
     svc._panel_client = lambda: panel
     shop = dict(db.shops[sid])
     db.short_users["tok1"] = {"uuid": "uu-1", "username": "own-one", "shortUuid": "tok1",
-                              "telegramId": None, "createdByAdminId": 42,
+                              "telegramId": None, "createdByAdminId": "superadmin",
                               "expireAt": exp.isoformat(), "trafficLimitBytes": 64 * GB,
                               "activeInternalSquads": [{"uuid": "sqT"}]}
     assert await svc.assign_plan(ctx, shop, "uu-1", pid)
     status, _info = await svc.link_subscription(ctx, shop, "tok1", 111)
-    assert status == "linked", (status, _info)
+    assert status == "linked", (status, _info)  # superadmin-created token links
     sub = [s for s in db.subs.values() if s["username"] == "own-one"][0]
 
     assert svc.is_timeless(_dt(2999, 6, 1, tzinfo=_tz.utc))
@@ -1834,7 +1850,7 @@ async def _referral_cards_flow():
     assert card["plan"] == "Monthly", card
     assert "625,000" in card["price"], card
     bought = svc.message_text(shop, "approved", username="vip-alice",
-                              url="https://sub/abc", **card)
+                              **card)  # card["url"] comes from approval_vars (23cca14)
     for needle in ("vip-alice", "Monthly", "625,000", "Traffic Limit", "Subscription Link",
                    "HWID Limit", "Expire Date"):
         assert needle in bought, bought
@@ -1928,6 +1944,14 @@ async def _link_flow():
                                   "telegramId": 555, "createdByAdminId": 42,
                                   "expireAt": "2026-12-01T00:00:00+00:00",
                                   "trafficLimitBytes": None, "activeInternalSquads": []}
+        # taken is now a bot-level state: buyer 555 already owns uu-b's sub row
+        taken_id = db._next("sub")
+        db.subs[taken_id] = {"id": taken_id, "shop_id": sid, "buyer_tg_id": 555,
+                             "user_uuid": "uu-b", "username": "taken-joe",
+                             "expire_at": None, "traffic_limit_bytes": None,
+                             "package_id": None, "is_test": False, "is_linked": True,
+                             "notified_80": False, "notified_72h": False,
+                             "notified_expired": False}
         db.short_users["tokC"] = {"uuid": "uu-c", "username": "foreign-ann", "shortUuid": "tokC",
                                   "telegramId": None, "createdByAdminId": 777,
                                   "expireAt": "2026-12-01T00:00:00+00:00",
@@ -1994,12 +2018,13 @@ async def _link_flow():
         await cb("linksub", "l1", uid=333, un="cara")
         assert "subscription link" in texts()[-1], texts()[-1]
         db.short_users["tokE"] = {"uuid": "uu-e", "username": "cara-sub", "shortUuid": "tokE",
-                                  "telegramId": None, "createdByAdminId": 42,
+                                  "telegramId": None, "createdByAdminId": None,
                                   "expireAt": "2026-12-02T00:00:00+00:00",
                                   "trafficLimitBytes": None, "activeInternalSquads": []}
-        # tokE uses numeric createdByAdminId: 42 (not superadmin/empty) -> foreign per stricter rule
+        # tokE is an unattributed (empty-creator) token: links as-is, no owner ping;
+        # "foreign" display is covered by tokC below.
         await txt("https://sub.example.com/s/tokE", uid=333, un="cara")
-        assert "foreign" in texts()[-1].lower() or "این فروشگاه" in texts()[-1], texts()[-1:]
+        assert "linked" in texts()[-2].lower(), texts()[-2:]
         # linked as-is: NO owner ping about plan matching anymore
         assert not any(p.get("chat_id") != 333
                        for inst in FakeTg.instances for m, p in inst.sent
