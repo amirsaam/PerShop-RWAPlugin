@@ -55,10 +55,12 @@ class FakeDB:
         self.svc_cats = {}
         self.svcs = {}
         self.bcs = {}
+        self.promos = {}  # id -> promo row
+        self.promo_uses = set()  # (promo_id, buyer_tg_id)
         self.versions = {"pershop_001"}  # fake alembic_version rows
         self.dropped = False
         self.seq = {"shop": 0, "pkg": 0, "order": 0, "sub": 0, "tier": 0,
-                    "scat": 0, "svc": 0, "bc": 0}
+                    "scat": 0, "svc": 0, "bc": 0, "promo": 0}
 
     def _next(self, k):
         self.seq[k] += 1
@@ -269,6 +271,11 @@ class FakeDB:
         if "DISTINCT buyer_tg_id FROM plugin_pershop_orders WHERE shop_id" in q:
             return [{"buyer_tg_id": o["buyer_tg_id"]} for o in self.orders.values()
                     if o["shop_id"] == a[0] and o.get("buyer_tg_id")]
+        if "FROM plugin_pershop_orders WHERE shop_id" in q and "buyer_tg_id" in q:
+            st = q.split("status='")[1].split("'")[0] if "status='" in q else None
+            return [o for o in self.orders.values()
+                    if o["shop_id"] == a[0] and o.get("buyer_tg_id") == a[1]
+                    and (st is None or o["status"] == st)]
         if "DISTINCT tg_id FROM plugin_pershop_buyers WHERE shop_id" in q:
             return [{"tg_id": tg} for (s, tg) in self.buyers if s == a[0]]
         if "FROM plugin_pershop_buyers WHERE shop_id" in q:
@@ -293,6 +300,19 @@ class FakeDB:
         if "FROM plugin_pershop_referrals WHERE shop_id" in q:
             return [{"referrer_tg_id": r[1]} for r in self.referrals
                     if r[0] == a[0] and r[2] == a[1]]
+        if "FROM plugin_pershop_promos p" in q and "LEFT JOIN" in q:
+            return [dict(p, uses=sum(1 for pid, _ in self.promo_uses if pid == pid_))
+                    for pid_, p in self.promos.items() if p["shop_id"] == a[0]]
+        if "FROM plugin_pershop_promos WHERE id" in q:
+            p = self.promos.get(a[0])
+            return [p] if p and p.get("shop_id") == a[1] else []
+        if "FROM plugin_pershop_promos WHERE shop_id" in q:
+            return [p for p in self.promos.values()
+                    if p["shop_id"] == a[0] and p["code"] == a[1]]
+        if "SELECT COUNT(*) FROM plugin_pershop_promo_uses WHERE promo_id" in q:
+            return [{"n": sum(1 for pid, _ in self.promo_uses if pid == a[0])}]
+        if "FROM plugin_pershop_promo_uses WHERE promo_id" in q:
+            return [{"n": 1}] if (a[0], a[1]) in self.promo_uses else []
         if "FROM plugin_pershop_broadcasts WHERE status IN" in q:
             return [b for b in self.bcs.values() if b["status"] in ("queued", "sending")]
         if "INSERT INTO plugin_pershop_buyers" in q and "RETURNING credit_units" in q:
@@ -337,6 +357,18 @@ class FakeDB:
                              "recipients": a[3], "total": a[4], "pos": 0,
                              "done": 0, "failed": 0, "status": "queued"}
             return [{"id": nid}]
+        if "INSERT INTO plugin_pershop_promos" in q:
+            if any(p["shop_id"] == a[0] and p["code"] == a[1] for p in self.promos.values()):
+                raise Exception(
+                    "duplicate key value violates unique constraint"
+                    " \"uq_pershop_promos_shop_code\"")
+            pid = self._next("promo")
+            row = {"id": pid, "shop_id": a[0], "code": a[1], "kind": a[2],
+                   "value": float(a[3]), "max_uses": int(a[4] or 0),
+                   "valid_until": a[5], "active": True,
+                   "created_by_owner": a[6], "uses": 0}
+            self.promos[pid] = row
+            return [row]
         raise AssertionError(f"unhandled fetch: {q}")
 
     # -- panel-table helpers (mirror db_service surface used by the plugin) --
@@ -387,6 +419,8 @@ class FakeDB:
         if "COUNT(*)" in q and "plugin_pershop_orders" in q and "buyer_tg_id" in q:
             return sum(1 for o in self.orders.values()
                        if o["shop_id"] == a[0] and o.get("buyer_tg_id") == a[1])
+        if "COUNT(*)" in q and "plugin_pershop_promo_uses" in q:
+            return sum(1 for pid, _ in self.promo_uses if pid == a[0])
         if "status IN (" in q and "plugin_pershop_orders" in q:
             return sum(1 for o in self.orders.values()
                        if o["shop_id"] == a[0] and o["status"] in ("pending", "withdraw_requested"))
@@ -639,6 +673,29 @@ class FakeDB:
                     s["expire_at"] = a[0]
                     s["traffic_limit_bytes"] = a[1]
             return
+        if "INSERT INTO plugin_pershop_promos" in q:
+            pid = self._next("promo")
+            self.promos[pid] = {
+                "id": pid, "shop_id": a[0], "code": a[1], "kind": a[2],
+                "value": float(a[3]), "max_uses": int(a[4] or 0),
+                "valid_until": a[5], "active": True,
+                "created_by_owner": a[6], "uses": 0}
+            return {"id": pid}
+        if "INSERT INTO plugin_pershop_promo_uses" in q:
+            self.promo_uses.add((a[0], a[3]))
+            return
+        if "UPDATE plugin_pershop_promos SET code" in q:
+            p = self.promos.get(a[6])
+            if p:
+                p.update(code=a[0], kind=a[1], value=float(a[2]), max_uses=int(a[3]),
+                         valid_until=a[4], active=a[5])
+            return
+        if "DELETE FROM plugin_pershop_promos WHERE id=$1" in q:
+            self.promos.pop(a[0], None)
+            return
+        if "UPDATE plugin_pershop_shops SET campaign_percent" in q:
+            self.shops[a[1]]["campaign_percent"] = float(a[0])
+            return
         raise AssertionError(f"unhandled execute: {q}")
 
 
@@ -807,10 +864,17 @@ def test_lang():
     assert normalize_lang(None) == "en"
     # every locale covers every English key
     from rwa_plugin_pershop.lang import LOCALES
+    from rwa_plugin_pershop.lang_extra import NEW_LOCALES
 
     for lang, table in LOCALES.items():
         for key in LOCALES["en"]:
-            assert key in table, f"{lang} missing {key}"
+            if key in table:
+                continue
+            # post-freeze keys (lang_extra.py) fall back to the English text
+            # until the user hand-writes them into lang.py
+            assert key in NEW_LOCALES.get("en", {}), f"{lang} missing {key}"
+    # hand-edited lang.py wording always wins over the fallback merge
+    assert L({"lang": "fa"}, "promo_btn") == NEW_LOCALES["en"]["promo_btn"]
     # spot checks: no English leaks in chrome strings
     assert "اشتراک" in L({"lang": "fa"}, "my_subs_btn")
     assert "подписки" in L({"lang": "ru"}, "my_subs_btn")
@@ -3537,7 +3601,7 @@ async def _shop_admin_flow():
     await ctx.settings.set("tg_offset:1", 42)
     assert len(db.shops) == 1
     res = await svc.reset_all(ctx)
-    assert res["ok"] is True and len(res["dropped"]) == 13, res
+    assert res["ok"] is True and len(res["dropped"]) == 15, res
     assert db.dropped is True and db.versions == set(), res
     assert db.shops == {} and db.pkgs == {} and db.subs == {}, db
     assert ctx.settings.d == {}, ctx.settings.d
@@ -3720,6 +3784,102 @@ def test_empty_texts_flow():
     asyncio.run(_empty_texts_flow())
 
 
+async def _promo_campaign_flow():
+    """Promos + the referral first-order campaign: create/validate/burn.
+
+    Service-level — the repo's FakeDB models exactly the SQL the plugin
+    runs, so this pins the promo engine end to end without Telegram.
+    """
+    import json as pj
+
+    from rwa_plugin_pershop import service as svc
+
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, pid = make_shop(db)
+    db.shops[sid]["campaign_percent"] = 15  # owner wrote the campaign percent
+    shop = db.shops[sid]
+    buyer = 4242
+
+    # referral row exists (buyer came through an invite link), no prior order
+    db.referrals.add((sid, 777, buyer))
+
+    # -- campaign: invitee's first order gets 15% off
+    cut = await svc.campaign_units_for(ctx, shop, buyer, 200.0)
+    assert cut == 30.0, cut
+    # a buyer with a completed order gets nothing
+    db.orders[1] = {"id": 1, "shop_id": sid, "buyer_tg_id": 4242, "status": "approved"}
+    assert await svc.campaign_units_for(ctx, shop, buyer, 200.0) == 0.0
+    db.orders[1]["buyer_tg_id"] = 9999  # other buyer again → eligible
+    # campaign off (owner never wrote a percent) → nothing
+    off = dict(shop, campaign_percent=0)
+    assert await svc.campaign_units_for(ctx, off, buyer, 200.0) == 0.0
+
+    # -- promo create: validation errors and success
+    try:
+        await svc.create_promo(ctx, sid, code="", kind="percent", value=10)
+        raise SystemExit("empty code accepted")
+    except ValueError:
+        pass
+    try:
+        await svc.create_promo(ctx, sid, code="X", kind="percent", value=150)
+        raise SystemExit("percent > 100 accepted")
+    except ValueError:
+        pass
+    promo = await svc.create_promo(ctx, sid, code="save10", kind="percent",
+                                   value=10, max_uses=2, created_by_owner="admin1")
+    assert promo["code"] == "SAVE10" and promo["active"] is True
+    try:
+        await svc.create_promo(ctx, sid, code="SAVE10", kind="units", value=5)
+        raise SystemExit("duplicate accepted")
+    except ValueError as e:
+        assert "already" in str(e)
+
+    # -- validate: active + unused for this buyer
+    got = await svc.promo_validate(ctx, sid, " save10 ", buyer)
+    assert got and got["id"] == promo["id"]
+    assert await svc.promo_validate(ctx, sid, "NOPE", buyer) is None
+
+    # -- checkout: promo 10% + campaign 15% stack off a 200-order
+    cd = await svc.checkout_discount(ctx, shop, buyer, 200.0, promo)
+    assert cd["promo_units"] == 20.0 and cd["campaign_units"] == 30.0, cd
+    assert cd["discount_units"] == 50.0
+    # per-buyer single use: burned promo stops applying for that buyer
+    order = {"id": 2, "shop_id": sid, "buyer_tg_id": buyer,
+             "options_snapshot": pj.dumps({"promo_code": "SAVE10"})}
+    await svc.count_promo_use(ctx, order)
+    assert (promo["id"], buyer) in db.promo_uses
+    db.orders[2] = dict(order, status="approved")
+    await svc.count_promo_use(ctx, dict(order))  # idempotent burn (no dup)
+    assert len([u for u in db.promo_uses if u[0] == promo["id"]]) == 1
+    assert await svc.promo_validate(ctx, sid, "SAVE10", buyer) is None
+    # per-buyer burn doesn't stop other buyers (2-use cap)
+    got2 = await svc.promo_validate(ctx, sid, "SAVE10", 5151)
+    assert got2
+
+    # -- max uses: burn two buyers, third is refused
+    await svc.count_promo_use(ctx, dict(order, buyer_tg_id=5151,
+                                       options_snapshot=pj.dumps({"promo_code": "SAVE10"})))
+    assert await svc.promo_validate(ctx, sid, "SAVE10", 5555) is None
+
+    # -- admin listing shape
+    rows = await svc.list_promos_with_uses(ctx, sid)
+    assert len(rows) == 1 and rows[0]["uses"] == 2, rows
+
+    # -- expired promo never validates
+    from datetime import datetime, timezone
+
+    old = dict(promo, id=db._next("promo"), valid_until=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    db.promos[old["id"]] = old
+    assert await svc.promo_validate(ctx, sid, old["code"], buyer) is None
+
+    print("PROMO CAMPAIGN FLOW PASSED")
+
+
+def test_promo_campaign_flow():
+    asyncio.run(_promo_campaign_flow())
+
+
 if __name__ == "__main__":
     test_naming()
     test_templates()
@@ -3759,3 +3919,4 @@ if __name__ == "__main__":
     test_shop_admin_flow()
     test_admin_preview_flow()
     test_empty_texts_flow()
+    test_promo_campaign_flow()

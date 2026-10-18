@@ -275,6 +275,7 @@ window.rwaPluginUI['pershop'] = {
         + '<div><label class="' + LBL + '" for="currency">Currency label</label><input id="currency" class="' + INP + '" placeholder="shown after every price, e.g. تومان"></div>'
         + '<div><label class="' + LBL + '" for="rate">Unit rate</label><input id="rate" inputmode="decimal" class="' + INP + '" placeholder="how much 1 unit costs, e.g. 250000"></div>'
         + '<div><label class="' + LBL + '" for="refpct">Referral reward %</label><input id="refpct" inputmode="decimal" class="' + INP + '" placeholder="0 = off"><p class="' + HELP + '">% of each invited purchase, gifted to the inviter as shop credit.</p></div>'
+        + '<div><label class="' + LBL + '" for="campct">First-order discount % (invites)</label><input id="campct" inputmode="decimal" class="' + INP + '" placeholder="0 = off"><p class="' + HELP + '">Invited buyers get this % off their first purchase. 0 = off. Works from the referral invite link itself — no code needed.</p></div>'
         + '<div><label class="' + LBL + '" for="naghours">Pending-receipt nudge (hours)</label><input id="naghours" inputmode="numeric" class="' + INP + '" placeholder="6"><p class="' + HELP + '">0 = off — remind me when a receipt waits longer than this.</p></div>'
         + '<div class="sm:col-span-2"><label class="' + LBL + '" for="bosel">Bot texts</label>'
         + '<select id="bosel" class="' + INP + ' max-w-xs mb-2"><option value="welcome">Welcome text</option><option value="thanks">Thank-you text (after receipt)</option><option value="approved">Approved text</option><option value="denied">Denied text</option><option value="referral">Referral program text (blank hides the button)</option><option value="support">Support text (blank hides the button)</option></select>'
@@ -283,6 +284,13 @@ window.rwaPluginUI['pershop'] = {
         + '<div class="sm:col-span-2 flex items-start gap-3"><input type="checkbox" id="tierint" class="h-4 w-4 mt-1 accent-primary"><div><label for="tierint" class="text-sm text-white">Tiers are internal</label><p class="' + HELP + '">Buyers skip the tier buttons and see every package as one list. Tiers stay in the panel for squads and grouping.</p></div></div>'
         + '</div><div class="flex flex-wrap items-center gap-2 mt-4"><button id="save" class="' + BTN_P + '">Save shop</button><button id="connect" class="' + BTN_S + '">Connect bot</button><button id="disconnect" class="' + BTN_M + '">Disconnect bot</button><span id="sec" class="text-xs text-dark-300"></span></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Tiers</h2><p class="text-xs text-dark-300 mb-3">Buyer groups — each tier puts sold accounts in one squad. Packages live on their own below and can move between tiers any time.</p><div id="tiers" class="space-y-1.5"></div><button id="addtier" class="' + BTN_M + ' mt-3">Add tier</button></div>'
+        + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Promo codes</h2><p class="text-xs text-dark-300 mb-3">Codes kick in at the buyer checkout and work only inside this shop. Percent = % off the order; Units = flat cut in shop units. Max uses each buyer once (0 = unlimited); a zero expiry means forever. One use is burned when an order with the code is approved.</p><div id="promos" class="space-y-1.5"></div>'
+        + '<div class="grid gap-2 sm:grid-cols-6 mt-3 items-end"><div><label class="' + LBL + '">Code</label><input id="pr_code" class="' + INP + '" placeholder="SAVE10"></div>'
+        + '<div><label class="' + LBL + '">Kind</label><select id="pr_kind" class="' + INP + '"><option value="percent">percent</option><option value="units">units</option></select></div>'
+        + '<div><label class="' + LBL + '">Value</label><input id="pr_value" inputmode="decimal" class="' + INP + '" placeholder="10"></div>'
+        + '<div><label class="' + LBL + '">Max uses</label><input id="pr_uses" inputmode="numeric" class="' + INP + '" placeholder="0 = ∞"></div>'
+        + '<div><label class="' + LBL + '">Valid until</label><input id="pr_until" type="date" class="' + INP + '"></div>'
+        + '<div class="flex flex-wrap gap-2"><button id="pr_add" class="' + BTN_P + '">Create promo</button><button id="pr_res" class="' + BTN_M + '">Reset list</button></div></div></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Packages</h2><p class="text-xs text-dark-300 mb-3">Standalone sellables, sorted by Sort order. Each package belongs to a tier (that decides its squad); change the tier any time to move it.</p><div id="pkgs" class="space-y-1.5"></div><button id="addpkg" class="' + BTN_M + ' mt-3">Add package</button></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Other Services — categories → items</h2><p class="text-xs text-dark-300 mb-3">Non-VPN sellables. No duration, traffic or device limits. Categories group items for buyers; items live on their own and can move between categories any time.</p><h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Categories</h5><div id="scats" class="space-y-1.5"></div><button id="addscat" class="' + BTN_M + ' mt-3">Add category</button><h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2 mt-5">Items</h5><div id="svcs" class="space-y-1.5"></div><button id="addsvc" class="' + BTN_M + ' mt-3">Add item</button></div>'
         + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Plan matching — users without a plan</h2><div id="unmapped"><button id="uload" class="' + BTN_M + '">Load users</button></div></div>'
@@ -373,6 +381,7 @@ window.rwaPluginUI['pershop'] = {
         q('teston').checked = !!shop.test_enabled;
         q('tierint').checked = !!shop.tiers_internal;
         q('refpct').value = shop.referral_percent || 0;
+        q('campct').value = shop.campaign_percent || 0;
         q('naghours').value = shop.pending_nag_hours == null ? 6 : shop.pending_nag_hours;
         q('lang').value = ['en', 'fa', 'ru', 'zh'].includes(shop.lang) ? shop.lang : 'en';
         q('sec').textContent = (shop.has_token ? '' : 'No bot connected — paste a token, Save, then Connect. ')
@@ -411,6 +420,7 @@ window.rwaPluginUI['pershop'] = {
             test_enabled: q('teston').checked, referral_text: botextCache.referral, support_text: botextCache.support,
             tiers_internal: q('tierint').checked,
             referral_percent: Math.max(0, Math.min(100, Number(q('refpct').value) || 0)),
+            campaign_percent: Math.max(0, Math.min(100, Number(q('campct').value) || 0)),
             pending_nag_hours: Math.max(0, Math.min(168, Number(q('naghours').value) || 0))};
           if (q('token').value) body.bot_token = q('token').value;
           const r = await j(api + '/shops/mine', {method: 'PUT', body: JSON.stringify(body)});
@@ -423,6 +433,42 @@ window.rwaPluginUI['pershop'] = {
           loadMine();
         } catch (e) { alert('Save failed: ' + e.message); }
       };
+      const loadPromos = async () => {
+        const empty = '<i>no promo codes yet</i>';
+        try {
+          const {promos} = await j(api + '/promos');
+          q('promos').innerHTML = (promos || []).map((p) => {
+            const off = p.kind === 'units'
+              ? ('flat ' + esc(fmtU(p.value)) + ' off')
+              : ('' + esc(fmtU(p.value)) + '% off');
+            const uses = esc(p.uses || 0) + '/' + (Number(p.max_uses) > 0 ? esc(p.max_uses) : '∞');
+            const until = p.valid_until ? (' · until ' + esc(String(p.valid_until).slice(0, 10))) : '';
+            const dot = p.active ? '🟢' : '⚫';
+            return '<div class="' + ROW + '"><span>' + dot + ' <b>' + esc(p.code) + '</b> · ' + off
+              + ' · ' + uses + until + '</span><button data-dpromo="' + p.id + '" class="' + BTN_D + '">Delete</button></div>';
+          }).join('') || empty;
+          q('promos').querySelectorAll('[data-dpromo]').forEach((b) => { b.onclick = async () => {
+            if (!confirm('Delete this promo code? Buyers can no longer apply it.')) return;
+            try { await j(api + '/promos/' + b.dataset.dpromo, {method: 'DELETE'}); loadPromos(); }
+            catch (e) { alert('Delete failed: ' + e.message); }
+          }; });
+        } catch (e) { q('promos').textContent = 'Error: ' + e.message; }
+      };
+      q('pr_add').onclick = async () => {
+        const code = (q('pr_code').value || '').trim();
+        if (!code) { alert('Promo code is required'); return; }
+        const until = q('pr_until').value;
+        const body = {code: code, kind: q('pr_kind').value || 'percent',
+          value: Number(q('pr_value').value) || 0,
+          max_uses: Math.max(0, Math.floor(Number(q('pr_uses').value) || 0)),
+          valid_until: until ? until + 'T23:59:59Z' : null, active: true};
+        try { await j(api + '/promos', {method: 'POST', body: JSON.stringify(body)});
+          q('pr_code').value = ''; q('pr_value').value = ''; q('pr_uses').value = ''; q('pr_until').value = '';
+          loadPromos();
+        } catch (e) { alert('Create failed: ' + e.message); }
+      };
+      q('pr_res').onclick = loadPromos;
+      loadPromos();
       const loadBuyers = async () => {
         const needle = q('bq').value.trim();
         try {

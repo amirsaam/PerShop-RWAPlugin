@@ -31,6 +31,9 @@ class ShopIn(BaseModel):
     # True = tiers stay an internal grouping/squad tool; buyers see one flat
     # package list after pressing Buy instead of tier buttons.
     tiers_internal: bool = False
+    # % off a referral invitee's FIRST purchase (0 = off). No campaign code
+    # needed — the invite link itself qualifies the buyer.
+    campaign_percent: float = Field(default=0, ge=0, le=100)
 
 
 class PluginSettingsIn(BaseModel):
@@ -84,6 +87,16 @@ class TierIn(BaseModel):
     squad_uuid: str | None = None
     hwid_default: int | None = Field(default=None, ge=0)
     sort: int = 0
+    active: bool = True
+
+
+class PromoIn(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    # "percent" = % off the checkout, "units" = flat cut in shop units.
+    kind: str = Field(default="percent")
+    value: float = Field(default=10, gt=0)
+    max_uses: int = Field(default=0, ge=0)
+    valid_until: datetime | str | None = None
     active: bool = True
 
 
@@ -229,14 +242,15 @@ def build_admin_router(ctx):
                        thank_you_text=$7, approved_text=$8, denied_text=$9, lang=$10,
                        currency_label=$11, unit_rate=$12, test_enabled=$13,
                        referral_text=$14, support_text=$15, pending_nag_hours=$16,
-                       referral_percent=$17, tiers_internal=$18 WHERE id=$19""",
+                       referral_percent=$17, tiers_internal=$18,
+                       campaign_percent=$19 WHERE id=$20""",
                     token_enc, payload.admin_tg_id, prefix,
                     payload.card_text, payload.welcome_text, secret,
                     payload.thank_you_text, payload.approved_text, payload.denied_text, lang,
                     payload.currency_label.strip(), payload.unit_rate,
                     payload.test_enabled, payload.referral_text, payload.support_text,
                     payload.pending_nag_hours, payload.referral_percent,
-                    payload.tiers_internal, cur["id"],
+                    payload.tiers_internal, payload.campaign_percent, cur["id"],
                 )
                 shop_id = cur["id"]
             else:
@@ -244,13 +258,14 @@ def build_admin_router(ctx):
                     """INSERT INTO plugin_pershop_shops(owner_admin, bot_token_enc, admin_tg_id, prefix, card_text,
                        welcome_text, webhook_secret, thank_you_text, approved_text, denied_text, lang,
                        currency_label, unit_rate, test_enabled, referral_text, support_text, pending_nag_hours,
-                       referral_percent, tiers_internal)
-                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id""",
+                       referral_percent, tiers_internal, campaign_percent)
+                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id""",
                     me, token_enc, payload.admin_tg_id, prefix, payload.card_text, payload.welcome_text, secret,
                     payload.thank_you_text, payload.approved_text, payload.denied_text, lang,
                     payload.currency_label.strip(), payload.unit_rate,
                     payload.test_enabled, payload.referral_text, payload.support_text,
                     payload.pending_nag_hours, payload.referral_percent, payload.tiers_internal,
+                    payload.campaign_percent,
                 )
                 shop_id = row["id"]
         except Exception as e:
@@ -649,6 +664,89 @@ def build_admin_router(ctx):
         if used:
             raise HTTPException(409, "tier still has packages")
         await ctx.db.execute("DELETE FROM plugin_pershop_tiers WHERE id=$1", tier_id)
+        return {"ok": True}
+
+    # ------------------------------------------------------------- promos
+    @router.get("/promos")
+    async def promos(_a: AdminUser = Depends(require_permission("pershop", "view"))):
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me)
+        if not shop:
+            return {"promos": []}
+        from rwa_plugin_pershop.service import list_promos_with_uses
+
+        rows = await list_promos_with_uses(ctx, shop["id"])
+        return {"promos": rows, "campaign_percent": shop.get("campaign_percent") or 0}
+
+    @router.post("/promos", status_code=201)
+    async def promo_create(payload: PromoIn,
+                           _a: AdminUser = Depends(require_permission("pershop", "edit"))):
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me)
+        if not shop:
+            raise HTTPException(400, "create shop first")
+        from rwa_plugin_pershop.service import create_promo
+
+        try:
+            row = await create_promo(
+                ctx, shop["id"], code=payload.code, kind=payload.kind,
+                value=payload.value, max_uses=payload.max_uses,
+                valid_until=payload.valid_until, created_by_owner=me)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"id": row["id"]}
+
+    @router.put("/promos/{promo_id}")
+    async def promo_update(promo_id: int, payload: PromoIn,
+                           _a: AdminUser = Depends(require_permission("pershop", "edit"))):
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me)
+        if not shop:
+            raise HTTPException(400, "no shop")
+        try:
+            row = await ctx.db.fetchrow(
+                "SELECT id FROM plugin_pershop_promos WHERE id=$1 AND shop_id=$2",
+                promo_id, shop["id"])
+        except Exception:
+            row = None
+        if not row:
+            raise HTTPException(404, "no such promo")
+        valid_until = payload.valid_until
+        if isinstance(valid_until, str) and valid_until.strip():
+            from datetime import datetime as _dt
+
+            try:
+                valid_until = _dt.fromisoformat(valid_until.replace("Z", "+00:00"))
+            except ValueError:
+                raise HTTPException(400, "valid_until is not an ISO datetime")
+        try:
+            await ctx.db.execute(
+                """UPDATE plugin_pershop_promos SET code=$1, kind=$2, value=$3,
+                   max_uses=$4, valid_until=$5, active=$6 WHERE id=$7""",
+                payload.code.strip().upper(), payload.kind, payload.value,
+                payload.max_uses, valid_until, payload.active, promo_id)
+        except Exception as e:
+            if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+                raise HTTPException(409, "code already used in this shop")
+            raise
+        return {"ok": True}
+
+    @router.delete("/promos/{promo_id}")
+    async def promo_delete(promo_id: int,
+                           _a: AdminUser = Depends(require_permission("pershop", "edit"))):
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me)
+        if not shop:
+            raise HTTPException(400, "no shop")
+        try:
+            row = await ctx.db.fetchrow(
+                "SELECT id FROM plugin_pershop_promos WHERE id=$1 AND shop_id=$2",
+                promo_id, shop["id"])
+        except Exception:
+            row = None
+        if not row:
+            raise HTTPException(404, "no such promo")
+        await ctx.db.execute("DELETE FROM plugin_pershop_promos WHERE id=$1", promo_id)
         return {"ok": True}
 
     @router.get("/service-cats")

@@ -700,6 +700,13 @@ async def _subs_state(ctx, shop, sub) -> dict:
         st["hwid"] = row.get("hwid_device_limit")
     except Exception:
         st["hwid"] = None
+    try:
+        drow = await ctx.db.fetchrow(
+            "SELECT COUNT(*) AS c FROM user_hwid_devices "
+            "WHERE user_uuid=$1 AND removed_at IS NULL", sub["user_uuid"])
+        st["hwid_active"] = int((drow or {}).get("c") or 0)
+    except Exception:
+        st["hwid_active"] = None
     st["has_cap"] = bool(limit)
     if limit and used is not None:
         try:
@@ -822,6 +829,14 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
         hwid = L(shop, "unlimited_lbl") if hw is None or int(hw) <= 0 else str(int(hw))
     except Exception:
         hwid = str(st.get("hwid"))
+    # Cap with live capacity: "3 (2/3)" — active devices of the max slots.
+    try:
+        hw_max = int(st.get("hwid") or 0)
+        act = st.get("hwid_active")
+        if hw_max > 0 and act is not None:
+            hwid = f"{hw_max} ({min(int(act), hw_max)}/{hw_max})"
+    except Exception:
+        pass
     dot = "🟢" if st["status"] == "ACTIVE" else "🔴"
     plan = st["plan"] or "—"
     sub_url = L(shop, "url_fallback")
@@ -874,6 +889,10 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
             offer = None
     cancel_row = ([[{"text": L(shop, "credit_cancel_btn"),
                     "callback_data": f"cfcancel:{sub['id']}"}]] if offer else [])
+    # Device dangers, buyer-initiated: unbind HWID devices / full reissue.
+    # Hidden on pending (nothing to reset yet), cancelled and test subs.
+    dev_row = [[{"text": L(shop, "devreset_btn"), "callback_data": f"devreset:{sub['id']}"},
+                {"text": L(shop, "reissue_btn"), "callback_data": f"reissue:{sub['id']}"}]]
     if not offer and sub.get("buyer_tg_id"):
         # Paid partly with credit + partly by transfer: no self-cancel, but
         # say why instead of silently hiding the button.
@@ -885,7 +904,7 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
             pass
     if st["timeless"] and not st["has_cap"]:
         text += "\n\n" + L(shop, "lifetime_ok")
-        await _show(ctx, shop, tg, sender, edit, text, kb(cancel_row + home))
+        await _show(ctx, shop, tg, sender, edit, text, kb(cancel_row + dev_row + home))
         return
     if not st["pkg"]:
         # Linked / pre-shop sub with no shop package: it is shown as-is
@@ -894,7 +913,7 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
         # ping, no package talk.
         btns = [[{"text": L(shop, "renew_btn", username=sub["username"]),
                   "callback_data": f"renew:{sub['id']}"}]]
-        btns += cancel_row + home
+        btns += dev_row + cancel_row + home
         await _show(ctx, shop, tg, sender, edit, text, kb(btns))
         return
     if st["expired"]:
@@ -914,7 +933,7 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
                       "callback_data": f"adddays:{sub['id']}"})
     if extra:
         btns.append(extra)
-    btns += cancel_row + home
+    btns += dev_row + cancel_row + home
     await _show(ctx, shop, tg, sender, edit, text, kb(btns))
 
 
@@ -1417,17 +1436,36 @@ async def _ping_owner(ctx, shop, text) -> None:
 
 
 async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back="pershop:buy",
-                         credit_applied=False, edit=None) -> dict:
+                         credit_applied=False, edit=None, promo: dict | None = None) -> dict:
     """Universal contract screen: plan, exact outcome, price — then Pay.
 
     sub None = brand-new buy. Back is a callback string re-rendering the
     previous screen. Stores the await_summary draft that stconfirm reads.
+    ``promo`` pins a promo-row for this contract; None keeps whatever code the
+    open draft already carried (so 'back' navigation doesn't lose it).
     """
     from rwa_plugin_pershop.lang import L
-    from rwa_plugin_pershop.service import contract_preview, credit_balance, format_price
+    from rwa_plugin_pershop.service import (
+        checkout_discount, contract_preview, credit_balance, format_price,
+        promo_validate,
+    )
     from rwa_plugin_pershop.telegram import kb
 
+    if promo is None:
+        try:
+            _ses = await _get_session(ctx, shop["id"], sender, "buyer")
+            _saved = {}
+            if _ses and (_ses.get("state") or "").startswith("await_summary:"):
+                import json as _json6
+                _saved = _json6.loads(_ses.get("data") or "{}")
+            _code = str(_saved.get("promo_code") or "").strip().upper()
+            if _code:
+                promo = await promo_validate(ctx, shop["id"], _code, sender)
+        except Exception:
+            promo = None
+
     pv = await contract_preview(ctx, shop, sub, pkg, hwid_value)
+    cd = await checkout_discount(ctx, shop, sender, pv["price_units"], promo)
     lines = [L(shop, "contract_title"),
              L(shop, "contract_plan", plan=pkg["name"],
                 price=format_price(shop, pv["price_units"]))]
@@ -1439,6 +1477,16 @@ async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back=
     hwid = _hwid_line(shop, pkg, hwid_value)
     if hwid:
         lines.append(hwid)
+    due_total = float(pv["price_units"] or 0)
+    if cd["promo_units"] > 0:
+        lines.append(L(shop, "promo_line", code=cd["promo"]["code"],
+                       value=format_price(shop, cd["promo_units"])))
+    if cd["campaign_units"] > 0:
+        lines.append(L(shop, "campaign_line", pct="%g" % float(cd["campaign_pct"]),
+                       value=format_price(shop, cd["campaign_units"])))
+    if cd["discount_units"] > 0:
+        due_total = max(0.0, due_total - cd["discount_units"])
+        lines.append(L(shop, "contract_due", due=format_price(shop, due_total)))
     bal = await credit_balance(ctx, shop["id"], sender)
     credit_row = []
     use_credit = bool(credit_applied) and bal > 0
@@ -1447,8 +1495,8 @@ async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back=
                          value=format_price(shop, bal)))
         credit_row = [[{"text": L(shop, "credit_use_btn"), "callback_data": "credituse"}]]
     elif use_credit:
-        used = min(bal, float(pv["price_units"] or 0))
-        due = float(pv["price_units"] or 0) - used
+        used = min(bal, due_total)
+        due = due_total - used
         lines.append(L(shop, "credit_due", used=format_price(shop, used),
                          due=format_price(shop, due)) if due > 0
                      else L(shop, "credit_full"))
@@ -1457,10 +1505,16 @@ async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back=
              "renew_username": sub["username"] if sub else None,
              "sub_id": sub["id"] if sub else None,
              "hwid": hwid_value, "total_units": pv["price_units"], "back": back,
-             "credit": bool(use_credit)}
+             "credit": bool(use_credit),
+             "promo_code": cd["promo"]["code"] if cd["promo"] else None,
+             "discount_units": cd["discount_units"],
+             "promo_units": cd["promo_units"],
+             "campaign_units": cd["campaign_units"],
+             "campaign_pct": cd["campaign_pct"]}
     await _set_session(ctx, shop["id"], sender, "buyer", f"await_summary:{pkg['id']}", saved)
     await _show(ctx, shop, tg, sender, edit, "\n\n".join(lines), kb(
         [[{"text": L(shop, "contract_pay_btn"), "callback_data": "stconfirm"}]]
+        + [[{"text": L(shop, "promo_btn"), "callback_data": "addpromo"}]]
         + credit_row + _back_home_row(shop, back)))
     return saved
 
@@ -1560,7 +1614,38 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
                                  saved.get("reason", ""), card)
         return
 
-    # Sub link while awaiting one?
+    if ses and (ses["state"] or "").startswith("await_promo:"):
+        # Promo-code entry from the contract screen. The await_summary draft
+        # rides along as state data so a valid code drops straight back into
+        # the same contract; an invalid one goes back unchanged.
+        import json as _json
+
+        import rwa_plugin_pershop.service as _svc3
+
+        try:
+            saved = _json.loads(ses.get("data") or "{}")
+        except (TypeError, ValueError):
+            saved = {}
+        await _drop_user_msg(tg, chat_id, user_mid)
+        code = (text or "").strip().upper()[:64]
+        promo = await _svc3.promo_validate(ctx, shop["id"], code, buyer_id) if code else None
+        pkg = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_packages WHERE id=$1", saved.get("package_id"))
+        if not pkg:
+            await _clear_session(ctx, shop["id"], buyer_id, "buyer")
+            await tg.send_message(chat_id, L(shop, "session_expired"))
+            return
+        if not promo:
+            await tg.send_message(chat_id, L(shop, "promo_invalid"))
+        else:
+            saved = dict(saved, promo_code=promo["code"])
+        sub = await _draft_sub(ctx, shop, saved)
+        await _set_session(ctx, shop["id"], buyer_id, "buyer",
+                           f"await_summary:{pkg['id']}", saved)
+        await _send_contract(ctx, shop, tg, buyer_id, sub, pkg, saved.get("hwid"),
+                             saved.get("back") or _pkg_back(shop, pkg), promo=promo)
+        return
+
     # Sub link while awaiting one?
     if ses and (ses["state"] or "") == "await_sub_link":
         from rwa_plugin_pershop.service import _extract_token, link_subscription
@@ -1680,8 +1765,14 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
             if credit_used > 0:
                 await _ac(ctx, shop["id"], buyer_id, -credit_used)
         applied = await resolve_applied(ctx, pkg, hwid_value)
+        _disc = float(data.get("discount_units") or 0)
         snapshot = _json.dumps({"hwid": hwid_value, "total_units": total,
-                                "applied": applied, "credit_used": credit_used})
+                                "applied": applied, "credit_used": credit_used,
+                                "promo_code": data.get("promo_code"),
+                                "discount_units": _disc,
+                                "promo_units": float(data.get("promo_units") or 0),
+                                "campaign_units": float(data.get("campaign_units") or 0),
+                                "campaign_pct": data.get("campaign_pct")})
         row = await ctx.db.fetchrow(
             """INSERT INTO plugin_pershop_orders(shop_id,package_id,buyer_tg_id,buyer_username,
                receipt_file_id,receipt_kind,renew_username,total_units,options_snapshot)
@@ -1700,6 +1791,18 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
             header += "\n" + L(osh, "credit_owner_line",
                               used=format_price(shop, credit_used),
                               due=format_price(shop, total - credit_used))
+        if _disc > 0:
+            _due = total  # total already carries the cut (payable)
+            if float(data.get("promo_units") or 0) > 0:
+                header += "\n" + L(osh, "promo_owner_line",
+                                   code=data.get("promo_code"),
+                                   value=format_price(shop, float(data["promo_units"])),
+                                   due=format_price(shop, _due))
+            if float(data.get("campaign_units") or 0) > 0:
+                header += "\n" + L(osh, "campaign_owner_line",
+                                   pct="%g" % float(data.get("campaign_pct") or 0),
+                                   value=format_price(shop, float(data["campaign_units"])),
+                                   due=format_price(shop, _due))
         if data.get("renew_username"):
             header += L(osh, "order_renew_line", renew=data["renew_username"])
         hwid_line = _hwid_line(osh, pkg, hwid_value)
@@ -2040,7 +2143,12 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
     else:
         applied = await _ra2(ctx, item, saved.get("hwid"))
         snapshot = _json3.dumps({"hwid": saved.get("hwid"), "total_units": total,
-                                 "applied": applied, "credit_used": total})
+                                 "applied": applied, "credit_used": total,
+                                 "promo_code": saved.get("promo_code"),
+                                 "discount_units": float(saved.get("discount_units") or 0),
+                                 "promo_units": float(saved.get("promo_units") or 0),
+                                 "campaign_units": float(saved.get("campaign_units") or 0),
+                                 "campaign_pct": saved.get("campaign_pct")})
         row = await ctx.db.fetchrow(
             """INSERT INTO plugin_pershop_orders(shop_id,package_id,buyer_tg_id,buyer_username,
                receipt_file_id,receipt_kind,renew_username,total_units,options_snapshot)
@@ -2403,6 +2511,19 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         await _send_contract(ctx, shop, tg, sender, None, pkg, None, back_cb, edit=mid)
         return
 
+    if data == "addpromo":
+        # Move the contract draft into a promo-entry prompt (data = draft).
+        draft = await _load_draft(ctx, shop, sender)
+        if not draft or not draft[3].get("total_units"):
+            return
+        _pkg, _hw, _st, saved = draft
+        await _set_session(ctx, shop["id"], sender, "buyer", "await_promo:", dict(saved))
+        await _show(ctx, shop, tg, sender, mid,
+                    L(shop, "promo_title") + "\n\n" + L(shop, "promo_prompt"),
+                    reply_markup=kb([[{"text": L(shop, "back_btn"),
+                                       "callback_data": "back:contract"}]]))
+        return
+
     if data.startswith("cfcancel:"):
         from rwa_plugin_pershop.service import format_price as _fp8
 
@@ -2522,6 +2643,61 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         if not sub or sub["buyer_tg_id"] != sender:
             return
         await _send_renew_tiers(ctx, shop, tg, sender, sub, edit=mid)
+        return
+
+    if data.startswith("devreset:") or data.startswith("reissue:"):
+        # Stepped destructive actions from the sub card: warn first, buyer
+        # must confirm or cancel (cancel returns the card untouched).
+        kind, _, tail = data.partition(":")
+        try:
+            sub_id = int(tail.split(":")[0])
+        except ValueError:
+            return
+        sub = await _topup_sub(ctx, shop, sender, sub_id)
+        if not sub or sub.get("cancelled") or sub.get("is_test"):
+            return
+        from rwa_plugin_pershop.service import panel_reset_devices  # noqa: F401 pre-check import
+
+        warn_key = "devreset_warn" if kind == "devreset" else "reissue_warn"
+        go_key = "devreset_go" if kind == "devreset" else "reissue_go"
+        go = f"{kind}go:{sub_id}"
+        await _show(ctx, shop, tg, sender, mid,
+                    L(shop, warn_key, username=sub["username"]),
+                    kb([[{"text": L(shop, go_key), "callback_data": go}],
+                        _back_home_row(shop, f"sub:{sub_id}")]))
+        return
+
+    if data.startswith("devresetgo:") or data.startswith("reissuego:"):
+        kind, _, tail = data.partition(":")
+        try:
+            sub_id = int(tail.split(":")[0])
+        except ValueError:
+            return
+        sub = await _topup_sub(ctx, shop, sender, sub_id)
+        if not sub or sub.get("cancelled") or sub.get("is_test"):
+            return
+        end_btns = [[{"text": L(shop, "reissue_sub_btn"),
+                      "callback_data": f"sub:{sub_id}"}],
+                    [{"text": L(shop, "main_menu_btn"), "callback_data": "menu"}]]
+        if kind == "devreset":
+            from rwa_plugin_pershop.service import panel_reset_devices
+
+            res = await panel_reset_devices(ctx, sub.get("user_uuid") or "")
+            key = "devreset_done" if res.get("ok") else "devreset_fail"
+        else:
+            from rwa_plugin_pershop.service import panel_reissue_subscription
+
+            res = await panel_reissue_subscription(ctx, sub.get("user_uuid") or "")
+            if not res.get("ok"):
+                await _show(ctx, shop, tg, sender, mid,
+                            L(shop, "reissue_fail"), kb(end_btns))
+                return
+            url = res.get("url") or L(shop, "url_fallback")
+            await _show(ctx, shop, tg, sender, mid,
+                        L(shop, "reissue_done", username=sub["username"], url=url),
+                        kb(end_btns))
+            return
+        await _show(ctx, shop, tg, sender, mid, L(shop, key), kb(end_btns))
         return
 
     if data.startswith("renewtier:"):
@@ -2732,6 +2908,14 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         if not state.startswith("await_summary:") or saved.get("total_units") is None:
             return
         saved = dict(saved)
+        # Promo/campaign cut from the contract render: payable = list − cut.
+        # Applied exactly once — the paid amount drives credit, receipt and
+        # the owner card alike.
+        if float(saved.get("discount_units") or 0) > 0 and not saved.get("discount_applied"):
+            list_units = float(saved.get("total_units") or 0)
+            saved["list_units"] = list_units
+            saved["total_units"] = max(0.0, list_units - float(saved["discount_units"]))
+            saved["discount_applied"] = True
         credit_note = ""
         if saved.get("credit"):
             _bal = await credit_balance(ctx, shop["id"], sender)

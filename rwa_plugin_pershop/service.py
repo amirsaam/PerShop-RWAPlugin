@@ -4,6 +4,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from rwa_plugin_pershop.lang_extra import apply as _apply_lang_extra
+
+_apply_lang_extra()
+
 from rwa_plugin_pershop.naming import allocate_username
 
 
@@ -219,6 +223,8 @@ _PERSHOP_TABLES = [
     "plugin_pershop_referrals",
     "plugin_pershop_test_claims",
     "plugin_pershop_scammers",
+    "plugin_pershop_promo_uses",
+    "plugin_pershop_promos",
     "plugin_pershop_buyers",
     "plugin_pershop_sessions",
     "plugin_pershop_orders",
@@ -267,6 +273,11 @@ async def reset_all(ctx) -> dict:
     try:
         await ctx.db.execute(
             "DELETE FROM alembic_version WHERE version_num = 'pershop_001'")
+    except Exception:
+        pass
+    try:
+        await ctx.db.execute(
+            "DELETE FROM alembic_version WHERE version_num = 'pershop_002'")
     except Exception:
         pass
     keys = list(_PERSHOP_SETTING_KEYS)
@@ -1332,6 +1343,7 @@ async def approve_order(ctx, order_id: int, decided_by: str) -> dict:
         raise ValueError("order not found")
     if order["status"] != "pending":
         raise ValueError(f"order already {order['status']}")
+    await count_promo_use(ctx, order)
     if order.get("service_id"):
         # Other-service order: no panel account, no subscription — the
         # buyer's completion text is delivered by the caller.
@@ -1859,6 +1871,251 @@ async def record_referral(ctx, shop_id: int, referrer_tg_id: int, referred_tg_id
             shop_id, referrer_tg_id, referred_tg_id)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Promo codes + the invitee first-purchase campaign discount. Promos are
+# strictly shop-scoped (UNIQUE(shop_id, code)); every lookup re-filters by
+# shop_id so a code minted by one owner can never pay in another shop.
+
+PROMO_KINDS = ("percent", "units")
+
+
+async def create_promo(ctx, shop_id: int, *, code: str, kind: str, value: float,
+                       max_uses: int = 0, valid_until=None,
+                       created_by_owner: str = "") -> dict:
+    """Insert a promo for one shop. Raises ValueError on bad input/duplicate."""
+    clean = "".join(ch for ch in (code or "").upper() if ch.isalnum() or ch in "_-")[:40]
+    if not clean:
+        raise ValueError("promo code needs letters/digits")
+    if kind not in PROMO_KINDS:
+        raise ValueError("promo kind must be percent|units")
+    value = float(value or 0)
+    if value <= 0 or (kind == "percent" and value > 100):
+        raise ValueError("promo value out of range")
+    try:
+        row = await ctx.db.fetchrow(
+            """INSERT INTO plugin_pershop_promos(shop_id, code, kind, value, max_uses,
+               valid_until, created_by_owner)
+               VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *""",
+            shop_id, clean, kind, value, int(max_uses or 0), valid_until,
+            created_by_owner)
+    except Exception as e:
+        if any(w in str(e).lower() for w in ("unique", "duplicate")):
+            raise ValueError("this code already exists in the shop")
+        raise
+    return dict(row or {})
+
+
+def promo_preview_value(promo: dict, total_units: float) -> float:
+    """Units the promo takes off `total` (percent vs flat), capped at total."""
+    total = float(total_units or 0)
+    value = float((promo or {}).get("value") or 0)
+    if (promo or {}).get("kind") == "units":
+        return round(min(max(value, 0.0), total), 6)
+    return round(min(max(value * total / 100.0, 0.0), total), 6)
+
+
+async def promo_validate(ctx, shop_id: int, code: str, buyer_tg_id: int) -> dict | None:
+    """Active, in-window, barely-used promo for THIS shop + THIS buyer."""
+    clean = (code or "").strip().upper()
+    if not clean:
+        return None
+    try:
+        row = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_promos WHERE shop_id=$1 AND code=$2 AND active",
+            shop_id, clean)
+        if not row:
+            return None
+        promo = dict(row)
+        vu = promo.get("valid_until")
+        if vu is not None:
+            from datetime import datetime, timezone
+            if vu.tzinfo is None:
+                vu = vu.replace(tzinfo=timezone.utc)
+            if vu <= datetime.now(timezone.utc):
+                return None
+        if int(promo.get("max_uses") or 0) > 0:
+            used = await ctx.db.fetchval(
+                "SELECT COUNT(*) FROM plugin_pershop_promo_uses WHERE promo_id=$1",
+                promo["id"])
+            if int(used or 0) >= int(promo["max_uses"]):
+                return None
+        mine = await ctx.db.fetchrow(
+            "SELECT 1 FROM plugin_pershop_promo_uses WHERE promo_id=$1 AND buyer_tg_id=$2",
+            promo["id"], buyer_tg_id)
+        if mine:
+            return None
+        return promo
+    except Exception:
+        return None
+
+
+async def promo_find_by_code(ctx, shop_id: int, code: str) -> dict | None:
+    clean = (code or "").strip().upper()
+    if not clean:
+        return None
+    try:
+        row = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_promos WHERE shop_id=$1 AND code=$2",
+            shop_id, clean)
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+async def campaign_units_for(ctx, shop, buyer_tg_id: int, total_units: float) -> float:
+    """First-purchase discount for a referral *invitee* — the Ad-campaign
+    lever. Active only when the owner wrote a campaign_percent > 0; a buyer
+    who joined via an invite link and has NOT yet completed any approved
+    order in this shop gets that percent off this checkout."""
+    pct = float((shop or {}).get("campaign_percent") or 0)
+    if pct <= 0 or not buyer_tg_id or float(total_units or 0) <= 0:
+        return 0.0
+    try:
+        invited = await ctx.db.fetchrow(
+            "SELECT 1 FROM plugin_pershop_referrals WHERE shop_id=$1 AND referred_tg_id=$2",
+            shop.get("id"), buyer_tg_id)
+        if not invited:
+            return 0.0
+        prior = await ctx.db.fetchrow(
+            "SELECT 1 FROM plugin_pershop_orders WHERE shop_id=$1 AND buyer_tg_id=$2 "
+            "AND status='approved' LIMIT 1",
+            shop.get("id"), buyer_tg_id)
+        if prior:
+            return 0.0
+    except Exception:
+        return 0.0
+    return round(min(max(float(total_units) * pct / 100.0, 0.0), float(total_units)), 6)
+
+
+async def checkout_discount(ctx, shop, buyer_tg_id: int, total_units: float,
+                            promo: dict | None = None) -> dict:
+    """Combined checkout discount: promos + the campaign first-order cut.
+    Both apply, never below zero. Returns units + metadata for the order
+    snapshot. Never raises."""
+    total = float(total_units or 0)
+    res = {"promo": None, "promo_units": 0.0, "campaign_units": 0.0,
+           "campaign_pct": float((shop or {}).get("campaign_percent") or 0),
+           "discount_units": 0.0}
+    if total <= 0:
+        return res
+    if promo:
+        res["promo"] = dict(promo)
+        res["promo_units"] = promo_preview_value(promo, total)
+    res["campaign_units"] = min(
+        await campaign_units_for(ctx, shop, buyer_tg_id, total), total - res["promo_units"])
+    res["discount_units"] = round(res["promo_units"] + res["campaign_units"], 6)
+    return res
+
+
+async def count_promo_use(ctx, order: dict | None) -> None:
+    """Burn one promo use at approval time (never-raises accounting)."""
+    try:
+        raw = (order or {}).get("options_snapshot")
+        snap = _snap_dict(raw)
+        code = str(snap.get("promo_code") or "").strip().upper()
+        if not code:
+            return
+        shop_id = (order or {}).get("shop_id")
+        promo = await ctx.db.fetchrow(
+            "SELECT id FROM plugin_pershop_promos WHERE shop_id=$1 AND code=$2",
+            shop_id, code)
+        if not promo:
+            return
+        await ctx.db.execute(
+            """INSERT INTO plugin_pershop_promo_uses(promo_id, shop_id, order_id, buyer_tg_id)
+               VALUES($1,$2,$3,$4) ON CONFLICT (promo_id, buyer_tg_id) DO NOTHING""",
+            promo["id"], shop_id, (order or {}).get("id"),
+            (order or {}).get("buyer_tg_id"))
+    except Exception:
+        pass
+
+
+def _snap_dict(raw) -> dict:
+    """options_snapshot as a dict, best-effort."""
+    import json
+
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else (dict(raw) if raw else {})
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+async def list_promos_with_uses(ctx, shop_id: int) -> list[dict]:
+    """All promos of a shop + how many times each was redeemed so far."""
+    try:
+        rows = await ctx.db.fetch(
+            """SELECT p.*, COALESCE(u.cnt, 0) AS uses FROM plugin_pershop_promos p
+               LEFT JOIN (SELECT promo_id, COUNT(*) AS cnt FROM plugin_pershop_promo_uses
+                          GROUP BY promo_id) u ON u.promo_id=p.id
+               WHERE p.shop_id=$1 ORDER BY p.id""",
+            shop_id)
+        return [dict(r) for r in (rows or [])]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Panel-side sub-card actions from the shop bot: HWID device reset and the
+# full subscription reissue (panel "revoke" — regenerate the subscription
+# credentials: the old URL dies, every device must re-add the link).
+
+def _resolve_panel_uid(user_uuid: str) -> object:
+    try:
+        from shared.data_access import resolve_panel_user_id
+        return resolve_panel_user_id(user_uuid or "")
+    except Exception:
+        return user_uuid or ""
+
+
+async def panel_reset_devices(ctx, user_uuid: str) -> dict:
+    """Unbind every HWID device of a panel user. Rows are marked removed so
+    the panel keeps its detection history. Never raises."""
+    try:
+        client = _panel_client()
+        await client.delete_all_user_hwid_devices(_resolve_panel_uid(user_uuid))
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    try:
+        # Mirror rows live in the admin DB; marking them removed makes the
+        # active count in the bot refresh instantly instead of waiting for sync.
+        await ctx.db.execute(
+            "UPDATE user_hwid_devices SET removed_at=NOW() "
+            "WHERE user_uuid=$1 AND removed_at IS NULL", user_uuid)
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+async def panel_reissue_subscription(ctx, user_uuid: str) -> dict:
+    """Panel revoke (the 'Full reissue' button on the edit-user page): new
+    credentials, new subscription link. Returns the fresh URL best-effort:
+    from the revoke response, then the local mirror. Never raises."""
+    url = None
+    try:
+        client = _panel_client()
+        res = client.revoke_user_subscription(_resolve_panel_uid(user_uuid), None, False)
+        res = _unwrap(res)
+        if isinstance(res, dict):
+            cand = (res.get("user") if isinstance(res.get("user"), dict) else res) or {}
+            for key in ("subscription_url", "subscriptionUrl", "subscription_page_url",
+                        "subscriptionPageUrl"):
+                v = cand.get(key) or (res.get(key) if isinstance(res, dict) else None)
+                if v:
+                    url = str(v)
+                    break
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "url": None}
+    if not url:
+        try:
+            row = await ctx.db.get_user_by_uuid(user_uuid)
+            if row:
+                url = row.get("subscription_url") or row.get("subscriptionUrl")
+        except Exception:
+            url = None
+    return {"ok": True, "url": str(url) if url else None}
 
 
 # ---------------------------------------------------------------------------
