@@ -1229,7 +1229,7 @@ async def _match_topup_flow():
     assert status == "foreign", (status, _info)
     # use a superadmin empty-creator token instead for the link test
     db.short_users["tokS"] = {"uuid": "uu-s", "username": "super-bob", "shortUuid": "tokS",
-                              "telegramId": None, "createdByAdminId": None,
+                              "telegramId": None, "createdByAdminId": "superadmin",
                               "expireAt": exp.isoformat(), "trafficLimitBytes": 64 * GB,
                               "activeInternalSquads": [{"uuid": "sqT"}]}
     svc._owner_account_row = lambda _c, _o: (True, None)
