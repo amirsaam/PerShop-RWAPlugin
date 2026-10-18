@@ -68,11 +68,22 @@ class FakeDB:
         return self.seq[k]
 
     # -- reads --
+    def _chk(self, q, a):
+        """asyncpg-binds like the real driver: max $N must equal the arg count.
+        Catches 'expects N arguments, M were passed' bugs in tests, not prod."""
+        import re
+        idxs = [int(x.lstrip('$')) for x in re.findall(r"\$\d+", q)]
+        if idxs and max(idxs) != len(a):
+            raise AssertionError(
+                f"SQL binds mismatch: {max(idxs)} placeholder(s) vs {len(a)} arg(s): {q[:160]}")
+
     async def fetchrow(self, q, *a):
+        self._chk(q, a)
         rows = await self.fetch(q, *a)
         return rows[0] if rows else None
 
     async def fetch(self, q, *a):
+        self._chk(q, a)
         if "FROM plugin_pershop_shops WHERE owner_admin" in q:
             return [s for s in self.shops.values() if s["owner_admin"] == a[0]]
         if "FROM plugin_pershop_shops WHERE public_key_hash" in q:
@@ -437,6 +448,7 @@ class FakeDB:
         return self.users.get(uuid)
 
     async def fetchval(self, q, *a):
+        self._chk(q, a)
         if "SELECT last_mid FROM plugin_pershop_buyers" in q:
             return self.last_mids.get((a[0], a[1]))
         if "FROM plugin_pershop_buyers" in q and "credit_units" in q:
@@ -487,6 +499,7 @@ class FakeDB:
         raise AssertionError(f"unhandled fetchval: {q}")
 
     async def execute(self, q, *a):
+        self._chk(q, a)
         if q.strip().startswith("DROP TABLE IF EXISTS"):
             for _t, _s in (("plugin_pershop_broadcasts", self.bcs),
                             ("plugin_pershop_referrals", self.referrals),

@@ -888,8 +888,12 @@ def build_admin_router(ctx):
                    LEFT JOIN plugin_pershop_scammers s ON s.tg_id=o.buyer_tg_id
                    WHERE o.shop_id=$1 ORDER BY o.id DESC LIMIT 200""", shop["id"])
         else:
-            filt = ("o.status IN ('pending','withdraw_requested')" if status == "pending"
-                    else "o.status=$2")
+            if status == "pending":
+                filt = "o.status IN ('pending', 'withdraw_requested')"
+                args: tuple = (shop["id"],)
+            else:
+                filt = "o.status=$2"
+                args = (shop["id"], status)
             rows = await ctx.db.fetch(
                 f"""SELECT o.*, COALESCE(p.name, v.name) AS package_name,
                             COALESCE(p.price_units, v.price_units) AS package_units,
@@ -899,7 +903,7 @@ def build_admin_router(ctx):
                      LEFT JOIN plugin_pershop_services v ON v.id=o.service_id
                      LEFT JOIN plugin_pershop_scammers s ON s.tg_id=o.buyer_tg_id
                      WHERE o.shop_id=$1 AND {filt} ORDER BY o.id DESC LIMIT 200""",
-                shop["id"], status)
+                *args)
         return {"orders": [dict(r) for r in rows]}
 
     @router.get("/stats")
