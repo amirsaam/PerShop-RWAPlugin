@@ -845,7 +845,9 @@ def L(shop_or_lang: dict | str | None, key: str, **vars: object) -> str:
     lang = shop_or_lang if isinstance(shop_or_lang, str) else shop_lang(shop_or_lang)
     tpl = LOCALES.get(lang, {}).get(key) or LOCALES["en"].get(key) or key
     try:
-        return tpl.format(**vars)
+        import html as _h
+        safe_vars = {k: _h.escape(str(v)) if v is not None else "" for k, v in vars.items()}
+        return tpl.format(**safe_vars)
     except Exception:
         return tpl
 
