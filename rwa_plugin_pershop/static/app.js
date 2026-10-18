@@ -58,7 +58,7 @@ window.rwaPluginUI['pershop'] = {
       if (existing) { existing.remove(); return; }
       const drop = document.createElement('div');
       drop.id = 'emoji_' + targetId;
-      drop.className = 'fixed z-[70] bg-[var(--glass-bg)]/95 backdrop-blur border border-[var(--glass-border)] rounded-xl p-3 shadow-2xl w-72 max-h-72 overflow-y-auto overflow-x-visible';
+      drop.className = 'fixed z-[9999] bg-[var(--glass-bg)]/95 backdrop-blur border border-[var(--glass-border)] rounded-xl p-3 shadow-2xl w-72 max-h-72 overflow-y-auto overflow-x-visible';
       drop.style.top = (rect.bottom + window.scrollY + 4) + 'px';
       drop.style.left = Math.max(8, rect.left + window.scrollX) + 'px';
       const list = FULL_EMOJIS;
