@@ -578,3 +578,4 @@ the owner's creator id.
   facade, fake Telegram, fake DB — buy/renew/top-up/link/withdraw/
   broadcast/scammer/services/public-API flows, currently 27 suites green).
 - `node --check rwa_plugin_pershop/static/app.js` for the console.
+- Emoji picker: uses `emoji-picker-element` (loaded from `unpkg` via module import); dropdown rendered as `fixed` + `zIndex: 99999` on `document.body` to escape modal bounds; `emoji-click` inserts the selected emoji into the active input and closes the dropdown.
