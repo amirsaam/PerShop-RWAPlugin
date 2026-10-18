@@ -1885,13 +1885,11 @@ def message_text(shop: dict, kind: str, **vars: Any) -> str:
 
     default = L(shop, f"tpl_{kind}")
     tpl = (shop.get(TEXT_COLUMNS[kind]) or "").strip() or default
-    import html as _h
-    safe_vars = {k: _h.escape(str(v)) if v is not None else "" for k, v in vars.items()}
     try:
-        return tpl.format(**safe_vars)
+        return tpl.format(**vars)
     except Exception:
         try:
-            return default.format(**safe_vars)
+            return default.format(**vars)
         except Exception:
             return default
 
