@@ -2674,7 +2674,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         await _show(ctx, shop, tg, sender, mid,
                     L(shop, warn_key, username=sub["username"]),
                     kb([[{"text": L(shop, go_key), "callback_data": go}],
-                        _back_home_row(shop, f"sub:{sub_id}")]))
+                        *_back_home_row(shop, f"sub:{sub_id}")]))
         return
 
     if data.startswith("devresetgo:") or data.startswith("reissuego:"):
