@@ -89,7 +89,8 @@ class FakeDB:
             return [{"buyer_tg_id": s["buyer_tg_id"]} for s in self.subs.values()
                     if s["shop_id"] == a[0] and s.get("buyer_tg_id")]
         if "FROM plugin_pershop_subs WHERE shop_id" in q and "package_id IS NULL" in q:
-            return [s for s in self.subs.values() if s["shop_id"] == a[0] and not s.get("package_id")]
+            return [s for s in self.subs.values()
+                    if s["shop_id"] == a[0] and not s.get("package_id") and not s.get("is_test")]
         if "FROM plugin_pershop_subs WHERE shop_id" in q and "user_uuid" in q:
             return [s for s in self.subs.values() if s["shop_id"] == a[0] and s["user_uuid"] == a[1]]
         if "FROM plugin_pershop_subs WHERE shop_id" in q and "is_test=TRUE" in q:
@@ -1413,8 +1414,15 @@ async def _match_topup_flow():
                        "username": "own-two", "expire_at": exp, "traffic_limit_bytes": 10 * GB,
                        "package_id": None, "is_test": False, "is_linked": True,
                        "notified_80": False, "notified_72h": False, "notified_expired": False}
+    # trial claim subs are package-less too — they must not pollute the pool
+    trialid = db._next("sub")
+    db.subs[trialid] = {"id": trialid, "shop_id": sid, "buyer_tg_id": 555, "user_uuid": "uu-trial",
+                        "username": "trial-one", "expire_at": exp, "traffic_limit_bytes": 1 * GB,
+                        "package_id": None, "is_test": True, "is_linked": True,
+                        "notified_80": False, "notified_72h": False, "notified_expired": False}
     pool = await svc.unmapped_users(ctx, shop)
     assert [s["username"] for s in pool["unplanned"]] == ["own-two"], pool
+    assert all(s["username"] != "trial-one" for s in pool["unplanned"]), pool
     # package-less sub: quick renew goes straight to the change-plan chain —
     # no explainer, no owner ping.
     await cb(f"qrenew:{sub2id}", "m3")

@@ -693,7 +693,9 @@ async def unmapped_users(ctx, shop: dict) -> dict:
            ORDER BY username""",
         owner_id, shop["id"])
     unplanned = await ctx.db.fetch(
-        "SELECT id, user_uuid, username, buyer_tg_id FROM plugin_pershop_subs WHERE shop_id=$1 AND package_id IS NULL ORDER BY id",
+        "SELECT id, user_uuid, username, buyer_tg_id FROM plugin_pershop_subs"
+        " WHERE shop_id=$1 AND package_id IS NULL AND COALESCE(is_test,FALSE)=FALSE"
+        " ORDER BY id",
         shop["id"])
     return {"orphans": [dict(r) for r in orphans],
             "unplanned": [dict(r) for r in unplanned]}
