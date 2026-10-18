@@ -968,7 +968,7 @@ window.rwaPluginUI['pershop'] = {
       q('save_conn').onclick = async () => {
         if (q('sec')) q('sec').textContent = 'Saving…';
         try {
-          const body = {prefix: q('prefix').value, admin_tg_id: Number(q('tgid').value), lang: q('lang').value};
+          const body = {prefix: q('prefix').value, admin_tg_id: Number(q('tgid').value), lang: q('lang').value || 'en'};
           if (q('token').value) body.bot_token = q('token').value;
           const {r, w} = await saveShop(body);
           if (q('sec')) q('sec').textContent = w.ok ? 'Saved + bot connected ✓ ' + w.url
@@ -983,7 +983,7 @@ window.rwaPluginUI['pershop'] = {
           const body = {card_text: q('cardnum').value.trim(), currency_label: q('currency').value,
             unit_rate: q('rate').value ? Number(q('rate').value) : null,
             test_enabled: q('teston').checked, tiers_internal: q('tierint').checked,
-            pending_nag_hours: Math.max(0, Math.min(168, Number(q('naghours').value) || 0))};
+            pending_nag_hours: Math.max(0, Math.min(168, Number(q('naghours').value) || 0)), lang: q('lang').value || 'en'};
           const {r, w} = await saveShop(body);
           if (q('msg_price')) q('msg_price').textContent = w.ok ? 'Saved.' : ('Save failed: ' + (w.error || 'unknown'));
         } catch (e) { if (q('msg_price')) q('msg_price').textContent = 'Save failed: ' + e.message; }
@@ -991,7 +991,7 @@ window.rwaPluginUI['pershop'] = {
       q('save_text').onclick = async () => {
         if (q('msg_text')) q('msg_text').textContent = 'Saving…';
         try {
-          const body = {};
+          const body = {lang: q('lang').value || 'en'};
           if (shopCache) {
             body.welcome_text = BOTXT.welcome; body.thank_you_text = BOTXT.thanks;
             body.approved_text = BOTXT.approved; body.denied_text = BOTXT.denied;
