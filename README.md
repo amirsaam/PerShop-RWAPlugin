@@ -41,10 +41,7 @@ configures the plugin; each admin manages only their own shop.
   reminders and pending-receipt nudges), `pershop-broadcast` every 30 s
   (message fan-out), `pershop-poller` every 15 s (active only in polling
   mode).
-- **Database.** A single squashed migration, `pershop_001`, on Alembic branch
-  `plugin_pershop` (see Data model). It is the only revision: after any
-  installation, further schema changes must ship as new revisions
-  (`pershop_002`, …) instead of editing it.
+- **Database.** Migrations on Alembic branch `plugin_pershop`: `pershop_001` (base tables: shops, tiers, packages, orders, subs, buyers, referrals, etc.), `pershop_002` (additional schema updates), `pershop_003` (events/activity feed: `plugin_pershop_events`). New changes must ship as `pershop_004`+, never edit frozen revisions.
 
 ---
 
