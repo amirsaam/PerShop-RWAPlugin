@@ -571,18 +571,13 @@ the owner's creator id.
 
 ## 13. Development
 
-- Layout: `rwa_plugin_pershop/` (bot, admin routes, service layer,
-  scheduler, locales en/fa/ru/zh, `static/app.js` console),
-  `migrations/versions/pershop_001.py`, `tests/test_shop.py`.
-- `python3 tests/test_shop.py` runs the integration suite (fake panel
-  facade, fake Telegram, fake DB — buy/renew/top-up/link/withdraw/
-  broadcast/scammer/services/public-API flows, currently 27 suites green).
-- `node --check rwa_plugin_pershop/static/app.js` for the console.
-- Emoji picker: embedded 200 common emoji (no CDN dependency for rendering); dropdown is `fixed`, appended to `document.body`, `zIndex: 99999`, `overflow-x-visible`; loads `emoji-picker-element` via module import (`unpkg`) as enhancement; click-outside closes.
-- Settings saves split from one global `#save` to three buttons (`save_conn`, `save_price`, `save_text`) so partial updates don't wipe other cards; `lang` included in every patch — `fa` persists.
-- Keyboard `400` fixed: `_back_home_row` unpacked with `*` so callers don't double-nest; `L()` escaping and `message_text()` reverted to preserve `{card}` HTML.
-- `lang.py` never overwritten — keys added only; Persian wording (`بازنشانی`) preserved.
-- Sub card trial package named `"trial"`; link-state checks use bot-level `plugin_pershop_subs` not `telegramId`; DB cross-query uses `::text` cast (`user_uuid` TEXT vs `uuid`).
-- Broadcast + formatting toolbar (`fmtBar`) + variables bar added; events table (`pershop_003`), health probe, buyer/referral endpoints, KPI cards, trial notifications, broadcast segments.
-- Build: no manual uploads; local `rm -rf dist build ... && pip wheel . --no-deps -w dist_local/`; single-page `/plugins/pershop` (panel 5.x one-route mount).
-- `node --check rwa_plugin_pershop/static/app.js`; tests: 36 pass (`tests/test_shop.py`).
+- Layout: `rwa_plugin_pershop/` (bot router `routes_telegram.py`, admin routes `routes_admin.py`, service layer, scheduler, locales `en`/`fa`/`ru`/`zh`, `static/app.js` console), `migrations/versions/pershop_001.py`, `tests/test_shop.py`.
+- Build locally (no manual uploads): `rm -rf dist build *.egg-info && pip wheel . --no-deps -w dist_local/`. Distribution name must stay `rwa-plugin-pershop`. Install with `--no-deps`.
+- Console: single-page `/plugins/pershop` (panel 5.x one-route mount); `node --check rwa_plugin_pershop/static/app.js` validates syntax.
+- Tests: `python3 tests/test_shop.py` — 36 flows (fake panel, Telegram, DB — buy/renew/top-up/link/withdraw/broadcast/scammer/services/public-API).
+- Emoji picker (`static/app.js`): embedded array of ~200 common emojis (no CDN dependency for initial render); dropdown is `position: fixed`, appended to `document.body`, `zIndex: 99999`, `overflow-x-visible`, so it escapes modal bounds; also loads `emoji-picker-element` from `unpkg` via module import as enhancement; click outside removes it.
+- Settings saves (`static/app.js`): split into three dedicated buttons (`save_conn`, `save_price`, `save_text`) so partial updates don't wipe other cards; `lang` included in every patch so the selected language (e.g. `fa`) persists.
+- Keyboard (`routes_telegram.py`): `_back_home_row` unpacked with `*` to prevent double-nesting (`[[btn]]` → nested `kb`); `L()` escaping and `message_text()` kept intact so `{card}` HTML is preserved.
+- `lang.py`: user-edited locales preserved (`fa`: `بازنشانی`); keys only added, never overwritten.
+- Sub card / DB: trial package name set to `"trial"`; link-state checks use bot-level `plugin_pershop_subs` (not `telegramId`); cross-query between `plugin_pershop_subs.user_uuid` (`TEXT`) and `users.uuid` (`uuid`) uses `::text` cast.
+- Broadcast (`routes_telegram.py` + `static/app.js`): formatting toolbar (`fmtBar`) and variables bar on message fields; `pershop_003` events table; health probe; buyer/referral endpoints; KPI cards; broadcast segments (`/broadcast`).
