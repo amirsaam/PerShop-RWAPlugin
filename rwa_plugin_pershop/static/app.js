@@ -58,15 +58,19 @@ window.rwaPluginUI['pershop'] = {
       if (existing) { existing.remove(); return; }
       const drop = document.createElement('div');
       drop.id = 'emoji_' + targetId;
-      drop.className = 'fixed z-[9999] bg-[var(--glass-bg)]/95 backdrop-blur border border-[var(--glass-border)] rounded-xl p-3 shadow-2xl w-72 max-h-72 overflow-y-auto overflow-x-visible';
       drop.style.position = 'fixed';
       drop.style.zIndex = '99999';
       drop.style.top = (rect.bottom + window.scrollY + 4) + 'px';
       drop.style.left = Math.max(8, rect.left + window.scrollX) + 'px';
-      const list = FULL_EMOJIS;
-      drop.innerHTML = list.map(e => '<button type="button" onclick="const f=document.getElementById(\'' + targetId + '\'); if(f){f.value+=(f.value ? \' \':\'\')+\'' + e + '\'; f.focus(); this.closest(\'div\').remove();}" class="hover:bg-[var(--glass-bg-hover)] rounded px-1 text-xl leading-none">' + e + '</button>').join('');
+      drop.style.maxHeight = '320px';
+      drop.style.overflowY = 'auto';
+      drop.style.width = '320px';
+      drop.innerHTML = '<emoji-picker></emoji-picker>';
       document.body.appendChild(drop);
-      window.__emojiClose = function() { const d = document.getElementById('emoji_' + targetId); if (d) d.remove(); };
+      const mod = document.createElement('script');
+      mod.type = 'module';
+      mod.textContent = "import {Picker} from 'https://unpkg.com/emoji-picker-element@1.21.0/index.js'; const p=document.querySelector('#emoji_"+targetId+" emoji-picker'); if(p){p.addEventListener('emoji-click',(e)=>{const f=document.getElementById('"+targetId+"'); if(f){f.value+=(f.value?' ':'')+e.detail.unicode; f.focus();} document.getElementById('emoji_"+targetId+"').remove();});}";
+      document.head.appendChild(mod);
       document.addEventListener('click', function closeEmoji(e) { if (!drop.contains(e.target) && e.target !== btn) { drop.remove(); document.removeEventListener('click', closeEmoji); } }, {once:true});
     };
     const fmtBar = (id) => '<div class="flex flex-wrap gap-1.5 mb-2">' + Object.keys(FMT_TAGS).map((t) =>
