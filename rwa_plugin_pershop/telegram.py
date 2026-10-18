@@ -41,8 +41,6 @@ class TgClient:
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        import sys
-        print("DEBUG sendMessage payload:", payload, file=sys.stderr)
         res = await self.call("sendMessage", payload)
         return ((res or {}).get("result") or {}).get("message_id")
 
