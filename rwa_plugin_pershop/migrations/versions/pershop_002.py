@@ -9,7 +9,6 @@ pershop_001 is frozen (servers already run it) — all new DDL lives here:
 """
 revision = "pershop_002"
 down_revision = "pershop_001"
-branch_labels = ("plugin_pershop",)
 depends_on = None
 
 
