@@ -49,9 +49,13 @@ window.rwaPluginUI['pershop'] = {
     const FMT_TAGS = {b: ['<b>', '</b>'], i: ['<i>', '</i>'], u: ['<u>', '</u>'],
       s: ['<s>', '</s>'], code: ['<code>', '</code>'], link: ['<a href="URL">', '</a>']};
     const FMT_NAMES = {b: 'Bold', i: 'Italic', u: 'Underline', s: 'Strike', code: 'Code', link: 'Link'};
+    const EMOJIS = ['🛒','🔁','👥','📖','🎁','☎️','👤','💰','📦','🏷️','🏆','🔗','✅','❌','⏳','🟢','🔴','🟡','📊','📈','📝','💬','📢','📣','⚠️','🔔','🔕','💡','🎯','🚀','🔥','💎','⭐','✨','💼','📋','🗂️','📁','📂'];
+    const emojiPicker = (targetId) => '<span class="emoji-wrap relative inline-block"><button type="button" onclick="document.getElementById(\'emoji_\' + \'' + targetId + '\').classList.toggle(\'hidden\'); event.stopPropagation();" class="' + BTN_M + '">😀</button><div id="emoji_' + targetId + '" class="hidden absolute z-50 bg-[var(--glass-bg)] border border-[var(--glass-border)] rounded-md p-2 shadow-lg w-48 flex flex-wrap gap-1 max-h-48 overflow-y-auto">' + EMOJIS.map((e) => '<button type="button" onclick="const f=document.getElementById(\'' + targetId + '\'); if(f){f.value+=(f.value ? \' \':\'\')+\'' + e + '\'; f.focus();}" class="hover:bg-[var(--glass-bg-hover)] rounded px-1 text-lg leading-none">' + e + '</button>').join('') + '</div></span>';
+
     const fmtBar = (id) => '<div class="flex flex-wrap gap-1.5 mb-2">' + Object.keys(FMT_TAGS).map((t) =>
       '<button data-fmt="' + t + '" data-for="' + id + '" class="' + BTN_M + '">' + FMT_NAMES[t] + '</button>').join('')
-      + '<button data-br data-for="' + id + '" class="' + BTN_M + '" title="Insert a blank line">⏎ Break</button></div>';
+      + '<button data-br data-for="' + id + '" class="' + BTN_M + '" title="Insert a blank line">⏎ Break</button>'
+      + emojiPicker(id) + '</div>';
     const varBar = (id, vars) => (vars && vars.length)
       ? '<div class="flex flex-wrap items-center gap-1.5 mb-2"><span class="text-[11px] text-dark-300">Insert:</span>' + vars.map((v) =>
         '<button data-var="' + v + '" data-for="' + id + '" class="' + BTN_M + '">{' + v + '}</button>').join('') + '</div>' : '';
@@ -363,7 +367,7 @@ window.rwaPluginUI['pershop'] = {
         const isNew = !t;
         t = t || {name: '', squad_uuid: '', hwid_default: null, sort: 0, active: true};
         openModal(isNew ? 'Add tier' : 'Edit tier', 'Buyer groups. Each tier puts sold accounts in one squad.',
-          '<div><label class="' + LBL + '">Tier name</label><input id="m_name" class="' + INP + '" value="' + esc(t.name) + '"><p class="' + HELP + '">Shown to buyers as the first step of the buy flow.</p></div>'
+          '<div><label class="' + LBL + '">Tier name</label><div class="flex items-center gap-2"><input id="m_name" class="' + INP + '" value="' + esc(t.name) + '">' + emojiPicker('m_name') + '</div><p class="' + HELP + '">Shown to buyers as the first step of the buy flow.</p></div>'
           + '<div><label class="' + LBL + '">Internal squad</label><span id="m_squadwrap">loading…</span><p class="' + HELP + '">Sold accounts join this squad. Lists the squads you can see.</p></div>'
           + '<div class="grid grid-cols-2 gap-3"><div><label class="' + LBL + '">HWID default</label><input id="m_hwid" class="' + INP + '" inputmode="numeric" placeholder="blank = panel default" value="' + (t.hwid_default == null ? '' : t.hwid_default) + '"></div>'
           + '<div><label class="' + LBL + '">Sort order</label><input id="m_sort" class="' + INP + '" inputmode="numeric" value="' + (t.sort || 0) + '"></div></div>'
@@ -410,7 +414,7 @@ window.rwaPluginUI['pershop'] = {
         const GB = 1073741824;
         const ov = openModal(isNew ? 'Add package' : 'Edit package', 'Standalone sellable. Pick a tier to decide where buyers find it.',
           '<div class="grid gap-3 sm:grid-cols-2">'
-          + '<div><label class="' + LBL + '">Package name</label><input id="m_pname" class="' + INP + '" value="' + esc(p.name) + '"></div>'
+          + '<div><label class="' + LBL + '">Package name</label><div class="flex items-center gap-2"><input id="m_pname" class="' + INP + '" value="' + esc(p.name) + '">' + emojiPicker('m_pname') + '</div></div>'
           + '<div><label class="' + LBL + '">Duration (days)</label><input id="m_pdays" class="' + INP + '" inputmode="numeric" value="' + (p.duration_days == null ? 30 : p.duration_days) + '"><p class="' + HELP + '">0 = never expires (∞).</p></div>'
           + '<div><label class="' + LBL + '">Traffic cap (GB)</label><input id="m_pgb" class="' + INP + '" inputmode="decimal" value="' + (p.traffic_limit_bytes ? p.traffic_limit_bytes / GB : '') + '"><p class="' + HELP + '">Blank = unlimited.</p></div>'
           + '<div><label class="' + LBL + '">Price (units)</label><input id="m_punits" class="' + INP + '" inputmode="decimal" value="' + (p.price_units || 0) + '"></div>'
@@ -527,7 +531,7 @@ window.rwaPluginUI['pershop'] = {
         const isNew = !c;
         c = c || {name: '', sort: 0, active: true};
         openModal(isNew ? 'Add category' : 'Edit category', 'Buyer groups inside Other Services.',
-          '<div><label class="' + LBL + '">Category name</label><input id="m_cname" class="' + INP + '" value="' + esc(c.name) + '"><p class="' + HELP + '">First step buyers pick inside Other Services.</p></div>'
+          '<div><label class="' + LBL + '">Category name</label><div class="flex items-center gap-2"><input id="m_cname" class="' + INP + '" value="' + esc(c.name) + '">' + emojiPicker('m_cname') + '</div><p class="' + HELP + '">First step buyers pick inside Other Services.</p></div>'
           + '<div><label class="' + LBL + '">Sort order</label><input id="m_csort" class="' + INP + '" inputmode="numeric" value="' + (c.sort || 0) + '"><p class="' + HELP + '">Lower numbers show first in the bot.</p></div>'
           + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="m_cactive" class="h-4 w-4 accent-primary"' + (c.active === false ? '' : ' checked') + '> active</label></div>',
           async (ov) => {
@@ -545,7 +549,7 @@ window.rwaPluginUI['pershop'] = {
         s = s || {name: '', cat_id: null, price_units: 1, sort: 0, active: true, description: '', done_text: ''};
         const ov = openModal(isNew ? 'Add item' : 'Edit item', 'Standalone non-VPN sellable. Pick a category to decide where buyers find it.',
           '<div class="grid gap-3 sm:grid-cols-2">'
-          + '<div><label class="' + LBL + '">Item name</label><input id="m_sname" class="' + INP + '" value="' + esc(s.name) + '"></div>'
+          + '<div><label class="' + LBL + '">Item name</label><div class="flex items-center gap-2"><input id="m_sname" class="' + INP + '" value="' + esc(s.name) + '">' + emojiPicker('m_sname') + '</div></div>'
           + '<div><label class="' + LBL + '">Price (units)</label><input id="m_sunits" class="' + INP + '" inputmode="decimal" value="' + (s.price_units || 0) + '"><p class="' + HELP + '">Multiplied by your currency rate for the buyer price.</p></div>'
           + '<div><label class="' + LBL + '">Category</label><select id="m_scat" class="' + INP + '"><option value="">No category (shows under Other)</option>'
           + cats.map((x) => '<option value="' + x.id + '"' + (x.id === s.cat_id ? ' selected' : '') + '>' + esc(x.name) + '</option>').join('') + '</select><p class="' + HELP + '">Change any time to move the item.</p></div>'
