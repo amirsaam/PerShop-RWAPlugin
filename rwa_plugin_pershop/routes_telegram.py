@@ -367,7 +367,8 @@ async def _send_referral(ctx, shop, tg, chat_id, tg_id, edit=None) -> None:
         pct = "0"
     text = (shop.get("referral_text") or "").strip() or L(shop, "referral_default", percent=pct)
     link = f"https://t.me/{bot_un}?start=r_{tg_id}" if bot_un else ""
-    text = fmt_safe(text, percent=pct, link=link or f"r_{tg_id}")
+    invitee = ("%g" % float(shop.get("campaign_percent") or 0))
+    text = fmt_safe(text, percent=pct, link=link or f"r_{tg_id}", invitee_discount=invitee)
     if bot_un:
         await _show(ctx, shop, tg, chat_id, edit,
                     L(shop, "referral_body", text=text, link=link),
