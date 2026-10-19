@@ -947,6 +947,7 @@ window.rwaPluginUI['pershop'] = {
           + '<div class="flex items-center gap-2 mt-2"><button id="bodef" class="' + BTN_M + '" title="Load the bundled default for the selected bot language">Reset to default</button></div>'
           + '<p class="' + HELP + '" id="bostate"></p>'
           + '<div class="flex items-center gap-3 mt-2"><button id="save_text" class="' + BTN_P + '">Save bot texts</button><span id="msg_text" class="text-sm text-dark-300"></span></div>'
+          + '</div>'
           + '<div class="' + CARD + '" id="extcard"><h2 class="' + CARD_T + '">External API — reuse the bot catalog elsewhere</h2><div class="max-w-xl">'
           + '<p class="text-xs text-dark-300 mb-3">Read-only JSON of exactly what buyers see (tiers, packages, services, converted prices) for your own website or widget. Send it as <code>X-Shop-Key</code> header or <code>?key=</code>. Anyone holding the key can read the catalog — rotate it if it leaks.</p>'
           + '<button id="xshow" class="' + BTN_M + '">Show my key</button><div id="xout" class="text-sm mt-3 break-all"></div></div>'
