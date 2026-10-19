@@ -937,7 +937,7 @@ window.rwaPluginUI['pershop'] = {
           + '</div>'
           + '</div>'
           + '</div>'
-          + '<div class="' + CARD + '"><h2 class="' + CARD_T + '">Bot texts</h2>'
+          + '<div class="' + CARD + ' mt-6"><h2 class="' + CARD_T + '">Bot texts</h2>'
           + '<div class="mb-3 w-64"><label class="' + LBL + '" for="bosel">Which text</label><select id="bosel" class="' + INP + '" data-cur="welcome">'
           + '<option value="welcome">Welcome</option><option value="thanks">Receipt thanks</option><option value="approved">Approved</option>'
           + '<option value="denied">Denied</option><option value="referral">Referral program</option><option value="support">Support</option></select>'
@@ -948,10 +948,10 @@ window.rwaPluginUI['pershop'] = {
           + '<p class="' + HELP + '" id="bostate"></p>'
           + '<div class="flex items-center gap-3 mt-2"><button id="save_text" class="' + BTN_P + '">Save bot texts</button><span id="msg_text" class="text-sm text-dark-300"></span></div>'
           + '</div>'
-          + '<div class="' + CARD + '" id="extcard"><h2 class="' + CARD_T + '">External API — reuse the bot catalog elsewhere</h2><div class="max-w-xl">'
+          + '<div class="' + CARD + ' mt-6" id="extcard"><h2 class="' + CARD_T + '">External API — reuse the bot catalog elsewhere</h2><div class="max-w-xl">'
           + '<p class="text-xs text-dark-300 mb-3">Read-only JSON of exactly what buyers see (tiers, packages, services, converted prices) for your own website or widget. Send it as <code>X-Shop-Key</code> header or <code>?key=</code>. Anyone holding the key can read the catalog — rotate it if it leaks.</p>'
           + '<button id="xshow" class="' + BTN_M + '">Show my key</button><div id="xout" class="text-sm mt-3 break-all"></div></div></div>'
-          + (adminMode ? '<div id="plugsec"><i class="text-sm text-dark-300">plugin settings…</i></div>' : '')
+          + (adminMode ? '<div id="plugsec" class="mt-6"><i class="text-sm text-dark-300">plugin settings…</i></div>' : '')
           + '</div>';
       }
       // Common shop fields live once, filled from the cache.
