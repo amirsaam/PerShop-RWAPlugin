@@ -842,7 +842,7 @@ window.rwaPluginUI['pershop'] = {
         + '<option value="noorders">No purchase yet</option><option value="invited">Invited (referral)</option></select></div>'
         + '<div><label class="' + LBL + '" for="bcphoto">Photo (≤5MB, optional)</label><input id="bcphoto" type="file" accept="image/*" class="' + INP + ' w-64"></div>'
         + '<span id="bcsize" class="text-xs text-dark-300"></span></div>'
-        + '<div><label class="' + LBL + '" for="bctext">Message</label>' + fmtBar('bctext') + '<textarea id="bctext" rows="5" class="' + TA + '" placeholder="You can use Telegram HTML: <b>bold</b>, <a href=&quot;…&quot;>links</a>, <code>…</code>…"></textarea></div>'
+        + '<div><label class="' + LBL + '" for="bctext">Message</label>' + fmtBar('bctext') + '<textarea id="bctext" rows="10" class="' + TA + '" placeholder="You can use Telegram HTML: <b>bold</b>, <a href=&quot;…&quot;>links</a>, <code>…</code>…"></textarea></div>'
         + '<div class="flex items-center gap-3 mt-3"><button id="bcsend" class="' + BTN_P + '">Queue broadcast</button>'
         + '<span id="bcstat" class="text-sm text-dark-300"></span></div>'
         + '<div class="mt-6 border-t border-[var(--glass-border)] pt-4"><h3 class="' + SEC_T + '">History</h3><div id="bcstat2" class="text-sm"><i class="text-dark-300">loading…</i></div></div>'
@@ -1160,7 +1160,7 @@ window.rwaPluginUI['pershop'] = {
           + '<div><label for="poll" class="text-sm text-white">Polling mode</label>'
           + '<p class="' + HELP + '">For servers without public HTTPS. Webhook delivery is preferred — leave this off when the panel has a public URL.</p></div></div>'
           + '<div><label class="' + LBL + '" for="tutorial">How-to tutorial</label>' + fmtBar('tutorial')
-          + '<textarea id="tutorial" rows="4" class="' + TA + '" placeholder="How buyers use the bot — every shop shows this. Blank hides the button.">' + esc(d.tutorial_text || '') + '</textarea></div>'
+          + '<textarea id="tutorial" rows="10" class="' + TA + '" placeholder="How buyers use the bot — every shop shows this. Blank hides the button.">' + esc(d.tutorial_text || '') + '</textarea></div>'
           + '<div><label class="' + LBL + '">How-to buttons (optional)</label>'
           + '<div id="tb_rows" class="space-y-2"></div>'
           + '<div class="mt-2 flex items-center gap-2"><button type="button" id="tb_add" class="' + BTN_M + '">+ Add button</button></div>'
