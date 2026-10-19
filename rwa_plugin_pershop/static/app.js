@@ -933,7 +933,6 @@ window.rwaPluginUI['pershop'] = {
           + '<div class="grid gap-3 sm:grid-cols-2 mt-4">'
           + '<div><label class="flex items-center gap-2 text-sm"><input type="checkbox" id="teston" class="h-4 w-4 accent-primary"> Trial subscription enabled</label></div>'
           + '<div><label class="flex items-center gap-2 text-sm"><input type="checkbox" id="tierint" class="h-4 w-4 accent-primary"> Internal tiers (skip public tiers)</label></div>'
-          + '<div>'
           + '<div class="flex items-center gap-3 mt-3"><button id="save_price" class="' + BTN_P + '">Save pricing</button><span id="msg_price" class="text-sm text-dark-300"></span></div>'
           + '</div>'
           + '</div>'
