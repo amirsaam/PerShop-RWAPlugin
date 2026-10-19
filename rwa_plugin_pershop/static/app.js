@@ -936,6 +936,7 @@ window.rwaPluginUI['pershop'] = {
           + '<div class="flex items-center gap-3 mt-3"><button id="save_price" class="' + BTN_P + '">Save pricing</button><span id="msg_price" class="text-sm text-dark-300"></span></div>'
           + '</div>'
           + '</div>'
+          + '</div>'
           + '<div class="' + CARD + '"><h2 class="' + CARD_T + '">Bot texts</h2>'
           + '<div class="mb-3 w-64"><label class="' + LBL + '" for="bosel">Which text</label><select id="bosel" class="' + INP + '" data-cur="welcome">'
           + '<option value="welcome">Welcome</option><option value="thanks">Receipt thanks</option><option value="approved">Approved</option>'
