@@ -29,6 +29,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Sync pyproject version to tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PY_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+          echo "tag=$TAG_VERSION pyproject=$PY_VERSION"
+          if [ "$PY_VERSION" != "$TAG_VERSION" ]; then
+            sed -i "s/^version = \".*\"/version = \"$TAG_VERSION\"/" pyproject.toml
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -am "chore(release): bump version to $TAG_VERSION for $GITHUB_REF_NAME"
+            if git push origin HEAD:main; then
+              echo "version bump pushed to main"
+            else
+              echo "::warning::could not push version bump to main (tag may not be main's tip); wheel will still carry the tag version"
+            fi
+          else
+            echo "pyproject already at $TAG_VERSION"
+          fi
       - run: pip install setuptools wheel cryptography fastapi
       - run: python3 tests/test_shop.py
       - run: python3 tests/test_routes_build.py
