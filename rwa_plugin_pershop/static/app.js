@@ -4,7 +4,7 @@ window.rwaPluginUI['pershop'] = {
     const api = '/api/v2/plugins/pershop';
     const q = (id) => el.querySelector('#' + id);
     const j = async (url, opts) => {
-      const o = Object.assign({headers: {'Content-Type': 'application/json'}}, opts || {});
+      const o = Object.assign({headers: {'Content-Type': 'application/json'}, credentials: 'include'}, opts || {});
       const method = (o.method || 'GET').toUpperCase();
       if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
         // Panel auth is cookie-based (rw_access); mutating requests need the
