@@ -1010,7 +1010,8 @@ window.rwaPluginUI['pershop'] = {
             test_enabled: q('teston').checked, tiers_internal: q('tierint').checked,
             pending_nag_hours: Math.max(0, Math.min(168, Number(q('naghours').value) || 0)), lang: q('lang').value || 'en'};
           const {r, w} = await saveShop(body);
-          if (q('msg_price')) q('msg_price').textContent = w.ok ? 'Saved.' : ('Save failed: ' + (w.error || 'unknown'));
+          const msg = (w && w.error) ? ('Saved. Webhook note: ' + w.error) : 'Saved.';
+          if (q('msg_price')) q('msg_price').textContent = msg;
         } catch (e) { if (q('msg_price')) q('msg_price').textContent = 'Save failed: ' + e.message; }
       };
       q('save_text').onclick = async () => {
@@ -1023,7 +1024,8 @@ window.rwaPluginUI['pershop'] = {
             body.referral_text = BOTXT.referral; body.support_text = BOTXT.support;
           }
           const {r, w} = await saveShop(body);
-          if (q('msg_text')) q('msg_text').textContent = w.ok ? 'Saved.' : ('Save failed: ' + (w.error || 'unknown'));
+          const msg = (w && w.error) ? ('Saved. Webhook note: ' + w.error) : 'Saved.';
+          if (q('msg_text')) q('msg_text').textContent = msg;
         } catch (e) { if (q('msg_text')) q('msg_text').textContent = 'Save failed: ' + e.message; }
       };
       q('connect').onclick = async () => {
