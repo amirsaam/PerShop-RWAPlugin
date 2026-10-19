@@ -228,7 +228,7 @@ window.rwaPluginUI['pershop'] = {
     const renderDashboard = (body) => {
       body.innerHTML = '<div class="space-y-6">'
         + '<div class="grid gap-4 grid-cols-2 sm:grid-cols-4" id="stats"></div>'
-        + '<div class="' + CARD + '"><div class="flex items-center justify-between mb-3"><h2 class="' + CARD_T + '">Shop health</h2>'
+        + '<div class="grid gap-4 sm:grid-cols-2">' + '<div class="' + CARD + '"><div class="flex items-center justify-between mb-3"><h2 class="' + CARD_T + '">Shop health</h2>'
         + '<button id="hcheck" class="' + BTN_M + '">Recheck</button></div><div id="health" class="flex flex-wrap gap-2"></div>'
         + (adminMode ? '' : '<p class="' + HELP + '">🟢 Bot connected = buyers can reach the shop. Stuck orders sit unread past 24h — approve or deny them in Orders.</p>')
         + '</div>'
@@ -242,7 +242,7 @@ window.rwaPluginUI['pershop'] = {
         + '</div></div>'
         + '<div class="' + CARD + '"><h2 class="' + CARD_T + '">Recent activity</h2>'
         + '<p class="text-xs text-dark-300 mb-3">Newest first. 🛒 order · 💰 auto-approve (credit) · ✅ approved · ❌ denied · ✉️ receipt · 🔗 linked · 🎟️ promo · 📣 broadcast · 📱 devices · ♻️ reissue.</p>'
-        + '<div id="events" class="text-sm"><i class="text-dark-300">loading…</i></div></div>'
+        + '<div id="event-table" class="text-sm"><i class="text-dark-300">loading…</i></div></div>'
         + '</div>'
         + (adminMode ? '<div class="' + CARD + '"><h2 class="' + CARD_T + '">All shops (superadmin)</h2><div id="all"></div></div>' : '')
         + '</div>';
@@ -282,7 +282,7 @@ window.rwaPluginUI['pershop'] = {
         const loadEvents = async () => {
           try {
             const {events} = await j(api + '/events');
-            q('events').innerHTML = (events || []).slice(0, 20).map(eventLine).join('') || '<i>nothing yet</i>';
+            q('event-table').innerHTML = (events || []).slice(0, 20).map(eventLine).join('') || '<i>nothing yet</i>';
           } catch (e) { q('events').textContent = 'unavailable'; }
         };
         loadEvents();
