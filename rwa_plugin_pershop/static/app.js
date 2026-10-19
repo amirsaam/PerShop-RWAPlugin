@@ -176,9 +176,47 @@ window.rwaPluginUI['pershop'] = {
       if (r.shop) shopCache = Object.assign({}, shopCache, r.shop);
       return {r, w};
     };
-    const eventLine = (ev) => '<div class="py-1 border-b border-border/40 last:border-0">'
-      + (EVENT_ICON[ev.kind] || '•') + ' ' + esc(String(ev.created_at).slice(0, 16).replace('T', ' '))
-      + (ev.detail ? ' · ' + esc(ev.detail) : '') + '</div>';
+    const relTime = (ts) => {
+      const diff = Math.max(0, Date.now() - new Date(ts).getTime());
+      const m = Math.floor(diff / 60000);
+      if (m < 1) return 'just now';
+      if (m < 60) return m + 'm ago';
+      const h = Math.floor(m / 60);
+      if (h < 24) return h + 'h ago';
+      const d = Math.floor(h / 24);
+      if (d < 30) return d + 'd ago';
+      return Math.floor(d / 30) + 'mo ago';
+    };
+    const EVENT_ACTION = {
+      order_new: 'placed an order',
+      order_credit: 'paid an order with credit (auto-approved)',
+      approved: 'order approved',
+      denied: 'order denied',
+      linked: 'device linked',
+      promo: 'promo code used',
+      broadcast: 'broadcast sent',
+      devreset: 'devices reset',
+      reissue: 'subscription reissued',
+      credit: 'credit added to wallet',
+    };
+    const eventWho = (ev) => {
+      const d = ev.detail || '';
+      const m = /^#(\d+)\s+(\S+)/.exec(d);          // "#1 digicloudtr" → order detail
+      if (m) return [ev.buyer_tg_id ? m[2] + ' (#' + ev.buyer_tg_id + ')' : m[2], '#' + m[1]];
+      if (ev.kind === 'linked' && d && !/\s/.test(d))  // bare username
+        return [ev.buyer_tg_id ? d + ' (#' + ev.buyer_tg_id + ')' : d, ''];
+      return [ev.buyer_tg_id ? '#' + ev.buyer_tg_id : '—', d];
+    };
+    const eventRow = (ev) => {
+      const [who, detail] = eventWho(ev);
+      return '<tr>'
+        + '<td class="w-8">' + (EVENT_ICON[ev.kind] || '•') + '</td>'
+        + '<td class="whitespace-nowrap text-dark-300">' + relTime(ev.created_at) + '</td>'
+        + '<td class="whitespace-nowrap">' + esc(who) + '</td>'
+        + '<td>' + esc(EVENT_ACTION[ev.kind] || ev.kind)
+        + (detail ? ' <span class="text-dark-300">(' + esc(detail) + ')</span>' : '') + '</td>'
+        + '</tr>';
+    };
     const EVENT_ICON = {order_new: '🛒', order_credit: '💰', approved: '✅', denied: '❌',
       linked: '🔗', promo: '🎟️', broadcast: '📣', devreset: '📱', reissue: '♻️', credit: 'wallet'};
     const loadShop = async (silent) => {
@@ -228,11 +266,11 @@ window.rwaPluginUI['pershop'] = {
     const renderDashboard = (body) => {
       body.innerHTML = '<div class="space-y-6">'
         + '<div class="grid gap-4 grid-cols-2 sm:grid-cols-4" id="stats"></div>'
-        + '<div class="grid gap-4 sm:grid-cols-2">' + '<div class="' + CARD + '"><div class="flex items-center justify-between mb-3"><h2 class="' + CARD_T + '">Shop health</h2>'
+        + '<div class="grid gap-4 sm:grid-cols-2">'
+        + '<div class="' + CARD + '"><div class="flex items-center justify-between mb-3"><h2 class="' + CARD_T + '">Shop health</h2>'
         + '<button id="hcheck" class="' + BTN_M + '">Recheck</button></div><div id="health" class="flex flex-wrap gap-2"></div>'
         + (adminMode ? '' : '<p class="' + HELP + '">🟢 Bot connected = buyers can reach the shop. Stuck orders sit unread past 24h — approve or deny them in Orders.</p>')
         + '</div>'
-        + '<div class="grid gap-4 sm:grid-cols-2">'
         + '<div class="' + CARD + '"><h2 class="' + CARD_T + '">Quick actions</h2><div class="flex flex-wrap gap-2">'
         + '<button data-go="orders" class="' + BTN_M + '">Review orders</button>'
         + '<button data-go="promos" class="' + BTN_M + '">New promo code</button>'
@@ -240,10 +278,10 @@ window.rwaPluginUI['pershop'] = {
         + '<button data-go="marketing" class="' + BTN_M + '">Send broadcast</button>'
         + '<button data-go="buyers" class="' + BTN_M + '">Buyers &amp; credit</button>'
         + '</div></div>'
-        + '<div class="' + CARD + '"><h2 class="' + CARD_T + '">Recent activity</h2>'
-        + '<p class="text-xs text-dark-300 mb-3">Newest first. 🛒 order · 💰 auto-approve (credit) · ✅ approved · ❌ denied · ✉️ receipt · 🔗 linked · 🎟️ promo · 📣 broadcast · 📱 devices · ♻️ reissue.</p>'
-        + '<div id="event-table" class="text-sm"><i class="text-dark-300">loading…</i></div></div>'
         + '</div>'
+        + '<div class="' + CARD + ' !p-0 overflow-hidden"><h2 class="' + CARD_T + ' px-4 pt-4">Recent activity</h2>'
+        + '<table class="table"><thead><tr><th></th><th>When</th><th>Who</th><th>What happened</th></tr></thead>'
+        + '<tbody id="event-table"><tr><td colspan="4"><i class="text-dark-300">loading…</i></td></tr></tbody></table></div>'
         + (adminMode ? '<div class="' + CARD + '"><h2 class="' + CARD_T + '">All shops (superadmin)</h2><div id="all"></div></div>' : '')
         + '</div>';
       body.querySelectorAll('[data-go]').forEach((b) => { b.onclick = () => goto(b.dataset.go); });
@@ -282,8 +320,9 @@ window.rwaPluginUI['pershop'] = {
         const loadEvents = async () => {
           try {
             const {events} = await j(api + '/events');
-            q('event-table').innerHTML = (events || []).slice(0, 20).map(eventLine).join('') || '<i>nothing yet</i>';
-          } catch (e) { q('events').textContent = 'unavailable'; }
+            const rows = (events || []).slice(0, 20).map(eventRow).join('');
+            q('event-table').innerHTML = rows || '<tr><td colspan="4"><i class="text-dark-300">nothing yet</i></td></tr>';
+          } catch (e) { q('event-table').innerHTML = '<tr><td colspan="4"><i class="text-red-400">unavailable</i></td></tr>'; }
         };
         loadEvents();
       }).catch((e) => {
