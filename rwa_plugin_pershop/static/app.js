@@ -1018,6 +1018,8 @@ window.rwaPluginUI['pershop'] = {
         if (q('msg_text')) q('msg_text').textContent = 'Saving…';
         try {
           const body = {lang: q('lang').value || 'en'};
+          const cur = (q('bosel') && q('bosel').dataset.cur) || 'welcome';
+          if (q('botext')) BOTXT[cur] = q('botext').value;
           if (shopCache) {
             body.welcome_text = BOTXT.welcome; body.thank_you_text = BOTXT.thanks;
             body.approved_text = BOTXT.approved; body.denied_text = BOTXT.denied;
