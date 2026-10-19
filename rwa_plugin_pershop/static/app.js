@@ -943,7 +943,7 @@ window.rwaPluginUI['pershop'] = {
           + '<option value="denied">Denied</option><option value="referral">Referral program</option><option value="support">Support</option></select>'
           + '<p id="bolab" class="' + HELP + '"></p></div>'
           + '<div id="bovars"></div>'
-          + fmtBar('botext') + '<textarea id="botext" rows="4" class="' + TA + '"></textarea>'
+          + fmtBar('botext') + '<textarea id="botext" rows="10" class="' + TA + '"></textarea>'
           + '<div class="flex items-center gap-2 mt-2"><button id="bodef" class="' + BTN_M + '" title="Load the bundled default for the selected bot language">Reset to default</button></div>'
           + '<p class="' + HELP + '" id="bostate"></p>'
           + '<div class="flex items-center gap-3 mt-2"><button id="save_text" class="' + BTN_P + '">Save bot texts</button><span id="msg_text" class="text-sm text-dark-300"></span></div>'
