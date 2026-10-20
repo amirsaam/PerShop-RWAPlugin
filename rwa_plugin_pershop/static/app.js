@@ -156,10 +156,10 @@ window.rwaPluginUI['pershop'] = {
       + (ok === null ? 'text-dark-300' : ok ? 'text-green-400 border-green-500/30' : 'text-red-400 border-red-500/30')
       + '">' + (ok === null ? '•' : (ok ? '🟢' : '🔴')) + ' ' + label + '</span>';
     // PUT /shops/mine needs the full payload, so every partial save merges the
-    // cached shop and overrides only the keys the page owns.
+    // cached shop and overrides only the keys the page owns. With no cached
+    // shop yet (first-time setup), the patch alone creates the row.
     const saveShop = async (patch) => {
-      if (!shopCache) throw new Error('Save your shop first (Shop → Bot connection).');
-      const body = Object.assign({
+      const base = shopCache ? {
         prefix: shopCache.prefix, admin_tg_id: shopCache.admin_tg_id, lang: shopCache.lang,
         card_text: shopCache.card_text, currency_label: shopCache.currency_label,
         unit_rate: shopCache.unit_rate || null,
@@ -169,7 +169,14 @@ window.rwaPluginUI['pershop'] = {
         test_enabled: shopCache.test_enabled, tiers_internal: shopCache.tiers_internal,
         referral_percent: shopCache.referral_percent || 0,
         campaign_percent: shopCache.campaign_percent || 0,
-        pending_nag_hours: shopCache.pending_nag_hours == null ? 6 : shopCache.pending_nag_hours}, patch);
+        pending_nag_hours: shopCache.pending_nag_hours == null ? 6 : shopCache.pending_nag_hours,
+      } : {
+        lang: 'en', card_text: '', currency_label: '', unit_rate: null,
+        welcome_text: '', thank_you_text: '', approved_text: '', denied_text: '',
+        referral_text: '', support_text: '', test_enabled: false, tiers_internal: false,
+        referral_percent: 0, campaign_percent: 0, pending_nag_hours: 6,
+      };
+      const body = Object.assign(base, patch);
       if (patch._token) body.bot_token = patch._token;
       const r = await j(api + '/shops/mine', {method: 'PUT', body: JSON.stringify(body)});
       const w = r.webhook || {};
@@ -1025,11 +1032,17 @@ window.rwaPluginUI['pershop'] = {
           if (q('savmsg')) q('savmsg').textContent = 'Saved.';
           q('token').value = '';
           shopCache = Object.assign(shopCache || {}, {currency_label: body.currency_label, unit_rate: body.unit_rate});
+          if (!shopCache.id) {
+            const s = await loadShop(true);
+            if (s) { go(); return; }
+          }
         } catch (e) {
           const t = q('savmsg') || q('sec');
           if (t) t.textContent = 'Save failed: ' + e.message; else alert('Save failed: ' + e.message);
         }
       };
+      // First-time setup page renders a single "Save shop" button.
+      if (q('save')) q('save').onclick = save;
       q('save_conn').onclick = async () => {
         if (q('sec')) q('sec').textContent = 'Saving…';
         try {
