@@ -415,7 +415,8 @@ class FakeDB:
             row = {"id": pid, "shop_id": a[0], "code": a[1], "kind": a[2],
                    "value": float(a[3]), "max_uses": int(a[4] or 0),
                    "valid_until": a[5], "active": True,
-                   "created_by_owner": a[6], "uses": 0}
+                   "created_by_owner": a[6], "uses": 0,
+                   "applies_to": (a[7] if len(a) > 7 else "both")}
             self.promos[pid] = row
             return [row]
         raise AssertionError(f"unhandled fetch: {q}")
@@ -736,16 +737,18 @@ class FakeDB:
                 "id": pid, "shop_id": a[0], "code": a[1], "kind": a[2],
                 "value": float(a[3]), "max_uses": int(a[4] or 0),
                 "valid_until": a[5], "active": True,
-                "created_by_owner": a[6], "uses": 0}
+                "created_by_owner": a[6], "uses": 0,
+                "applies_to": (a[7] if len(a) > 7 else "both")}
             return {"id": pid}
         if "INSERT INTO plugin_pershop_promo_uses" in q:
             self.promo_uses.add((a[0], a[3]))
             return
         if "UPDATE plugin_pershop_promos SET code" in q:
-            p = self.promos.get(a[6])
+            p = self.promos.get(a[7] if len(a) > 7 else a[6])
             if p:
                 p.update(code=a[0], kind=a[1], value=float(a[2]), max_uses=int(a[3]),
-                         valid_until=a[4], active=a[5])
+                         valid_until=a[4], active=a[5],
+                         applies_to=(a[6] if len(a) > 7 else "both"))
             return
         if "DELETE FROM plugin_pershop_promos WHERE id=$1" in q:
             self.promos.pop(a[0], None)
@@ -3187,6 +3190,299 @@ def test_service_flow():
     asyncio.run(awaitable)
 
 
+async def _service_promo_flow(ctx, shop, db):
+    """Promo codes must work on Other-Service contracts, not packages only."""
+    import json as pj
+
+    from rwa_plugin_pershop import service as svc
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    sid = shop["id"]
+    catid = db._next("scat")
+    db.svc_cats[catid] = {"id": catid, "shop_id": sid, "name": "Extras",
+                          "sort": 0, "active": True}
+    svcid = db._next("svc")
+    db.svcs[svcid] = {"id": svcid, "shop_id": sid, "cat_id": catid, "name": "Setup help",
+                      "price_units": 2.0, "description": "We configure everything.",
+                      "done_text": "Done — check your inbox.", "sort": 0, "active": True}
+    promo = await svc.create_promo(ctx, sid, code="save20", kind="percent", value=20,
+                                   created_by_owner="admin1")
+    FakeTg.instances.clear()
+
+    async def cb(data, cid, uid=555, un="bob"):
+        await handle_update(ctx, shop, {"update_id": 600, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    async def msg(text, uid=555, un="bob"):
+        await handle_update(ctx, shop, {"update_id": 601, "message": {
+            "message_id": 9, "from": {"id": uid, "username": un},
+            "chat": {"id": uid}, "text": text}})
+
+    def mine(uid=555):
+        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid]
+
+    def rms():
+        return [p["rm"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText") and p.get("rm")]
+
+    # -- the service contract carries a promo button
+    await handle_update(ctx, shop, {"update_id": 602, "message": {"message_id": 1,
+        "from": {"id": 555, "username": "bob"}, "chat": {"id": 555}, "text": "/start"}})
+    await msg("🛎 Other Services")
+    await cb(f"svc:{svcid}", "p1")
+    await cb(f"svcbuy:{svcid}", "p2")
+    await msg("please hurry")
+    contract = mine()[-1]
+    assert "Setup help" in contract and "500,000" in contract, contract
+    assert any("addpromo" in str(rm) for rm in rms()), rms()
+
+    # -- an unknown code changes nothing
+    await cb("addpromo", "p3")
+    assert "promo code" in mine()[-1].lower(), mine()[-1]
+    await msg("NOPE")
+    contract = mine()[-1]
+    assert "500,000" in contract and "SAVE20" not in contract, contract
+
+    # -- a valid code re-renders the contract with the cut
+    await cb("addpromo", "p4")
+    await msg("save20")
+    contract = mine()[-1]
+    assert "SAVE20" in contract, contract
+    assert "100,000" in contract, contract   # 20% of 2.0 units
+    assert "400,000" in contract, contract   # payable
+    assert any("removepromo" in str(rm) for rm in rms()), rms()
+
+    # -- the buyer can drop the code again
+    await cb("removepromo", "p4b")
+    contract = mine()[-1]
+    assert "500,000" in contract and "SAVE20" not in contract, contract
+    assert any("addpromo" in str(rm) for rm in rms()), rms()
+
+    # -- and put it back before paying
+    await cb("addpromo", "p4c")
+    await msg("save20")
+    contract = mine()[-1]
+    assert "SAVE20" in contract and "400,000" in contract, contract
+
+    # -- Pay asks for the discounted amount only
+    await cb("stconfirm", "p5")
+    receipt_prompt = mine()[-1]
+    assert "400,000" in receipt_prompt, receipt_prompt
+    assert "500,000" not in receipt_prompt, receipt_prompt
+
+    # -- going back to the contract keeps the code (no silent full price)
+    await cb("back:contract", "p5b")
+    contract = mine()[-1]
+    assert "SAVE20" in contract and "400,000" in contract, contract
+    await cb("stconfirm", "p5c")
+    receipt_prompt = mine()[-1]
+    assert "400,000" in receipt_prompt, receipt_prompt
+
+    # -- the order carries the discounted total + a promo snapshot
+    await msg("svc-receipt-1")
+    orders = [o for o in db.orders.values() if o.get("service_id") == svcid]
+    assert len(orders) == 1, db.orders
+    order = orders[0]
+    assert abs(float(order["total_units"]) - 1.6) < 1e-6, order
+    snap = pj.loads(order["options_snapshot"])
+    assert snap.get("promo_code") == "SAVE20", snap
+    assert abs(float(snap.get("discount_units")) - 0.4) < 1e-6, snap
+
+    # -- the owner card shows the promo cut
+    owner = [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+             if m in ("sendMessage", "editMessageText") and p["chat_id"] == 999]
+    assert any("SAVE20" in t for t in owner), owner
+
+    # -- approval burns the promo use
+    await cb(f"approve:{order['id']}", "p6", uid=999)
+    assert (promo["id"], 555) in db.promo_uses, db.promo_uses
+    print("SERVICE PROMO FLOW PASSED")
+
+
+def test_service_promo_flow():
+    import asyncio
+
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _pid = make_shop(db)
+    awaitable = _service_promo_flow(ctx, db.shops[sid], db)
+    asyncio.run(awaitable)
+
+
+async def _package_promo_flow(ctx, shop, db):
+    """The package path keeps working: promo code on a package contract."""
+    import json as pj
+
+    from rwa_plugin_pershop import service as svc
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    sid = shop["id"]
+    pid = db._next("pkg")
+    db.pkgs[pid] = {"id": pid, "shop_id": sid, "tier_id": None, "name": "Monthly",
+                    "traffic_limit_bytes": 1000, "duration_days": 30,
+                    "price_text": "$5", "price_units": 2.0, "squad_uuid": None,
+                    "active": True, "effect": "full", "hwid_mode": "default"}
+    promo = await svc.create_promo(ctx, sid, code="save20", kind="percent", value=20,
+                                   created_by_owner="admin1")
+    FakeTg.instances.clear()
+
+    async def cb(data, cid, uid=555, un="bob"):
+        await handle_update(ctx, shop, {"update_id": 700, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    async def msg(text, uid=555, un="bob"):
+        await handle_update(ctx, shop, {"update_id": 701, "message": {
+            "message_id": 9, "from": {"id": uid, "username": un},
+            "chat": {"id": uid}, "text": text}})
+
+    def mine(uid=555):
+        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid]
+
+    def rms():
+        return [p["rm"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText") and p.get("rm")]
+
+    await handle_update(ctx, shop, {"update_id": 702, "message": {"message_id": 1,
+        "from": {"id": 555, "username": "bob"}, "chat": {"id": 555}, "text": "/start"}})
+    await cb(f"buy:{pid}", "q1")
+    contract = mine()[-1]
+    assert "500,000" in contract, contract
+    assert any("addpromo" in str(rm) for rm in rms()), rms()
+
+    await cb("addpromo", "q2")
+    await msg("save20")
+    contract = mine()[-1]
+    assert "SAVE20" in contract and "400,000" in contract, contract
+    assert any("removepromo" in str(rm) for rm in rms()), rms()
+
+    # -- the code can be dropped and put back
+    await cb("removepromo", "q2b")
+    contract = mine()[-1]
+    assert "500,000" in contract and "SAVE20" not in contract, contract
+    await cb("addpromo", "q2c")
+    await msg("save20")
+    contract = mine()[-1]
+    assert "SAVE20" in contract and "400,000" in contract, contract
+
+    await cb("stconfirm", "q3")
+    receipt_prompt = mine()[-1]
+    assert "400,000" in receipt_prompt, receipt_prompt
+    assert "500,000" not in receipt_prompt, receipt_prompt
+
+    await msg("receipt-xyz")
+    orders = [o for o in db.orders.values() if o.get("package_id") == pid]
+    assert len(orders) == 1, db.orders
+    order = orders[0]
+    assert abs(float(order["total_units"]) - 1.6) < 1e-6, order
+    snap = pj.loads(order["options_snapshot"])
+    assert snap.get("promo_code") == "SAVE20", snap
+    assert abs(float(snap.get("discount_units")) - 0.4) < 1e-6, snap
+
+    owner = [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+             if m in ("sendMessage", "editMessageText") and p["chat_id"] == 999]
+    assert any("SAVE20" in t for t in owner), owner
+    assert promo["code"] == "SAVE20"
+    print("PACKAGE PROMO FLOW PASSED")
+
+
+def test_package_promo_flow():
+    import asyncio
+
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _pid = make_shop(db)
+    awaitable = _package_promo_flow(ctx, db.shops[sid], db)
+    asyncio.run(awaitable)
+
+
+async def _promo_scope_flow(ctx, shop, db):
+    """A code can be limited to packages, services, or both."""
+    from rwa_plugin_pershop import service as svc
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    sid = shop["id"]
+    pid = db._next("pkg")
+    db.pkgs[pid] = {"id": pid, "shop_id": sid, "tier_id": None, "name": "Monthly",
+                    "traffic_limit_bytes": 1000, "duration_days": 30,
+                    "price_text": "$5", "price_units": 2.0, "squad_uuid": None,
+                    "active": True, "effect": "full", "hwid_mode": "default"}
+    catid = db._next("scat")
+    db.svc_cats[catid] = {"id": catid, "shop_id": sid, "name": "Extras",
+                          "sort": 0, "active": True}
+    svcid = db._next("svc")
+    db.svcs[svcid] = {"id": svcid, "shop_id": sid, "cat_id": catid, "name": "Setup help",
+                      "price_units": 2.0, "description": "", "done_text": "Done.",
+                      "sort": 0, "active": True}
+    await svc.create_promo(ctx, sid, code="pkgonly", kind="percent", value=20,
+                           created_by_owner="admin1", applies_to="packages")
+    await svc.create_promo(ctx, sid, code="svconly", kind="percent", value=20,
+                           created_by_owner="admin1", applies_to="services")
+    FakeTg.instances.clear()
+
+    async def cb(data, cid, uid=555, un="bob"):
+        await handle_update(ctx, shop, {"update_id": 800, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    async def msg(text, uid=555, un="bob"):
+        await handle_update(ctx, shop, {"update_id": 801, "message": {
+            "message_id": 9, "from": {"id": uid, "username": un},
+            "chat": {"id": uid}, "text": text}})
+
+    def mine(uid=555):
+        return [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid]
+
+    await handle_update(ctx, shop, {"update_id": 802, "message": {"message_id": 1,
+        "from": {"id": 555, "username": "bob"}, "chat": {"id": 555}, "text": "/start"}})
+
+    # -- package contract: a services-only code is refused, with a scope message
+    await cb(f"buy:{pid}", "s1")
+    await cb("addpromo", "s2")
+    await msg("svconly")
+    contract = mine()[-1]
+    assert "SVCONLY" not in contract and "500,000" in contract, contract
+    assert any("only works on services" in t for t in mine()), mine()
+
+    # -- the packages-only code pays
+    await cb("addpromo", "s2b")
+    await msg("pkgonly")
+    contract = mine()[-1]
+    assert "PKGONLY" in contract and "400,000" in contract, contract
+
+    # -- service contract (another buyer): the sides swap
+    await handle_update(ctx, shop, {"update_id": 803, "message": {"message_id": 2,
+        "from": {"id": 556, "username": "sara"}, "chat": {"id": 556}, "text": "/start"}})
+    await cb(f"svc:{svcid}", "s3", uid=556, un="sara")
+    await cb(f"svcbuy:{svcid}", "s4", uid=556, un="sara")
+    await msg("need it tonight", uid=556, un="sara")
+    contract = mine(556)[-1]
+    assert "500,000" in contract, contract
+
+    await cb("addpromo", "s5", uid=556, un="sara")
+    await msg("pkgonly", uid=556, un="sara")
+    contract = mine(556)[-1]
+    assert "PKGONLY" not in contract and "500,000" in contract, contract
+    assert any("only works on packages" in t for t in mine(556)), mine(556)
+
+    await cb("addpromo", "s5b", uid=556, un="sara")
+    await msg("svconly", uid=556, un="sara")
+    contract = mine(556)[-1]
+    assert "SVCONLY" in contract and "400,000" in contract, contract
+    print("PROMO SCOPE FLOW PASSED")
+
+
+def test_promo_scope_flow():
+    import asyncio
+
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _pid = make_shop(db)
+    awaitable = _promo_scope_flow(ctx, db.shops[sid], db)
+    asyncio.run(awaitable)
+
+
 async def _public_api_flow(ctx, shop, db):
     import hashlib
     import json
@@ -3981,6 +4277,24 @@ async def _promo_campaign_flow():
     assert got and got["id"] == promo["id"]
     assert await svc.promo_validate(ctx, sid, "NOPE", buyer) is None
 
+    # -- scope: a code can be limited to packages or to services
+    assert promo.get("applies_to") == "both", promo
+    assert await svc.promo_validate(ctx, sid, "SAVE10", buyer, kind="pkg")
+    assert await svc.promo_validate(ctx, sid, "SAVE10", buyer, kind="svc")
+    sid2, _pid2 = make_shop(db, prefix="other")
+    pk = await svc.create_promo(ctx, sid2, code="onlypkg", kind="percent", value=10,
+                                created_by_owner="admin1", applies_to="packages")
+    sv = await svc.create_promo(ctx, sid2, code="onlysvc", kind="percent", value=10,
+                                created_by_owner="admin1", applies_to="services")
+    assert pk["applies_to"] == "packages" and sv["applies_to"] == "services"
+    assert await svc.promo_validate(ctx, sid2, "ONLYPKG", buyer, kind="pkg")
+    assert await svc.promo_validate(ctx, sid2, "ONLYPKG", buyer, kind="svc") is None
+    assert await svc.promo_validate(ctx, sid2, "ONLYSVC", buyer, kind="svc")
+    assert await svc.promo_validate(ctx, sid2, "ONLYSVC", buyer, kind="pkg") is None
+    assert svc.normalize_promo_scope("nonsense") == "both"
+    assert svc.promo_scope_allows({"applies_to": "services"}, "svc")
+    assert not svc.promo_scope_allows({"applies_to": "services"}, "pkg")
+
     # -- checkout: promo 10% + campaign 15% stack off a 200-order
     cd = await svc.checkout_discount(ctx, shop, buyer, 200.0, promo)
     assert cd["promo_units"] == 20.0 and cd["campaign_units"] == 30.0, cd
@@ -4098,6 +4412,9 @@ if __name__ == "__main__":
     test_scope_flow()
     test_scam_flow()
     test_service_flow()
+    test_service_promo_flow()
+    test_package_promo_flow()
+    test_promo_scope_flow()
     test_public_api_flow()
     test_pub_users_flow()
     test_global_test_flow()

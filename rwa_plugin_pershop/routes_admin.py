@@ -98,6 +98,8 @@ class PromoIn(BaseModel):
     max_uses: int = Field(default=0, ge=0)
     valid_until: datetime | str | None = None
     active: bool = True
+    # Where the code may be spent: both | packages | services.
+    applies_to: str = Field(default="both")
 
 
 class CreditIn(BaseModel):
@@ -696,7 +698,8 @@ def build_admin_router(ctx):
             row = await create_promo(
                 ctx, shop["id"], code=payload.code, kind=payload.kind,
                 value=payload.value, max_uses=payload.max_uses,
-                valid_until=payload.valid_until, created_by_owner=me)
+                valid_until=payload.valid_until, created_by_owner=me,
+                applies_to=payload.applies_to)
         except ValueError as e:
             raise HTTPException(400, str(e))
         return {"id": row["id"]}
@@ -725,11 +728,19 @@ def build_admin_router(ctx):
             except ValueError:
                 raise HTTPException(400, "valid_until is not an ISO datetime")
         try:
+            from rwa_plugin_pershop.service import normalize_promo_code, normalize_promo_scope
+
+            code = normalize_promo_code(payload.code)
+            if not code:
+                raise HTTPException(400, "promo code needs letters/digits")
             await ctx.db.execute(
                 """UPDATE plugin_pershop_promos SET code=$1, kind=$2, value=$3,
-                   max_uses=$4, valid_until=$5, active=$6 WHERE id=$7""",
-                payload.code.strip().upper(), payload.kind, payload.value,
-                payload.max_uses, valid_until, payload.active, promo_id)
+                   max_uses=$4, valid_until=$5, active=$6, applies_to=$7 WHERE id=$8""",
+                code, payload.kind, payload.value,
+                payload.max_uses, valid_until, payload.active,
+                normalize_promo_scope(payload.applies_to), promo_id)
+        except HTTPException:
+            raise
         except Exception as e:
             if "unique" in str(e).lower() or "duplicate" in str(e).lower():
                 raise HTTPException(409, "code already used in this shop")

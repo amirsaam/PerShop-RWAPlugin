@@ -504,18 +504,100 @@ async def _send_svc_note_prompt(ctx, shop, tg, chat_id, svc, back, edit=None) ->
                        {"service_id": svc["id"], "back": back, "pm": mid})
 
 
+async def _draft_promo(ctx, shop, buyer_tg_id: int, saved: dict):
+    """The promo a draft carries, re-validated (None when there is none).
+
+    The purchase kind comes from the draft, so a packages-only code is
+    refused when the buyer is paying for a service (and vice versa).
+    """
+    from rwa_plugin_pershop.service import promo_validate
+
+    code = str((saved or {}).get("promo_code") or "").strip().upper()
+    if not code:
+        return None
+    kind = "svc" if (saved or {}).get("service_id") else "pkg"
+    try:
+        return await promo_validate(ctx, shop["id"], code, buyer_tg_id, kind=kind)
+    except Exception:
+        return None
+
+
+async def _promo_reject_key(ctx, shop, code: str, kind: str) -> str:
+    """Which "this code does not work here" line to show.
+
+    A code that exists but is scoped to the other kind of purchase gets its
+    own message — the buyer learns the rule instead of "invalid". The line
+    follows the CODE's scope, not the contract the buyer is on.
+    """
+    from rwa_plugin_pershop.service import (
+        normalize_promo_scope, promo_find_by_code, promo_scope_allows,
+    )
+
+    if not code:
+        return "promo_invalid"
+    try:
+        raw = await promo_find_by_code(ctx, shop["id"], code)
+    except Exception:
+        raw = None
+    if raw and raw.get("active", True) and not promo_scope_allows(raw, kind):
+        scope = normalize_promo_scope(raw.get("applies_to"))
+        return "promo_only_services" if scope == "services" else "promo_only_packages"
+    return "promo_invalid"
+
+
+def _drop_promo(saved: dict) -> dict:
+    """Contract draft with its promo code (and the cut it caused) removed."""
+    out = dict(saved or {})
+    out["promo_code"] = None
+    out["discount_units"] = 0.0
+    out["promo_units"] = 0.0
+    out["campaign_units"] = 0.0
+    out["campaign_pct"] = 0.0
+    out.pop("discount_applied", None)
+    if out.get("list_units") is not None:
+        out["total_units"] = out["list_units"]
+    return out
+
+
 async def _send_svc_contract(ctx, shop, tg, sender, svc, note, back,
-                             credit_applied=False, edit=None) -> dict:
-    """Contract screen for a service: item + converted price + note, then Pay."""
+                             credit_applied=False, edit=None, promo: dict | None = None) -> dict:
+    """Contract screen for a service: item + converted price + note, then Pay.
+    Promo/campaign discounts work exactly like package contracts."""
     from rwa_plugin_pershop.lang import L
-    from rwa_plugin_pershop.service import credit_balance, format_price
+    from rwa_plugin_pershop.service import (
+        checkout_discount, credit_balance, format_price, promo_validate,
+    )
     from rwa_plugin_pershop.telegram import kb
 
     price = float(svc.get("price_units") or 0)
+    if promo is None:
+        # Preserve a code already entered for this draft (back/credit re-render).
+        try:
+            ses = await _get_session(ctx, shop["id"], sender, "buyer")
+            prev = {}
+            if ses and (ses.get("state") or "").startswith(("await_summary:", "await_promo:")):
+                import json as _json
+                prev = _json.loads(ses.get("data") or "{}")
+            code = str(prev.get("promo_code") or "").strip().upper()
+            if code:
+                promo = await promo_validate(ctx, shop["id"], code, sender, kind="svc")
+        except Exception:
+            promo = None
+    cd = await checkout_discount(ctx, shop, sender, price, promo)
     lines = [L(shop, "contract_title"),
              L(shop, "contract_plan", plan=svc["name"], price=format_price(shop, price))]
     if (note or "").strip():
         lines.append(L(shop, "note_line", note=note.strip()).strip())
+    if cd["promo_units"] > 0:
+        lines.append(L(shop, "promo_line", code=cd["promo"]["code"],
+                       value=format_price(shop, cd["promo_units"])))
+    if cd["campaign_units"] > 0:
+        lines.append(L(shop, "campaign_line", pct="%g" % float(cd["campaign_pct"]),
+                       value=format_price(shop, cd["campaign_units"])))
+    due_total = price
+    if cd["discount_units"] > 0:
+        due_total = max(0.0, price - cd["discount_units"])
+        lines.append(L(shop, "contract_due", due=format_price(shop, due_total)))
     bal = await credit_balance(ctx, shop["id"], sender)
     credit_row = []
     use_credit = bool(credit_applied) and bal > 0
@@ -524,18 +606,29 @@ async def _send_svc_contract(ctx, shop, tg, sender, svc, note, back,
                          value=format_price(shop, bal)))
         credit_row = [[{"text": L(shop, "credit_use_btn"), "callback_data": "credituse"}]]
     elif use_credit:
-        used = min(bal, price)
-        due = price - used
+        used = min(bal, due_total)
+        due = due_total - used
         lines.append(L(shop, "credit_due", used=format_price(shop, used),
                          due=format_price(shop, due)) if due > 0
                      else L(shop, "credit_full"))
     lines.append(L(shop, "contract_hint"))
     saved = {"service_id": svc["id"], "note": (note or "").strip()[:500],
-             "total_units": price, "back": back, "credit": bool(use_credit)}
+             "total_units": price, "back": back, "credit": bool(use_credit),
+             "promo_code": cd["promo"]["code"] if cd["promo"] else None,
+             "discount_units": cd["discount_units"],
+             "promo_units": cd["promo_units"],
+             "campaign_units": cd["campaign_units"],
+             "campaign_pct": cd["campaign_pct"]}
+    promo_row = [[{"text": L(shop, "promo_btn"), "callback_data": "addpromo"}]]
+    if cd["promo"]:
+        # A code is already on: offer to drop it instead of adding another.
+        promo_row = [[{"text": L(shop, "promo_remove_btn"),
+                       "callback_data": "removepromo"}]]
     await _set_session(ctx, shop["id"], sender, "buyer",
                        f"await_summary:svc:{svc['id']}", saved)
     await _show(ctx, shop, tg, sender, edit, "\n\n".join(lines), kb(
         [[{"text": L(shop, "contract_pay_btn"), "callback_data": "stconfirm"}]]
+        + promo_row
         + credit_row + _back_home_row(shop, back)))
     return saved
 
@@ -581,7 +674,9 @@ async def _submit_svc_receipt(ctx, shop, tg, msg, text, buyer_id, buyer_un, chat
         await _show(ctx, shop, tg, chat_id, data.get("pm"), L(shop, "svc_unavailable"))
         return
     note = (data.get("note") or "")[:500]
-    total = float(svc.get("price_units") or 0)
+    list_total = float(svc.get("price_units") or 0)
+    total = data.get("total_units")
+    total = float(total) if total is not None else list_total
     credit_used = 0.0
     if data.get("credit"):
         from rwa_plugin_pershop.service import add_credit as _ac2
@@ -592,7 +687,13 @@ async def _submit_svc_receipt(ctx, shop, tg, msg, text, buyer_id, buyer_un, chat
         if credit_used > 0:
             await _ac2(ctx, shop["id"], buyer_id, -credit_used)
     snapshot = _json.dumps({"service": svc["id"], "note": note,
-                            "credit_used": credit_used})
+                            "total_units": total, "list_units": list_total,
+                            "credit_used": credit_used,
+                            "promo_code": data.get("promo_code"),
+                            "discount_units": float(data.get("discount_units") or 0),
+                            "promo_units": float(data.get("promo_units") or 0),
+                            "campaign_units": float(data.get("campaign_units") or 0),
+                            "campaign_pct": data.get("campaign_pct")})
     row = await ctx.db.fetchrow(
         """INSERT INTO plugin_pershop_orders(shop_id,service_id,buyer_tg_id,buyer_username,
            receipt_file_id,receipt_kind,total_units,options_snapshot)
@@ -610,6 +711,19 @@ async def _submit_svc_receipt(ctx, shop, tg, msg, text, buyer_id, buyer_un, chat
         header += "\n" + L(osh, "credit_owner_line",
                           used=format_price(shop, credit_used),
                           due=format_price(shop, total - credit_used))
+    _disc = float(data.get("discount_units") or 0)
+    if _disc > 0:
+        _due = total  # total already carries the cut (payable)
+        if float(data.get("promo_units") or 0) > 0:
+            header += "\n" + L(osh, "promo_owner_line",
+                               code=data.get("promo_code"),
+                               value=format_price(shop, float(data["promo_units"])),
+                               due=format_price(shop, _due))
+        if float(data.get("campaign_units") or 0) > 0:
+            header += "\n" + L(osh, "campaign_owner_line",
+                               pct="%g" % float(data.get("campaign_pct") or 0),
+                               value=format_price(shop, float(data["campaign_units"])),
+                               due=format_price(shop, _due))
     if note.strip():
         header += L(osh, "note_line", note=note.strip())
     try:
@@ -1462,12 +1576,12 @@ async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back=
         try:
             _ses = await _get_session(ctx, shop["id"], sender, "buyer")
             _saved = {}
-            if _ses and (_ses.get("state") or "").startswith("await_summary:"):
+            if _ses and (_ses.get("state") or "").startswith(("await_summary:", "await_promo:")):
                 import json as _json6
                 _saved = _json6.loads(_ses.get("data") or "{}")
             _code = str(_saved.get("promo_code") or "").strip().upper()
             if _code:
-                promo = await promo_validate(ctx, shop["id"], _code, sender)
+                promo = await promo_validate(ctx, shop["id"], _code, sender, kind="pkg")
         except Exception:
             promo = None
 
@@ -1518,10 +1632,15 @@ async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back=
              "promo_units": cd["promo_units"],
              "campaign_units": cd["campaign_units"],
              "campaign_pct": cd["campaign_pct"]}
+    promo_row = [[{"text": L(shop, "promo_btn"), "callback_data": "addpromo"}]]
+    if cd["promo"]:
+        # A code is already on: offer to drop it instead of adding another.
+        promo_row = [[{"text": L(shop, "promo_remove_btn"),
+                       "callback_data": "removepromo"}]]
     await _set_session(ctx, shop["id"], sender, "buyer", f"await_summary:{pkg['id']}", saved)
     await _show(ctx, shop, tg, sender, edit, "\n\n".join(lines), kb(
         [[{"text": L(shop, "contract_pay_btn"), "callback_data": "stconfirm"}]]
-        + [[{"text": L(shop, "promo_btn"), "callback_data": "addpromo"}]]
+        + promo_row
         + credit_row + _back_home_row(shop, back)))
     return saved
 
@@ -1635,7 +1754,32 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
             saved = {}
         await _drop_user_msg(tg, chat_id, user_mid)
         code = (text or "").strip().upper()[:64]
-        promo = await _svc3.promo_validate(ctx, shop["id"], code, buyer_id) if code else None
+        # The draft says what is being bought: a service code cannot pay for
+        # a package and the other way round.
+        kind = "svc" if saved.get("service_id") else "pkg"
+        promo = (await _svc3.promo_validate(ctx, shop["id"], code, buyer_id, kind=kind)
+                 if code else None)
+        if saved.get("service_id"):
+            # Service contract: same promo entry, re-render service contract.
+            from rwa_plugin_pershop.service import service_by_id as _svc_by_id
+
+            svc = await _svc_by_id(ctx, saved["service_id"])
+            if not svc:
+                await _clear_session(ctx, shop["id"], buyer_id, "buyer")
+                await tg.send_message(chat_id, L(shop, "svc_unavailable"))
+                return
+            if not promo:
+                await tg.send_message(
+                    chat_id, L(shop, await _promo_reject_key(ctx, shop, code, kind)))
+            else:
+                saved = dict(saved, promo_code=promo["code"])
+                await tg.send_message(chat_id, L(shop, "promo_applied", code=promo["code"]))
+            await _set_session(ctx, shop["id"], buyer_id, "buyer",
+                               f"await_summary:svc:{svc['id']}", saved)
+            await _send_svc_contract(ctx, shop, tg, buyer_id, svc, saved.get("note") or "",
+                                     saved.get("back") or f"svc:{svc['id']}",
+                                     edit=saved.get("cm"), promo=promo)
+            return
         pkg = await ctx.db.fetchrow(
             "SELECT * FROM plugin_pershop_packages WHERE id=$1", saved.get("package_id"))
         if not pkg:
@@ -1643,14 +1787,17 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
             await tg.send_message(chat_id, L(shop, "session_expired"))
             return
         if not promo:
-            await tg.send_message(chat_id, L(shop, "promo_invalid"))
+            await tg.send_message(
+                chat_id, L(shop, await _promo_reject_key(ctx, shop, code, kind)))
         else:
             saved = dict(saved, promo_code=promo["code"])
+            await tg.send_message(chat_id, L(shop, "promo_applied", code=promo["code"]))
         sub = await _draft_sub(ctx, shop, saved)
         await _set_session(ctx, shop["id"], buyer_id, "buyer",
                            f"await_summary:{pkg['id']}", saved)
         await _send_contract(ctx, shop, tg, buyer_id, sub, pkg, saved.get("hwid"),
-                             saved.get("back") or _pkg_back(shop, pkg), promo=promo)
+                             saved.get("back") or _pkg_back(shop, pkg),
+                             edit=saved.get("cm"), promo=promo)
         return
 
     # Sub link while awaiting one?
@@ -2143,7 +2290,14 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
     if kind == "svc":
         snapshot = _json3.dumps({"service": item["id"],
                                  "note": (saved.get("note") or "")[:500],
-                                 "credit_used": total})
+                                 "total_units": total,
+                                 "list_units": saved.get("list_units"),
+                                 "credit_used": total,
+                                 "promo_code": saved.get("promo_code"),
+                                 "discount_units": float(saved.get("discount_units") or 0),
+                                 "promo_units": float(saved.get("promo_units") or 0),
+                                 "campaign_units": float(saved.get("campaign_units") or 0),
+                                 "campaign_pct": saved.get("campaign_pct")})
         row = await ctx.db.fetchrow(
             """INSERT INTO plugin_pershop_orders(shop_id,service_id,buyer_tg_id,buyer_username,
                receipt_file_id,receipt_kind,total_units,options_snapshot)
@@ -2523,16 +2677,57 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
         return
 
     if data == "addpromo":
-        # Move the contract draft into a promo-entry prompt (data = draft).
+        # Move the contract draft into a promo-entry prompt. Works for both
+        # package and service contracts; the draft rides along in the session.
+        # The prompt message id ("cm") lets the code entry re-render the
+        # contract in place instead of stacking a second screen.
+        sdraft = await _load_svc_draft(ctx, shop, sender)
+        if sdraft:
+            _svc, _note, _st, saved = sdraft
+            if saved.get("total_units") is not None:
+                pm = await _show(ctx, shop, tg, sender, mid,
+                                 L(shop, "promo_title") + "\n\n" + L(shop, "promo_prompt"),
+                                 reply_markup=kb([[{"text": L(shop, "back_btn"),
+                                                    "callback_data": "back:contract"}]]))
+                await _set_session(ctx, shop["id"], sender, "buyer",
+                                   "await_promo:", dict(saved, cm=pm))
+            return
         draft = await _load_draft(ctx, shop, sender)
         if not draft or not draft[3].get("total_units"):
             return
         _pkg, _hw, _st, saved = draft
-        await _set_session(ctx, shop["id"], sender, "buyer", "await_promo:", dict(saved))
-        await _show(ctx, shop, tg, sender, mid,
-                    L(shop, "promo_title") + "\n\n" + L(shop, "promo_prompt"),
-                    reply_markup=kb([[{"text": L(shop, "back_btn"),
-                                       "callback_data": "back:contract"}]]))
+        pm = await _show(ctx, shop, tg, sender, mid,
+                         L(shop, "promo_title") + "\n\n" + L(shop, "promo_prompt"),
+                         reply_markup=kb([[{"text": L(shop, "back_btn"),
+                                            "callback_data": "back:contract"}]]))
+        await _set_session(ctx, shop["id"], sender, "buyer", "await_promo:", dict(saved, cm=pm))
+        return
+
+    if data == "removepromo":
+        # Drop the code from the open draft and re-render the contract.
+        sdraft = await _load_svc_draft(ctx, shop, sender)
+        if sdraft:
+            svc, note, _st, saved = sdraft
+            if saved.get("total_units") is not None:
+                saved = _drop_promo(saved)
+                await _set_session(ctx, shop["id"], sender, "buyer",
+                                   f"await_summary:svc:{svc['id']}", saved)
+                await _send_svc_contract(ctx, shop, tg, sender, svc, note,
+                                         saved.get("back") or f"svc:{svc['id']}",
+                                         edit=mid)
+            return
+        draft = await _load_draft(ctx, shop, sender)
+        if not draft:
+            return
+        pkg, hwid_value, _state, saved = draft
+        if saved.get("total_units") is None:
+            return
+        saved = _drop_promo(saved)
+        sub = await _draft_sub(ctx, shop, saved)
+        await _set_session(ctx, shop["id"], sender, "buyer",
+                           f"await_summary:{pkg['id']}", saved)
+        await _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value,
+                             saved.get("back") or _pkg_back(shop, pkg), edit=mid)
         return
 
     if data.startswith("cfcancel:"):
@@ -2890,6 +3085,13 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             svc, _note, state, saved = sdraft
             if state.startswith("await_summary:") and saved.get("total_units") is not None:
                 saved = dict(saved)
+                # Same one-shot discount application as package contracts:
+                # payable = list − (promo + campaign), applied exactly once.
+                if float(saved.get("discount_units") or 0) > 0 and not saved.get("discount_applied"):
+                    list_units = float(saved.get("total_units") or 0)
+                    saved["list_units"] = list_units
+                    saved["total_units"] = max(0.0, list_units - float(saved["discount_units"]))
+                    saved["discount_applied"] = True
                 credit_note = ""
                 if saved.get("credit"):
                     _bal = await credit_balance(ctx, shop["id"], sender)
@@ -2974,7 +3176,9 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             if saved.get("total_units") is not None:
                 sub = await _draft_sub(ctx, shop, saved)
                 await _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value,
-                                     saved.get("back") or _pkg_back(shop, pkg), credit_applied=True, edit=mid)
+                                     saved.get("back") or _pkg_back(shop, pkg),
+                                     credit_applied=True, edit=mid,
+                                     promo=await _draft_promo(ctx, shop, sender, saved))
                 return
         sdraft = await _load_svc_draft(ctx, shop, sender)
         if sdraft:
@@ -2982,15 +3186,20 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             if saved.get("total_units") is not None:
                 await _send_svc_contract(ctx, shop, tg, sender, svc, note,
                                          saved.get("back") or f"svc:{svc['id']}",
-                                         credit_applied=True, edit=mid)
+                                         credit_applied=True, edit=mid,
+                                         promo=await _draft_promo(ctx, shop, sender, saved))
         return
     if data == "back:contract":
+        # Coming back from the receipt prompt: the draft still carries the
+        # code, so re-validate it — otherwise the contract would silently
+        # fall back to the full price.
         sdraft = await _load_svc_draft(ctx, shop, sender)
         if sdraft:
             svc, note, _st, saved = sdraft
             if saved.get("total_units") is not None:
                 await _send_svc_contract(ctx, shop, tg, sender, svc, note,
-                                         saved.get("back") or f"svc:{svc['id']}", edit=mid)
+                                         saved.get("back") or f"svc:{svc['id']}",
+                                         edit=mid, promo=await _draft_promo(ctx, shop, sender, saved))
             return
         draft = await _load_draft(ctx, shop, sender)
         if not draft:
@@ -3000,7 +3209,8 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         sub = await _draft_sub(ctx, shop, saved)
         await _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value,
-                             saved.get("back") or _pkg_back(shop, pkg), edit=mid)
+                             saved.get("back") or _pkg_back(shop, pkg),
+                             edit=mid, promo=await _draft_promo(ctx, shop, sender, saved))
         return
 
     if data == "cancel":

@@ -363,16 +363,21 @@ window.rwaPluginUI['pershop'] = {
         orderFilter = status;
         try {
           const {orders} = await j(api + '/orders?status=' + status);
-          q('ob').innerHTML = (orders || []).map((o) =>
-            '<tr data-id="' + o.id + '"><td class="font-medium">#' + o.id + '</td><td>' + esc(o.package_name || '-') + '</td>'
+          // The promo code lives in the order snapshot: flag those rows.
+          const snapOf = (o) => { try { return JSON.parse(o.options_snapshot || '{}'); } catch (e) { return {}; } };
+          q('ob').innerHTML = (orders || []).map((o) => {
+            const promoCode = (snapOf(o).promo_code || '');
+            return '<tr data-id="' + o.id + '"><td class="font-medium">#' + o.id + '</td><td>' + esc(o.package_name || '-') + '</td>'
             + '<td>@' + esc(o.buyer_username || o.buyer_tg_id) + ' <button data-a="buyer" data-tg="' + o.buyer_tg_id + '" class="' + BTN_M + ' !h-6 px-2">open</button>'
             + (o.buyer_flagged ? ' 🚫 <button data-a="unscam" data-tg="' + o.buyer_tg_id + '" class="' + BTN_M + ' !h-6 px-2">Unmark</button>' : '') + '</td>'
-            + '<td>' + (o.total_units != null ? esc(String(o.total_units)) + 'u' : '—') + '</td>'
+            + '<td>' + (o.total_units != null ? esc(String(o.total_units)) + 'u' : '—')
+            + (promoCode ? ' <span title="' + esc(promoCode) + '">🎟️</span>' : '') + '</td>'
             + '<td>' + (o.renew_username ? 'renew ' + esc(o.renew_username) : 'new') + '</td>'
             + '<td>' + (o.status === 'withdraw_requested' ? '<span class="' + pillFor('withdraw_requested') + '">withdraw requested</span><div class="text-xs text-dark-300 mt-1">reason: ' + esc(o.withdraw_reason || '') + ' · refund to: ' + esc(o.withdraw_card || '') + ' (decide in the bot DM)</div>'
               : '<span class="' + pillFor(o.status) + '">' + esc(o.status) + '</span>') + '</td>'
             + '<td class="whitespace-nowrap">' + (status === 'pending' && o.status === 'pending'
-              ? '<button data-a="ok" class="' + BTN_M + '">Approve</button> <button data-a="no" class="' + BTN_M + '">Deny</button>' : '') + '</td></tr>').join('')
+              ? '<button data-a="ok" class="' + BTN_M + '">Approve</button> <button data-a="no" class="' + BTN_M + '">Deny</button>' : '') + '</td></tr>';
+          })
             || '<tr><td colspan="7"><i class="text-sm text-dark-300">none</i></td></tr>';
           q('ob').querySelectorAll('button').forEach((b) => { b.onclick = async () => {
             if (b.dataset.a === 'buyer') return openBuyer(b.dataset.tg);
@@ -680,11 +685,12 @@ window.rwaPluginUI['pershop'] = {
     const renderPromos = (body) => {
       body.innerHTML = '<div class="space-y-6">'
         + '<div class="' + CARD + '"><h2 class="' + CARD_T + '">Promo codes</h2>'
-        + '<p class="' + HELP + ' mb-4">Codes kick in at buyer checkout and work only inside this shop. <b>percent</b> = % off · <b>units</b> = flat cut in shop units. Buyers by default each redeem a code once; "max uses" also caps total redemptions (blank/0 = unlimited). Expiry empty = forever. One use is burned when you approve the order.</p>'
-        + '<div class="grid gap-3 sm:grid-cols-5 mb-4">'
+        + '<p class="' + HELP + ' mb-4">Codes kick in at buyer checkout and work only inside this shop. <b>percent</b> = % off · <b>units</b> = flat cut in shop units. <b>Applies to</b> limits where the code pays: packages, services, or both. Buyers by default each redeem a code once; "max uses" also caps total redemptions (blank/0 = unlimited). Expiry empty = forever. One use is burned when you approve the order.</p>'
+        + '<div class="grid gap-3 sm:grid-cols-6 mb-4">'
         + '<div><label class="' + LBL + '">Code</label><input id="pr_code" class="' + INP + '" placeholder="SAVE10"></div>'
         + '<div><label class="' + LBL + '">Type</label><select id="pr_kind" class="' + INP + '"><option value="percent">% off</option><option value="units">flat units off</option></select></div>'
         + '<div><label class="' + LBL + '">Value</label><input id="pr_value" class="' + INP + '" inputmode="decimal"></div>'
+        + '<div><label class="' + LBL + '">Applies to</label><select id="pr_scope" class="' + INP + '"><option value="both">packages + services</option><option value="packages">packages only</option><option value="services">services only</option></select></div>'
         + '<div><label class="' + LBL + '">Max uses (0 = ∞)</label><input id="pr_uses" class="' + INP + '" inputmode="numeric" placeholder="0 = ∞"></div>'
         + '<div><label class="' + LBL + '">Valid until</label><input id="pr_until" type="date" class="' + INP + '"></div>'
         + '</div>'
@@ -694,18 +700,41 @@ window.rwaPluginUI['pershop'] = {
         + '</div></div>';
       const loadPromos = async () => {
         const empty = '<i>no promo codes yet</i>';
+        const scopeLabel = (s) => s === 'packages' ? '📦 packages only'
+          : s === 'services' ? '🛎 services only' : '📦🛎 both';
+        const nextScope = (s) => s === 'packages' ? 'services' : s === 'services' ? 'both' : 'packages';
         try {
           const {promos} = await j(api + '/promos');
           q('promos').innerHTML = (promos || []).map((p) => {
+            // percent = a share of the price; units = a flat cut in shop
+            // units (fmtU turns units into money — never for a percent).
             const off = p.kind === 'units'
               ? ('flat ' + esc(fmtU(p.value)) + ' off')
-              : ('' + esc(fmtU(p.value)) + '% off');
+              : (esc(String(Number(p.value).toFixed(2).replace(/\.00$/, ''))) + '% off');
             const uses = esc(p.uses || 0) + '/' + (Number(p.max_uses) > 0 ? esc(p.max_uses) : '∞');
             const until = p.valid_until ? (' · until ' + esc(String(p.valid_until).slice(0, 10))) : '';
+            const scope = p.applies_to || 'both';
             const dot = p.active ? '🟢' : '⚫';
             return '<div class="' + ROW + '"><span>' + dot + ' <b>' + esc(p.code) + '</b> · ' + off
-              + ' · ' + uses + until + '</span><button data-dpromo="' + p.id + '" class="' + BTN_D + '">Delete</button></div>';
+              + ' · ' + uses + until + '</span>'
+              + '<span class="flex items-center gap-2">'
+              + '<button data-spromo="' + p.id + '" class="' + BTN_M + '">'
+              + esc(scopeLabel(scope)) + '</button>'
+              + '<button data-dpromo="' + p.id + '" class="' + BTN_D + '">Delete</button></span></div>';
           }).join('') || empty;
+          // Click the scope chip to cycle both → packages → services → both.
+          q('promos').querySelectorAll('[data-spromo]').forEach((b) => { b.onclick = async () => {
+            const p = (promos || []).find((x) => String(x.id) === b.dataset.spromo);
+            if (!p) return;
+            const scope = nextScope(p.applies_to || 'both');
+            try {
+              await j(api + '/promos/' + p.id, {method: 'PUT', body: JSON.stringify({
+                code: p.code, kind: p.kind, value: Number(p.value) || 0,
+                max_uses: Number(p.max_uses) || 0, valid_until: p.valid_until || null,
+                active: p.active !== false, applies_to: scope})});
+              loadPromos();
+            } catch (e) { alert('Scope change failed: ' + e.message); }
+          }; });
           q('promos').querySelectorAll('[data-dpromo]').forEach((b) => { b.onclick = async () => {
             if (!confirm('Delete this promo code? Buyers can no longer apply it.')) return;
             try { await j(api + '/promos/' + b.dataset.dpromo, {method: 'DELETE'}); loadPromos(); }
@@ -719,6 +748,7 @@ window.rwaPluginUI['pershop'] = {
         const until = q('pr_until').value;
         const body2 = {code: code, kind: q('pr_kind').value || 'percent',
           value: Number(q('pr_value').value) || 0,
+          applies_to: q('pr_scope').value || 'both',
           max_uses: Math.max(0, Math.floor(Number(q('pr_uses').value) || 0)),
           valid_until: until ? until + 'T23:59:59Z' : null, active: true};
         try { await j(api + '/promos', {method: 'POST', body: JSON.stringify(body2)});

@@ -267,21 +267,12 @@ async def reset_all(ctx) -> dict:
                 wiped.append(t)
             except Exception:
                 pass
-    try:
-        await ctx.db.execute(
-            "DELETE FROM alembic_version WHERE version_num = 'pershop_001'")
-    except Exception:
-        pass
-    try:
-        await ctx.db.execute(
-            "DELETE FROM alembic_version WHERE version_num = 'pershop_002'")
-    except Exception:
-        pass
-    try:
-        await ctx.db.execute(
-            "DELETE FROM alembic_version WHERE version_num = 'pershop_003'")
-    except Exception:
-        pass
+    for rev in ("pershop_001", "pershop_002", "pershop_003", "pershop_004"):
+        try:
+            await ctx.db.execute(
+                "DELETE FROM alembic_version WHERE version_num = $1", rev)
+        except Exception:
+            pass
     keys = list(_PERSHOP_SETTING_KEYS)
     for s in shops or []:
         try:
@@ -2088,13 +2079,44 @@ async def record_referral(ctx, shop_id: int, referrer_tg_id: int, referred_tg_id
 # shop_id so a code minted by one owner can never pay in another shop.
 
 PROMO_KINDS = ("percent", "units")
+# What a code may be spent on: both kinds of purchase, packages only, or
+# services only. Stored as text on the promo row.
+PROMO_SCOPES = ("both", "packages", "services")
+# Which purchase kind a scope covers: "pkg" (packages) / "svc" (services).
+PROMO_SCOPE_KINDS = {"packages": ("pkg",), "services": ("svc",), "both": ("pkg", "svc")}
+
+
+def normalize_promo_code(code: str) -> str:
+    """Canonical promo code: upper case, letters/digits/_/- only, 40 chars.
+
+    Create and edit must agree — a code stored with spaces would never match
+    what a buyer types, so the code would look broken in the panel.
+    """
+    return "".join(ch for ch in (code or "").upper() if ch.isalnum() or ch in "_-")[:40]
+
+
+def normalize_promo_scope(value: str) -> str:
+    """Canonical promo scope; anything unknown falls back to 'both'."""
+    clean = (value or "").strip().lower()
+    return clean if clean in PROMO_SCOPES else "both"
+
+
+def promo_scope_allows(promo: dict, kind: str | None) -> bool:
+    """True when a promo may be used for this purchase kind ('pkg'/'svc').
+
+    ``kind`` None means "no kind known" — the code is then not rejected.
+    """
+    if not kind:
+        return True
+    scope = normalize_promo_scope((promo or {}).get("applies_to"))
+    return kind in PROMO_SCOPE_KINDS[scope]
 
 
 async def create_promo(ctx, shop_id: int, *, code: str, kind: str, value: float,
                        max_uses: int = 0, valid_until=None,
-                       created_by_owner: str = "") -> dict:
+                       created_by_owner: str = "", applies_to: str = "both") -> dict:
     """Insert a promo for one shop. Raises ValueError on bad input/duplicate."""
-    clean = "".join(ch for ch in (code or "").upper() if ch.isalnum() or ch in "_-")[:40]
+    clean = normalize_promo_code(code)
     if not clean:
         raise ValueError("promo code needs letters/digits")
     if kind not in PROMO_KINDS:
@@ -2102,13 +2124,14 @@ async def create_promo(ctx, shop_id: int, *, code: str, kind: str, value: float,
     value = float(value or 0)
     if value <= 0 or (kind == "percent" and value > 100):
         raise ValueError("promo value out of range")
+    scope = normalize_promo_scope(applies_to)
     try:
         row = await ctx.db.fetchrow(
             """INSERT INTO plugin_pershop_promos(shop_id, code, kind, value, max_uses,
-               valid_until, created_by_owner)
-               VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *""",
+               valid_until, created_by_owner, applies_to)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
             shop_id, clean, kind, value, int(max_uses or 0), valid_until,
-            created_by_owner)
+            created_by_owner, scope)
     except Exception as e:
         if any(w in str(e).lower() for w in ("unique", "duplicate")):
             raise ValueError("this code already exists in the shop")
@@ -2125,9 +2148,14 @@ def promo_preview_value(promo: dict, total_units: float) -> float:
     return round(min(max(value * total / 100.0, 0.0), total), 6)
 
 
-async def promo_validate(ctx, shop_id: int, code: str, buyer_tg_id: int) -> dict | None:
-    """Active, in-window, barely-used promo for THIS shop + THIS buyer."""
-    clean = (code or "").strip().upper()
+async def promo_validate(ctx, shop_id: int, code: str, buyer_tg_id: int,
+                         kind: str | None = None) -> dict | None:
+    """Active, in-window, barely-used promo for THIS shop + THIS buyer.
+
+    ``kind`` ('pkg' / 'svc') narrows the check to codes whose scope covers
+    that kind of purchase — a packages-only code never pays for a service.
+    """
+    clean = normalize_promo_code(code)
     if not clean:
         return None
     try:
@@ -2137,6 +2165,8 @@ async def promo_validate(ctx, shop_id: int, code: str, buyer_tg_id: int) -> dict
         if not row:
             return None
         promo = dict(row)
+        if not promo_scope_allows(promo, kind):
+            return None
         vu = promo.get("valid_until")
         if vu is not None:
             from datetime import datetime, timezone
@@ -2161,7 +2191,7 @@ async def promo_validate(ctx, shop_id: int, code: str, buyer_tg_id: int) -> dict
 
 
 async def promo_find_by_code(ctx, shop_id: int, code: str) -> dict | None:
-    clean = (code or "").strip().upper()
+    clean = normalize_promo_code(code)
     if not clean:
         return None
     try:
