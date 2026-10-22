@@ -760,6 +760,15 @@ def _units(value) -> float:
         return 0.0
 
 
+def price_label(shop: dict, units) -> str:
+    """Sellable price as text — a zero price reads as Free, not 0."""
+    from rwa_plugin_pershop.lang import L as _L
+
+    if _units(units) <= 0:
+        return _L(shop, "free_lbl")
+    return format_price(shop, units)
+
+
 def format_price(shop: dict, units) -> str:
     """Render units in the shop currency: units × rate + label (e.g. 625,000 تومان)."""
     u = _units(units)

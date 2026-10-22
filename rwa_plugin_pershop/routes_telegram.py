@@ -273,9 +273,15 @@ def _pkg_back(shop: dict, pkg: dict | None) -> str:
 
 
 def _pkg_label(shop, pkg) -> str:
-    from rwa_plugin_pershop.service import format_price
+    import rwa_plugin_pershop.service as _s
 
-    price = format_price(shop, pkg.get("price_units")) if pkg.get("price_units") else (pkg.get("price_text") or "")
+    units = pkg.get("price_units")
+    if units:
+        price = _s.format_price(shop, units)
+    elif units is not None:
+        price = _s.price_label(shop, units)  # 0 = Free
+    else:
+        price = pkg.get("price_text") or ""
     return f"{pkg['name']} — {price}" if price else pkg["name"]
 
 
@@ -567,7 +573,8 @@ async def _send_svc_contract(ctx, shop, tg, sender, svc, note, back,
     Promo/campaign discounts work exactly like package contracts."""
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import (
-        checkout_discount, credit_balance, format_price, promo_validate,
+        checkout_discount, credit_balance, format_price, price_label,
+        promo_validate,
     )
     from rwa_plugin_pershop.telegram import kb
 
@@ -587,7 +594,7 @@ async def _send_svc_contract(ctx, shop, tg, sender, svc, note, back,
             promo = None
     cd = await checkout_discount(ctx, shop, sender, price, promo)
     lines = [L(shop, "contract_title"),
-             L(shop, "contract_plan", plan=svc["name"], price=format_price(shop, price))]
+             L(shop, "contract_plan", plan=svc["name"], price=price_label(shop, price))]
     if (note or "").strip():
         lines.append(L(shop, "note_line", note=note.strip()).strip())
     if cd["promo_units"] > 0:
@@ -1573,7 +1580,7 @@ async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back=
     from rwa_plugin_pershop.lang import L
     from rwa_plugin_pershop.service import (
         checkout_discount, contract_preview, credit_balance, format_price,
-        promo_validate,
+        price_label, promo_validate,
     )
     from rwa_plugin_pershop.telegram import kb
 
@@ -1594,7 +1601,7 @@ async def _send_contract(ctx, shop, tg, sender, sub, pkg, hwid_value=None, back=
     cd = await checkout_discount(ctx, shop, sender, pv["price_units"], promo)
     lines = [L(shop, "contract_title"),
              L(shop, "contract_plan", plan=pkg["name"],
-                price=format_price(shop, pv["price_units"]))]
+                price=price_label(shop, pv["price_units"]))]
     if pv["effect"] == "time_only" and pkg.get("duration_days"):
         lines.append(L(shop, "contract_days_add", days=pkg["duration_days"]))
     for ln in (_contract_time_line(shop, pv, sub), _contract_traffic_line(shop, pv, sub)):
@@ -2204,7 +2211,7 @@ async def _load_draft(ctx, shop, sender):
 async def _send_topup_picker(ctx, shop, tg, sender, sub, effect, edit=None) -> None:
     """Offer list for one top-up kind (+traffic / +days) + Back to detail."""
     from rwa_plugin_pershop.lang import L
-    from rwa_plugin_pershop.service import format_price, topup_package_map, topup_visible
+    from rwa_plugin_pershop.service import price_label, topup_package_map, topup_visible
     from rwa_plugin_pershop.telegram import kb
 
     offers = await ctx.db.fetch(
@@ -2224,7 +2231,7 @@ async def _send_topup_picker(ctx, shop, tg, sender, sub, effect, edit=None) -> N
     if not offers:
         await _send_sub_detail(ctx, shop, tg, sender, sub, edit=edit)
         return
-    rows = [[{"text": f"{o['name']} — {format_price(shop, o.get('price_units') or 0)}",
+    rows = [[{"text": f"{o['name']} — {price_label(shop, o.get('price_units') or 0)}",
               "callback_data": f"topick:{sub['id']}:{o['id']}"}] for o in offers]
     rows += _back_home_row(shop, f"sub:{sub['id']}")
     await _show(ctx, shop, tg, sender, edit, L(shop, "topup_pick", username=sub["username"]),
@@ -2271,11 +2278,12 @@ async def _to_summary(ctx, shop, tg, sender, pkg, hwid_value=None, sub=None, bac
 
 
 async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
-    """Full-credit auto-approval: when the buyer's credit balance covers the
-    whole total, the order is created already paid (receipt_kind 'credit')
-    and approved immediately — no receipt, no owner decision. Earned referral
-    credit still works because rewards are minted on the cash portion only
-    (zero here). Returns True when auto-approved. Never raises."""
+    """Auto-approval when there is nothing to pay: a 100% promo/campaign
+    discount (payable zero, like a full coupon) or a credit balance covering
+    the whole total. The order is created already paid (receipt_kind 'promo'
+    or 'credit') and approved immediately — no receipt, no owner decision.
+    Referral rewards are minted on the cash portion only (zero here).
+    Returns True when auto-approved. Never raises."""
     import json as _json3
 
     from rwa_plugin_pershop.lang import L
@@ -2288,16 +2296,19 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
     sender = (cb.get("from") or {}).get("id")
     buyer_un = (cb.get("from") or {}).get("username") or str(sender)
     total = float(saved.get("total_units") or 0)
-    if total <= 0:
-        return False
-    if (await _cb5(ctx, shop["id"], sender)) < total:
-        return False
+    free = total <= 0  # fully discounted: a 100% coupon pays everything
+    if not free:
+        if not saved.get("credit"):
+            return False
+        if (await _cb5(ctx, shop["id"], sender)) < total:
+            return False
+    pay_kind = "promo" if free else "credit"
     if kind == "svc":
         snapshot = _json3.dumps({"service": item["id"],
                                  "note": (saved.get("note") or "")[:500],
                                  "total_units": total,
                                  "list_units": saved.get("list_units"),
-                                 "credit_used": total,
+                                 "credit_used": 0.0 if free else total,
                                  "promo_code": saved.get("promo_code"),
                                  "discount_units": float(saved.get("discount_units") or 0),
                                  "promo_units": float(saved.get("promo_units") or 0),
@@ -2307,11 +2318,12 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
             """INSERT INTO plugin_pershop_orders(shop_id,service_id,buyer_tg_id,buyer_username,
                receipt_file_id,receipt_kind,total_units,options_snapshot)
                VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id""",
-            shop["id"], item["id"], sender, buyer_un, None, "credit", total, snapshot)
+            shop["id"], item["id"], sender, buyer_un, None, pay_kind, total, snapshot)
     else:
         applied = await _ra2(ctx, item, saved.get("hwid"))
         snapshot = _json3.dumps({"hwid": saved.get("hwid"), "total_units": total,
-                                 "applied": applied, "credit_used": total,
+                                 "applied": applied,
+                                 "credit_used": 0.0 if free else total,
                                  "promo_code": saved.get("promo_code"),
                                  "discount_units": float(saved.get("discount_units") or 0),
                                  "promo_units": float(saved.get("promo_units") or 0),
@@ -2321,11 +2333,14 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
             """INSERT INTO plugin_pershop_orders(shop_id,package_id,buyer_tg_id,buyer_username,
                receipt_file_id,receipt_kind,renew_username,total_units,options_snapshot)
                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
-            shop["id"], item["id"], sender, buyer_un, None, "credit",
+            shop["id"], item["id"], sender, buyer_un, None, pay_kind,
             saved.get("renew_username"), total, snapshot)
-    await _ac4(ctx, shop["id"], sender, -total)
+    if not free:
+        # Credit covers it: spend the balance. A 100% coupon touches no wallet.
+        await _ac4(ctx, shop["id"], sender, -total)
     from rwa_plugin_pershop.service import log_event as _le3
-    await _le3(ctx, shop["id"], "order_credit", sender, f"#{row['id']} {buyer_un}")
+    await _le3(ctx, shop["id"], "order_free" if free else "order_credit",
+               sender, f"#{row['id']} {buyer_un}")
     order = await ctx.db.fetchrow(
         "SELECT * FROM plugin_pershop_orders WHERE id=$1", row["id"])
     sub_pre = None
@@ -2334,13 +2349,14 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
             "SELECT expire_at FROM plugin_pershop_subs WHERE shop_id=$1 AND username=$2",
             shop["id"], saved["renew_username"])
     try:
-        res = await _ao2(ctx, row["id"], "auto-credit")
+        res = await _ao2(ctx, row["id"], "auto-promo" if free else "auto-credit")
     except Exception as e:
         # Panel call failed: give the balance back, drop the order row, and
         # let the buyer fall through to the normal receipt flow.
         ctx.logger.warning("shop.auto_approve_failed", extra={"err": str(e)})
         try:
-            await _ac4(ctx, shop["id"], sender, total)
+            if not free:
+                await _ac4(ctx, shop["id"], sender, total)
             await ctx.db.execute(
                 "DELETE FROM plugin_pershop_orders WHERE id=$1", row["id"])
         except Exception:
@@ -3111,6 +3127,11 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                         ctx, shop, tg, cb, "svc", svc, saved):
                     await _clear_session(ctx, shop["id"], sender, "buyer")
                     return
+                if float(saved.get("total_units") or 0) <= 0 and await _auto_credit_order(
+                        ctx, shop, tg, cb, "svc", svc, saved):
+                    # A free coupon/package pays nothing: approve on the spot.
+                    await _clear_session(ctx, shop["id"], sender, "buyer")
+                    return
                 await _set_session(ctx, shop["id"], sender, "buyer",
                                    f"await_receipt:svc:{svc['id']}", dict(saved, pm=mid))
                 pm = await _show(ctx, shop, tg, sender, mid,
@@ -3149,6 +3170,11 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                                else "\n" + L(shop, "credit_full"))
         if saved.get("credit") and await _auto_credit_order(
                 ctx, shop, tg, cb, "pkg", pkg, saved):
+            await _clear_session(ctx, shop["id"], sender, "buyer")
+            return
+        if float(saved.get("total_units") or 0) <= 0 and await _auto_credit_order(
+                ctx, shop, tg, cb, "pkg", pkg, saved):
+            # A free coupon/package pays nothing: approve on the spot.
             await _clear_session(ctx, shop["id"], sender, "buyer")
             return
         await _set_session(ctx, shop["id"], sender, "buyer", f"await_receipt:{pkg['id']}",

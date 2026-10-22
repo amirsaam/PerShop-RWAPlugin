@@ -1045,6 +1045,7 @@ async def _approve_new():
 
 async def _full():
     db, ctx, svc = await _approve_new()
+    db.pkgs[1]["price_units"] = 2.0  # a 0-unit package would auto-approve; this flow tests paying
     # deny-after-approve must fail
     try:
         await svc.deny_order(ctx, 1, "admin1", "late")
@@ -2308,6 +2309,76 @@ async def _package_api_flow():
 
 def test_package_api_flow():
     asyncio.run(_package_api_flow())
+
+
+async def _free_promo_flow():
+    """A 100% promo coupon pays everything: no receipt, no owner decision —
+    the order is created and approved on the spot, like full credit."""
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.service as svc
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _legacy = make_shop(db)
+    shop = db.shops[sid]
+    shop.update({"bot_username": "vipshopbot"})
+    panel = FakePanel()
+    svc._panel_client = lambda: panel
+    pid = db._next("pkg")
+    db.pkgs[pid] = {"id": pid, "shop_id": sid, "tier_id": None, "name": "Monthly",
+                    "traffic_limit_bytes": 1000, "duration_days": 30,
+                    "price_text": "$5", "price_units": 2.0, "squad_uuid": None,
+                    "active": True, "effect": "full", "hwid_mode": "default"}
+    promo = await svc.create_promo(ctx, sid, code="freeall", kind="percent", value=100,
+                                   created_by_owner="admin1")
+    FakeTg.instances.clear()
+
+    async def cb(data, cid, uid=555, un="bob"):
+        await handle_update(ctx, shop, {"update_id": 960, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    async def msg(text, uid=555, un="bob"):
+        await handle_update(ctx, shop, {"update_id": 961, "message": {
+            "message_id": 9, "from": {"id": uid, "username": un},
+            "chat": {"id": uid}, "text": text}})
+
+    def texts():
+        return [p.get("text") for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == 555]
+
+    # -- a code that takes 100% off
+    await cb(f"buy:{pid}", "f1")
+    await cb("addpromo", "f2")
+    await msg("freeall")
+    contract = texts()[-1]
+    assert "FREEALL" in contract and "0 تومان" in contract, contract
+
+    # -- Pay: approved immediately, no receipt asked
+    await cb("stconfirm", "f3")
+    orders = [o for o in db.orders.values() if o.get("package_id") == pid]
+    assert len(orders) == 1, db.orders
+    order = orders[0]
+    assert order["status"] == "approved", order
+    assert order["receipt_kind"] == "promo", order
+    assert float(order["total_units"] or 0) == 0, order
+    assert (promo["id"], 555) in db.promo_uses, db.promo_uses
+    assert panel.created, "free order must provision the account"
+    # the buyer got the delivered card + the auto note, never a receipt ask
+    all_text = "\n".join(t or "" for t in texts())
+    assert "Send receipt" not in all_text, texts()
+    assert "nothing to pay" in all_text or "auto-approved" in all_text, texts()
+    print("FREE PROMO FLOW PASSED")
+
+
+def test_free_promo_flow():
+    asyncio.run(_free_promo_flow())
 
 
 async def _topup_link_flow():
@@ -4377,6 +4448,7 @@ async def _edit_place_flow():
     Owner approve/deny rewrite both the buyer waiting message and the
     owner decide card, stripping the buttons."""
     db, ctx, svc = await _approve_new()
+    db.pkgs[1]["price_units"] = 2.0  # a 0-unit package would auto-approve; this flow tests paying
     from rwa_plugin_pershop.routes_telegram import handle_update
 
     shop = dict(db.shops[1])
@@ -4884,6 +4956,7 @@ if __name__ == "__main__":
     test_plan_match_trial_flow()
     test_lang_default_flow()
     test_package_api_flow()
+    test_free_promo_flow()
     test_topup_link_flow()
     test_referral_cards_flow()
     test_tier_squad_flow()

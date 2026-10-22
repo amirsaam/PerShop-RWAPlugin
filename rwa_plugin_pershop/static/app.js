@@ -197,6 +197,7 @@ window.rwaPluginUI['pershop'] = {
     const EVENT_ACTION = {
       order_new: 'placed an order',
       order_credit: 'paid an order with credit (auto-approved)',
+      order_free: 'paid with a 100% promo (auto-approved)',
       approved: 'order approved',
       denied: 'order denied',
       linked: 'device linked',
@@ -463,7 +464,7 @@ window.rwaPluginUI['pershop'] = {
           }, isNew ? 'Add tier' : 'Save tier');
         squadOpts(t.squad_uuid).then((h) => { const w = el.querySelector('#m_squadwrap'); if (w) w.innerHTML = h; });
       };
-      const GB = 1073741824;
+      const GB = 1000000000;
       const tierName = (tiers, p) => {
         if (!p || !p.tier_id) return 'no tier';
         return (tiers.find((x) => x.id === p.tier_id) || {}).name || ('tier ' + p.tier_id);
@@ -472,7 +473,8 @@ window.rwaPluginUI['pershop'] = {
         const tn = tierName(tiers, p);
         return '<span class="' + pillFor('pending') + '">' + esc(tn) + '</span> '
           + '<span>' + esc(p.name) + ' · ' + (Number(p.duration_days) === 0 ? 'never expires' : p.duration_days + 'd') + ' · '
-          + (p.traffic_limit_bytes ? (p.traffic_limit_bytes / GB) + 'GB' : 'unlimited') + ' · ' + fmtU(p.price_units)
+          + (p.traffic_limit_bytes ? (p.traffic_limit_bytes / GB) + 'GB' : 'unlimited') + ' · '
+          + (p.price_units ? fmtU(p.price_units) : 'Free')
           + (p.active ? '' : ' · off') + '</span>';
       };
       const topupBadges = (p, tiers, plans) => {
@@ -483,7 +485,8 @@ window.rwaPluginUI['pershop'] = {
           .map((id) => ((plans || []).find((x) => x.id === Number(id)) || {}).name)
           .filter(Boolean);
         const scoped = bound.length ? (' · for ' + esc(bound.join(', '))) : ' · for all plans';
-        return '<span>' + esc(p.name) + ' · ' + what + ' · ' + fmtU(p.price_units) + scoped
+        return '<span>' + esc(p.name) + ' · ' + what + ' · '
+          + (p.price_units ? fmtU(p.price_units) : 'Free') + scoped
           + (p.active ? '' : ' · off') + '</span>';
       };
       const hwidFields = (p) => {
