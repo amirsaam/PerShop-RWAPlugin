@@ -52,9 +52,10 @@ class PluginSettingsIn(BaseModel):
 
 class PkgIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    # Every package lives in a tier (tier = internal squad mapping; a squad-less
-    # sub gets no connection, so tier-less packages are rejected).
-    tier_id: int
+    # A basic plan lives in a tier (tier = internal squad mapping; a
+    # squad-less sub gets no connection, so tier-less plans are rejected).
+    # Top-ups need no tier — they are tied to packages instead.
+    tier_id: int | None = None
     # Show order in the bot (ORDER BY sort, id).
     sort: int = Field(default=0, ge=0, le=1000000)
     traffic_limit_bytes: int | None = Field(default=None, ge=0)

@@ -152,6 +152,17 @@ class FakeDB:
         if "FROM plugin_pershop_orders WHERE id" in q:
             o = self.orders.get(a[0])
             return [o] if o else []
+        if "INSERT INTO plugin_pershop_packages" in q:
+            pid = self._next("pkg")
+            self.pkgs[pid] = {
+                "id": pid, "shop_id": a[0], "tier_id": a[1], "name": a[2],
+                "traffic_limit_bytes": a[3], "duration_days": a[4],
+                "price_units": float(a[5]), "squad_uuid": a[6], "active": a[7],
+                "hwid_mode": a[8], "hwid_min": a[9], "hwid_default": a[10],
+                "hwid_max": a[11], "hwid_free": a[12], "hwid_percent": float(a[13]),
+                "hwid_fixed": a[14], "traffic_reset": a[15], "effect": a[16],
+                "scope_tier_id": a[17], "sort": a[18]}
+            return [{"id": pid}]
         if "FROM plugin_pershop_packages WHERE id" in q and "shop_id" in q:
             p = self.pkgs.get(a[0])
             return [p] if p and p["shop_id"] == a[1] and p.get("active", True) else []
@@ -662,6 +673,20 @@ class FakeDB:
             return
         if "UPDATE plugin_pershop_orders SET renew_username" in q:
             self.orders[a[1]]["renew_username"] = a[0]
+            return
+        if "INSERT INTO plugin_pershop_topup_packages" in q:
+            self.topup_pkgs.setdefault(a[0], set()).add(a[1])
+            return
+        if "UPDATE plugin_pershop_packages SET" in q:
+            p = self.pkgs.get(a[18])
+            if p:
+                p.update(tier_id=a[0], name=a[1], traffic_limit_bytes=a[2],
+                         duration_days=a[3], price_units=float(a[4]),
+                         squad_uuid=a[5], active=a[6], hwid_mode=a[7],
+                         hwid_min=a[8], hwid_default=a[9], hwid_max=a[10],
+                         hwid_free=a[11], hwid_percent=float(a[12]),
+                         hwid_fixed=a[13], traffic_reset=a[14], effect=a[15],
+                         scope_tier_id=a[16], sort=a[17])
             return
         if "UPDATE plugin_pershop_shops SET bot_token_enc=NULL WHERE id=$1" in q:
             self.shops[a[0]]["bot_token_enc"] = None
@@ -2171,6 +2196,118 @@ async def _lang_default_flow():
 
 def test_lang_default_flow():
     asyncio.run(_lang_default_flow())
+
+
+def _pkg_payload(**kw):
+    """A package payload shaped exactly like the panel's modal sends it."""
+    body = {"name": "x", "tier_id": None, "sort": 0, "traffic_limit_bytes": None,
+            "duration_days": 30, "price_units": 1.0, "squad_uuid": None,
+            "hwid_mode": "default", "hwid_min": 0, "hwid_default": 0, "hwid_max": 0,
+            "hwid_free": 0, "hwid_percent": 0, "hwid_fixed": None,
+            "traffic_reset": True, "effect": "full", "scope_tier_id": None,
+            "package_ids": [], "active": True}
+    body.update(kw)
+    from rwa_plugin_pershop.routes_admin import PkgIn
+
+    return PkgIn(**body)
+
+
+async def _package_api_flow():
+    """The panel's package payloads must be accepted by the admin API.
+
+    A top-up has no tier (it is tied to packages instead), so the payload
+    carries tier_id=None — the model must accept that, while a basic plan
+    without a tier is still refused.
+    """
+    import sys
+    import types
+
+    web = types.ModuleType("web")
+    backend = types.ModuleType("web.backend")
+    core = types.ModuleType("web.backend.core")
+    plugin_api = types.ModuleType("web.backend.core.plugin_api")
+
+    class AdminUser:
+        username = "admin1"
+
+    def require_permission(resource, action):
+        async def dep():
+            return AdminUser()
+
+        return dep
+
+    plugin_api.auth_deps = lambda: (AdminUser, require_permission)
+    sys.modules["web"] = web
+    sys.modules["web.backend"] = backend
+    sys.modules["web.backend.core"] = core
+    sys.modules["web.backend.core.plugin_api"] = plugin_api
+    try:
+        from fastapi import HTTPException
+
+        from rwa_plugin_pershop.routes_admin import build_admin_router
+
+        db = FakeDB()
+        ctx = FakeCtx(db)
+        sid, _pid = make_shop(db)
+        tid = db._next("tier")
+        db.tiers[tid] = {"id": tid, "shop_id": sid, "name": "Tier A", "squad_uuid": "sqT",
+                         "hwid_default": 1, "sort": 0, "active": True}
+        router = build_admin_router(ctx=ctx)
+
+        def _endpoint(method, path):
+            for r in router.routes:
+                if getattr(r, "path", "") == path and method in getattr(r, "methods", set()):
+                    return r.endpoint
+            raise AssertionError("route not found: %s %s" % (method, path))
+
+        create = _endpoint("POST", "/packages")
+        update = _endpoint("PUT", "/packages/{pkg_id}")
+        listing = _endpoint("GET", "/packages")
+        admin = AdminUser()
+
+        # -- a basic plan needs a tier
+        try:
+            await create(_pkg_payload(name="Plan X", tier_id=None), admin)
+            raise AssertionError("plan without a tier accepted")
+        except HTTPException as e:
+            assert e.status_code == 400, e.status_code
+
+        # -- a basic plan with a tier
+        plan = await create(_pkg_payload(name="Plan A", tier_id=tid), admin)
+        assert plan["id"], plan
+        assert db.pkgs[plan["id"]]["tier_id"] == tid, db.pkgs[plan["id"]]
+
+        # -- a top-up without a tier (the panel's payload) is accepted
+        topup = await create(_pkg_payload(name="+5GB", tier_id=None, effect="traffic_only",
+                                          traffic_limit_bytes=5 * 1073741824,
+                                          duration_days=0, package_ids=[plan["id"]]), admin)
+        assert topup["id"], topup
+        row = db.pkgs[topup["id"]]
+        assert row["tier_id"] is None, row
+        assert row["effect"] == "traffic_only", row
+        assert db.topup_pkgs[topup["id"]] == {plan["id"]}, db.topup_pkgs
+
+        # -- the listing carries the package links
+        out = await listing(admin)
+        rows = {r["id"]: r for r in out["packages"]}
+        assert rows[topup["id"]]["package_ids"] == [plan["id"]], rows[topup["id"]]
+        assert rows[plan["id"]]["package_ids"] == [], rows[plan["id"]]
+
+        # -- editing the top-up keeps it tier-less
+        await update(topup["id"], _pkg_payload(name="+10GB", tier_id=None, effect="traffic_only",
+                                               traffic_limit_bytes=10 * 1073741824,
+                                               duration_days=0, package_ids=[]), admin)
+        row = db.pkgs[topup["id"]]
+        assert row["tier_id"] is None and row["name"] == "+10GB", row
+        assert not db.topup_pkgs.get(topup["id"]), db.topup_pkgs
+    finally:
+        for name in ("web", "web.backend", "web.backend.core", "web.backend.core.plugin_api"):
+            sys.modules.pop(name, None)
+    print("PACKAGE API FLOW PASSED")
+
+
+def test_package_api_flow():
+    asyncio.run(_package_api_flow())
 
 
 async def _topup_link_flow():
@@ -4746,6 +4883,7 @@ if __name__ == "__main__":
     test_trial_fraction_flow()
     test_plan_match_trial_flow()
     test_lang_default_flow()
+    test_package_api_flow()
     test_topup_link_flow()
     test_referral_cards_flow()
     test_tier_squad_flow()

@@ -464,7 +464,10 @@ window.rwaPluginUI['pershop'] = {
         squadOpts(t.squad_uuid).then((h) => { const w = el.querySelector('#m_squadwrap'); if (w) w.innerHTML = h; });
       };
       const GB = 1073741824;
-      const tierName = (tiers, p) => (tiers.find((x) => x.id === p.tier_id) || {}).name || ('tier ' + p.tier_id);
+      const tierName = (tiers, p) => {
+        if (!p || !p.tier_id) return 'no tier';
+        return (tiers.find((x) => x.id === p.tier_id) || {}).name || ('tier ' + p.tier_id);
+      };
       const pkgBadges = (p, tiers) => {
         const tn = tierName(tiers, p);
         return '<span class="' + pillFor('pending') + '">' + esc(tn) + '</span> '
@@ -473,7 +476,6 @@ window.rwaPluginUI['pershop'] = {
           + (p.active ? '' : ' · off') + '</span>';
       };
       const topupBadges = (p, tiers, plans) => {
-        const tn = tierName(tiers, p);
         const what = p.effect === 'traffic_only'
           ? ('+' + (p.traffic_limit_bytes ? (p.traffic_limit_bytes / GB) + 'GB' : '0GB'))
           : ('+' + (Number(p.duration_days) || 0) + 'd');
@@ -481,8 +483,7 @@ window.rwaPluginUI['pershop'] = {
           .map((id) => ((plans || []).find((x) => x.id === Number(id)) || {}).name)
           .filter(Boolean);
         const scoped = bound.length ? (' · for ' + esc(bound.join(', '))) : ' · for all plans';
-        return '<span class="' + pillFor('pending') + '">' + esc(tn) + '</span> '
-          + '<span>' + esc(p.name) + ' · ' + what + ' · ' + fmtU(p.price_units) + scoped
+        return '<span>' + esc(p.name) + ' · ' + what + ' · ' + fmtU(p.price_units) + scoped
           + (p.active ? '' : ' · off') + '</span>';
       };
       const hwidFields = (p) => {
