@@ -347,8 +347,10 @@ async def _send_test_offer(ctx, shop, tg, sender, edit=None) -> None:
                     kb(_back_row(shop)))
         return
     terms = await test_terms(ctx, shop)
+    # 0.25 -> "0.25", 1.0 -> "1", 1.5 -> "1.5"
+    gb_txt = ("%g" % float(terms["gb"] or 0))
     await _show(
-        ctx, shop, tg, sender, edit, L(shop, "test_confirm", days=terms["days"], gb=terms["gb"]),
+        ctx, shop, tg, sender, edit, L(shop, "test_confirm", days=terms["days"], gb=gb_txt),
         kb([[{"text": L(shop, "test_confirm_btn"), "callback_data": "testconfirm"}]]
            + _back_row(shop)))
 
@@ -858,13 +860,16 @@ async def _subs_state(ctx, shop, sub) -> dict:
             " ORDER BY price_units, id", shop["id"])
     except Exception:
         offers = []
+    from rwa_plugin_pershop.service import topup_package_map, topup_visible
+
+    links = await topup_package_map(ctx, shop["id"])
+    sub_pkg_id = (st.get("pkg") or {}).get("id")
     for o in offers or []:
         o = dict(o)
-        # Package-scoped top-ups (like hwid limits): an offer bound to one
-        # tier shows only for subs matched to that tier's plan.
-        scope = o.get("scope_tier_id")
+        # A top-up shows for the packages it is bound to; without links the
+        # legacy tier scope applies; without that it shows for everyone.
         tier = (st["pkg"] or {}).get("tier_id")
-        if scope is not None and (tier is None or int(scope) != int(tier)):
+        if not topup_visible(o, links, sub_pkg_id, tier):
             continue
         if o.get("effect") == "time_only":
             st["topups_time"].append(o)
@@ -956,7 +961,7 @@ async def _send_sub_detail(ctx, shop, tg, sender, sub, edit=None) -> None:
         pass
     dot = "🟢" if st["status"] == "ACTIVE" else "🔴"
     if sub.get("is_test"):
-        plan = "trial"
+        plan = L(shop, "trial_plan")
     else:
         plan = st["plan"] or "—"
     sub_url = L(shop, "url_fallback")
@@ -1373,7 +1378,7 @@ async def _maybe_scam_warn(ctx, shop, tg, buyer_id, buyer_un) -> None:
         try:
             await ctx.db.execute(
                 """INSERT INTO plugin_pershop_buyers(shop_id,tg_id,lang,scam_noted_at)
-                   VALUES($1,$2,'en',NOW())
+                   VALUES($1,$2,NULL,NOW())
                    ON CONFLICT(shop_id,tg_id) DO UPDATE SET scam_noted_at=NOW()""",
                 shop["id"], buyer_id)
         except Exception:
@@ -2199,7 +2204,7 @@ async def _load_draft(ctx, shop, sender):
 async def _send_topup_picker(ctx, shop, tg, sender, sub, effect, edit=None) -> None:
     """Offer list for one top-up kind (+traffic / +days) + Back to detail."""
     from rwa_plugin_pershop.lang import L
-    from rwa_plugin_pershop.service import format_price
+    from rwa_plugin_pershop.service import format_price, topup_package_map, topup_visible
     from rwa_plugin_pershop.telegram import kb
 
     offers = await ctx.db.fetch(
@@ -2213,9 +2218,9 @@ async def _send_topup_picker(ctx, shop, tg, sender, sub, effect, edit=None) -> N
         except Exception:
             cur = None
         tier = (cur or {}).get("tier_id")
+    links = await topup_package_map(ctx, shop["id"])
     offers = [dict(o) for o in offers or []
-              if o.get("scope_tier_id") is None
-              or (tier is not None and int(o["scope_tier_id"]) == int(tier))]
+              if topup_visible(dict(o), links, sub.get("package_id"), tier)]
     if not offers:
         await _send_sub_detail(ctx, shop, tg, sender, sub, edit=edit)
         return

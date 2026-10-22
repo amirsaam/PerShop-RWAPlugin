@@ -57,6 +57,7 @@ class FakeDB:
         self.bcs = {}
         self.promos = {}  # id -> promo row
         self.promo_uses = set()  # (promo_id, buyer_tg_id)
+        self.topup_pkgs = {}  # topup_id -> {package_id, ...} (top-up links)
         self.events = []  # activity-feed rows
         self.versions = {"pershop_001"}  # fake alembic_version rows
         self.dropped = False
@@ -102,6 +103,9 @@ class FakeDB:
         if "FROM plugin_pershop_subs WHERE shop_id" in q and "package_id IS NULL" in q:
             return [s for s in self.subs.values()
                     if s["shop_id"] == a[0] and not s.get("package_id") and not s.get("is_test")]
+        if "FROM plugin_pershop_subs WHERE shop_id" in q and "is_test,FALSE)=TRUE" in q:
+            return [s for s in self.subs.values()
+                    if s["shop_id"] == a[0] and s.get("is_test")]
         if "FROM plugin_pershop_subs WHERE shop_id" in q and "user_uuid" in q:
             return [s for s in self.subs.values() if s["shop_id"] == a[0] and s["user_uuid"] == a[1]]
         if "FROM plugin_pershop_subs WHERE shop_id" in q and "is_test=TRUE" in q:
@@ -124,6 +128,19 @@ class FakeDB:
             return out
         if "SELECT username FROM plugin_pershop_subs" in q:
             return [{"username": s["username"]} for s in self.subs.values() if s["shop_id"] == a[0]]
+        if "created_by_admin_id IS NOT DISTINCT FROM" in q:
+            # plan-matching orphans: panel users of this owner with no subs row
+            out = []
+            for u in self.users.values():
+                if u.get("created_by_admin_id") != a[0]:
+                    continue
+                if any(s["shop_id"] == a[1] and s["user_uuid"] == u.get("uuid")
+                       for s in self.subs.values()):
+                    continue
+                out.append({"uuid": u.get("uuid"), "username": u.get("username"),
+                            "expire_at": u.get("expire_at"),
+                            "traffic_limit_bytes": u.get("traffic_limit_bytes")})
+            return out
         if "SELECT username FROM users" in q:
             return [{"username": u["username"]} for u in self.users.values()]
         if "FROM users WHERE uuid" in q:
@@ -248,7 +265,8 @@ class FakeDB:
                 self.subs[nid] = {"id": nid, "shop_id": a[0], "buyer_tg_id": None, "user_uuid": a[1],
                                   "username": a[2], "expire_at": a[3], "traffic_limit_bytes": a[4],
                                   "package_id": a[5],
-                                  "is_test": False, "is_linked": False, "cancelled": False,
+                                  "is_test": bool(a[6]) if len(a) > 6 else False,
+                                  "is_linked": False, "cancelled": False,
                                   "notified_80": False, "notified_72h": False, "notified_expired": False}
             else:  # external admin api-create: ($1..$7, buyer at $2)
                 self.subs[nid] = {"id": nid, "shop_id": a[0], "buyer_tg_id": a[1], "user_uuid": a[2],
@@ -352,6 +370,13 @@ class FakeDB:
         if "FROM plugin_pershop_promos p" in q and "LEFT JOIN" in q:
             return [dict(p, uses=sum(1 for pid, _ in self.promo_uses if pid == pid_))
                     for pid_, p in self.promos.items() if p["shop_id"] == a[0]]
+        if "FROM plugin_pershop_topup_packages" in q:
+            out = []
+            for topup_id, pids in self.topup_pkgs.items():
+                for pid in pids:
+                    if topup_id in self.pkgs and self.pkgs[topup_id]["shop_id"] == a[0]:
+                        out.append({"topup_id": topup_id, "package_id": pid})
+            return out
         if "FROM plugin_pershop_promos WHERE id" in q:
             p = self.promos.get(a[0])
             return [p] if p and p.get("shop_id") == a[1] else []
@@ -544,7 +569,11 @@ class FakeDB:
                               "notified_80": False, "notified_72h": False, "notified_expired": False}
             return
         if "UPDATE plugin_pershop_subs SET package_id" in q:
-            self.subs[a[1]]["package_id"] = a[0]
+            if len(a) > 2:  # package + is_test + id
+                self.subs[a[2]]["package_id"] = a[0]
+                self.subs[a[2]]["is_test"] = bool(a[1])
+            else:
+                self.subs[a[1]]["package_id"] = a[0]
             return
         if "UPDATE plugin_pershop_subs SET buyer_tg_id" in q:
             self.subs[a[1]]["buyer_tg_id"] = a[0]
@@ -608,12 +637,17 @@ class FakeDB:
             return
         if "last_mid" in q and "plugin_pershop_buyers" in q:
             self.last_mids[(a[0], a[1])] = a[2]
+            # The real row exists too (lang NULL = "no explicit choice")
+            self.buyers.setdefault((a[0], a[1]), None)
             return
         if "scam_noted_at" in q and "plugin_pershop_buyers" in q:
             self.scam_noted.add((a[0], a[1]))
             return
         if "INSERT INTO plugin_pershop_buyers" in q:
-            self.buyers[(a[0], a[1])] = a[2]
+            if "lang" in q:  # (shop_id,tg_id,lang) — an explicit choice
+                self.buyers[(a[0], a[1])] = a[2]
+            else:  # (shop_id,tg_id,last_mid) — message tracking, no language
+                self.buyers.setdefault((a[0], a[1]), None)
             return
         if "UPDATE plugin_pershop_broadcasts SET pos=$1" in q:
             b = self.bcs[a[4]]
@@ -634,6 +668,9 @@ class FakeDB:
             return
         if "UPDATE plugin_pershop_shops SET bot_username=$1 WHERE id=$2" in q:
             self.shops[a[1]]["bot_username"] = a[0]
+            return
+        if q.strip().startswith("DELETE FROM plugin_pershop_topup_packages"):
+            self.topup_pkgs.pop(a[0], None)
             return
         if q.strip().startswith("DELETE FROM plugin_pershop_"):
             table = q.strip().split()[2]
@@ -730,6 +767,12 @@ class FakeDB:
                 if s["shop_id"] == a[2] and s.get("user_uuid") == a[3]:
                     s["expire_at"] = a[0]
                     s["traffic_limit_bytes"] = a[1]
+            return
+        if "INSERT INTO plugin_pershop_topup_packages" in q:
+            self.topup_pkgs.setdefault(a[0], set()).add(a[1])
+            return
+        if "DELETE FROM plugin_pershop_topup_packages" in q:
+            self.topup_pkgs.pop(a[0], None)
             return
         if "INSERT INTO plugin_pershop_promos" in q:
             pid = self._next("promo")
@@ -1922,6 +1965,307 @@ async def _menu_flow():
 
 def test_menu_flow():
     asyncio.run(_menu_flow())
+
+
+async def _trial_fraction_flow():
+    """Trial traffic may be fractional: 0.25 GB = 250 MB (decimal GB, like
+    every traffic number the plugin shows)."""
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.service as svc
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    await ctx.settings.set("test_duration_days", 1)
+    await ctx.settings.set("test_traffic_gb", 0.25)
+    sid, _pid = make_shop(db)
+    shop = db.shops[sid]
+    shop.update({"test_enabled": True, "bot_username": "vipshopbot"})
+    panel = FakePanel()
+    svc._panel_client = lambda: panel
+    FakeTg.instances.clear()
+
+    # the terms keep the fraction
+    terms = await svc.test_terms(ctx, shop)
+    assert terms["gb"] == 0.25, terms
+
+    # the offer shows 0.25 GB
+    await handle_update(ctx, shop, {"update_id": 210, "message": {"message_id": 1,
+        "from": {"id": 111, "username": "alice"}, "chat": {"id": 111}, "text": "/start"}})
+    await handle_update(ctx, shop, {"update_id": 211, "message": {"message_id": 2,
+        "from": {"id": 111, "username": "alice"}, "chat": {"id": 111},
+        "text": "🎁 Test Subscription"}})
+    texts = [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+             if m in ("sendMessage", "editMessageText")]
+    assert any("0.25 GB" in t for t in texts), texts
+
+    # the trial account is created with 250 MB
+    await handle_update(ctx, shop, {"update_id": 212, "callback_query": {
+        "id": "t1", "from": {"id": 111, "username": "alice"}, "data": "testconfirm"}})
+    assert panel.created, panel.created
+    assert panel.created[0]["traffic_limit_bytes"] == 250_000_000, panel.created[0]
+    print("TRIAL FRACTION FLOW PASSED")
+
+
+def test_trial_fraction_flow():
+    asyncio.run(_trial_fraction_flow())
+
+
+async def _plan_match_trial_flow():
+    """Plan matching: the owner can bind a lost test user as a trial account
+    (plugin rows gone, panel user still there), and the Persian sub card
+    names the trial plan in Persian."""
+    import sys
+    import types
+
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.service as svc
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    # the panel's admin-account lookup: owner admin1 = id 7, superadmin
+    for name in ("web", "web.backend", "web.backend.core", "web.backend.core.admin_accounts"):
+        sys.modules[name] = types.ModuleType(name)
+
+    async def _acct(_username):
+        return {"id": 7, "role_name": "superadmin", "username": "admin1"}
+
+    sys.modules["web.backend.core.admin_accounts"].get_admin_account_by_username = _acct
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    try:
+        db = FakeDB()
+        ctx = FakeCtx(db)
+        sid, pid = make_shop(db)
+        shop = db.shops[sid]
+        shop.update({"test_enabled": True, "bot_username": "vipshopbot"})
+        now = datetime.now(timezone.utc)
+        # the trial user whose shop row was lost
+        db.users["uu-test"] = {"uuid": "uu-test", "username": "vip-Test-1",
+                               "expire_at": now + timedelta(days=1),
+                               "traffic_limit_bytes": 250_000_000,
+                               "used_traffic_bytes": 0, "created_by_admin_id": 7}
+
+        # -- the pool shows the orphan
+        pool = await svc.unmapped_users(ctx, shop)
+        assert [o["username"] for o in pool["orphans"]] == ["vip-Test-1"], pool
+
+        # -- bind it as a trial account
+        res = await svc.assign_plan(ctx, shop, "uu-test", 0, is_test=True)
+        assert res["created"] and res["is_test"] is True, res
+        sub = db.subs[res["sub_id"]]
+        assert sub["is_test"] is True and sub["package_id"] is None, sub
+
+        # -- it is a trial now: not an orphan, not "unplanned"
+        pool = await svc.unmapped_users(ctx, shop)
+        assert not pool["orphans"], pool
+        assert not pool["unplanned"], pool
+        assert [t["username"] for t in pool["trials"]] == ["vip-Test-1"], pool
+
+        # -- the Persian sub card names the plan in Persian
+        db.buyers[(sid, 111)] = "fa"
+        sub["buyer_tg_id"] = 111
+        FakeTg.instances.clear()
+        await handle_update(ctx, shop, {"update_id": 320, "callback_query": {
+            "id": "pm1", "from": {"id": 111, "username": "alice"}, "data": "my_subs"}})
+        await handle_update(ctx, shop, {"update_id": 321, "callback_query": {
+            "id": "pm2", "from": {"id": 111, "username": "alice"},
+            "data": f"sub:{sub['id']}"}})
+        texts = [p["text"] for inst in FakeTg.instances for m, p in inst.sent
+                 if m in ("sendMessage", "editMessageText") and p["chat_id"] == 111]
+        assert texts, "no sub card"
+        card = texts[-1]
+        assert "آزمایشی" in card, card
+        assert "trial" not in card, card
+        assert "250.0 MB" in card, card
+
+        # -- a real plan replaces the trial
+        res = await svc.assign_plan(ctx, shop, "uu-test", pid)
+        assert res["is_test"] is False, res
+        sub = db.subs[res["sub_id"]]
+        assert sub["is_test"] is False and sub["package_id"] == pid, sub
+    finally:
+        for name in ("web", "web.backend", "web.backend.core",
+                     "web.backend.core.admin_accounts"):
+            sys.modules.pop(name, None)
+    print("PLAN MATCH TRIAL FLOW PASSED")
+
+
+def test_plan_match_trial_flow():
+    asyncio.run(_plan_match_trial_flow())
+
+
+async def _lang_default_flow():
+    """The shop's language speaks for every buyer until they pick one.
+
+    The bot creates a buyer row for every buyer it messages (message
+    tracking). That row used to default to lang='en', which silently
+    overrode the shop's language from the buyer's second screen on.
+    """
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _pid = make_shop(db)
+    shop = db.shops[sid]
+    shop["lang"] = "fa"
+    shop["bot_username"] = "vipshopbot"
+    FakeTg.instances.clear()
+
+    async def cb(data, cid, uid=111, un="alice"):
+        await handle_update(ctx, shop, {"update_id": 950, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    async def msg(text, uid=111, un="alice"):
+        await handle_update(ctx, shop, {"update_id": 951, "message": {
+            "message_id": 9, "from": {"id": uid, "username": un},
+            "chat": {"id": uid}, "text": text}})
+
+    def texts():
+        return [p.get("text") for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == 111]
+
+    # -- first screen: the shop language
+    await msg("/start")
+    assert "منوی اصلی" in texts()[-1], texts()[-1]
+    # the bot now tracks this buyer's last message -> a buyer row exists
+    assert (sid, 111) in db.buyers, db.buyers
+    assert db.buyers[(sid, 111)] is None, db.buyers
+
+    # -- second screen: still the shop language (the bug)
+    await cb("pershop:buy", "l1")
+    assert "یکی از بسته‌ها" in texts()[-1], texts()[-1]
+
+    # -- the buyer picks English -> English wins
+    await cb("account", "l2")
+    await cb("langpick:en", "l3")
+    assert db.buyers[(sid, 111)] == "en", db.buyers
+    await cb("menu", "l4")
+    assert "Main menu" in texts()[-1], texts()[-1]
+
+    # -- and back to Persian
+    await cb("account", "l5")
+    await cb("langpick:fa", "l6")
+    assert db.buyers[(sid, 111)] == "fa", db.buyers
+    await cb("menu", "l7")
+    assert "منوی اصلی" in texts()[-1], texts()[-1]
+    print("LANG DEFAULT FLOW PASSED")
+
+
+def test_lang_default_flow():
+    asyncio.run(_lang_default_flow())
+
+
+async def _topup_link_flow():
+    """A top-up offer is tied to packages: it shows for the plans it is
+    bound to, and for everyone when nothing is picked."""
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.service as svc
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.routes_telegram import handle_update
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _pid = make_shop(db)
+    shop = db.shops[sid]
+    GB = 1073741824
+    now = datetime.now(timezone.utc)
+
+    def _plan(pid, name):
+        db.pkgs[pid] = {"id": pid, "shop_id": sid, "tier_id": None, "name": name,
+                        "traffic_limit_bytes": 10 * GB, "duration_days": 30,
+                        "price_text": "", "price_units": 1.0, "squad_uuid": None,
+                        "active": True, "effect": "full", "hwid_mode": "default"}
+
+    def _topup(pid, name, effect="traffic_only", days=0, traffic=5 * GB):
+        db.pkgs[pid] = {"id": pid, "shop_id": sid, "tier_id": None, "name": name,
+                        "traffic_limit_bytes": traffic, "duration_days": days,
+                        "price_text": "", "price_units": 0.5, "squad_uuid": None,
+                        "active": True, "effect": effect, "hwid_mode": "default"}
+
+    pa, pb = db._next("pkg"), db._next("pkg")
+    _plan(pa, "Plan A")
+    _plan(pb, "Plan B")
+    ta, tall = db._next("pkg"), db._next("pkg")
+    _topup(ta, "+5GB for A")
+    _topup(tall, "+5GB for everyone")
+
+    # the first top-up is bound to Plan A only
+    await svc.set_topup_packages(ctx, sid, ta, [pa])
+    assert db.topup_pkgs[ta] == {pa}, db.topup_pkgs
+
+    def _sub(sid_, uuid, username, pkg_id, tg):
+        db.subs[sid_] = {"id": sid_, "shop_id": sid, "buyer_tg_id": tg, "user_uuid": uuid,
+                         "username": username, "package_id": pkg_id,
+                         "expire_at": now + timedelta(days=30), "traffic_limit_bytes": 10 * GB,
+                         "is_test": False, "is_linked": True, "cancelled": False,
+                         "notified_80": False, "notified_72h": False, "notified_expired": False,
+                         "notified_out": False}
+        db.users[uuid] = {"uuid": uuid, "username": username, "status": "ACTIVE",
+                          "expire_at": now + timedelta(days=30), "traffic_limit_bytes": 10 * GB,
+                          "used_traffic_bytes": 0, "created_by_admin_id": 42}
+
+    _sub(1, "uu-a", "vip-a", pa, 111)
+    _sub(2, "uu-b", "vip-b", pb, 222)
+    FakeTg.instances.clear()
+
+    async def cb(data, cid, uid=111, un="alice"):
+        await handle_update(ctx, shop, {"update_id": 900, "callback_query": {
+            "id": cid, "from": {"id": uid, "username": un}, "data": data}})
+
+    def rm(uid=111):
+        return [str(p["rm"]) for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "editMessageText") and p["chat_id"] == uid and p.get("rm")]
+
+    # -- sub on Plan A: both offers apply (bound + unbound)
+    await cb("sub:1", "t1")
+    assert any("addtraffic:1" in r for r in rm()), rm()
+    await cb("addtraffic:1", "t2")
+    r = rm()
+    assert any("topick:1:" + str(ta) in x for x in r), r
+    assert any("topick:1:" + str(tall) in x for x in r), r
+
+    # -- sub on Plan B: only the unbound offer applies
+    FakeTg.instances.clear()
+    await cb("sub:2", "t3", uid=222, un="bob")
+    await cb("addtraffic:2", "t4", uid=222, un="bob")
+    r = rm(222)
+    assert not any("topick:2:" + str(ta) in x for x in r), r
+    assert any("topick:2:" + str(tall) in x for x in r), r
+
+    # -- bind the second offer to Plan A as well -> Plan B has no offers
+    await svc.set_topup_packages(ctx, sid, tall, [pa])
+    FakeTg.instances.clear()
+    await cb("sub:2", "t5", uid=222, un="bob")
+    r = rm(222)
+    assert not any("addtraffic:2" in x for x in r), r
+    print("TOPUP LINK FLOW PASSED")
+
+
+def test_topup_link_flow():
+    asyncio.run(_topup_link_flow())
 
 
 async def _referral_cards_flow():
@@ -4399,6 +4743,10 @@ if __name__ == "__main__":
     test_internal_tiers_flow()
     test_effects_flow()
     test_menu_flow()
+    test_trial_fraction_flow()
+    test_plan_match_trial_flow()
+    test_lang_default_flow()
+    test_topup_link_flow()
     test_referral_cards_flow()
     test_tier_squad_flow()
     test_link_flow()

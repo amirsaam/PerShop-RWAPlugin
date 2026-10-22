@@ -43,7 +43,8 @@ class PluginSettingsIn(BaseModel):
     #   Label | https://example.com
     tutorial_buttons: str = ""
     test_duration_days: int = Field(default=1, ge=1, le=365)
-    test_traffic_gb: int = Field(default=1, ge=0, le=100000)
+    # Trial traffic in GB — fractions allowed (0.25 = 250 MB). 0 = unlimited.
+    test_traffic_gb: float = Field(default=1, ge=0, le=100000)
     test_squad_uuid: str = ""
     test_hwid: int | None = Field(default=None, ge=0, le=100000)
     public_base_url: str = ""
@@ -79,6 +80,9 @@ class PkgIn(BaseModel):
     # Scope for top-up offers: NULL = offered for every tier's subs,
     # else only for subs matched to that tier's plan.
     scope_tier_id: int | None = None
+    # Top-up only: the packages this offer applies to. Empty = every
+    # subscriber (package_ids wins over scope_tier_id).
+    package_ids: list[int] = Field(default_factory=list)
     active: bool = True
 
 
@@ -147,7 +151,10 @@ class PubUserUpdate(BaseModel):
 
 class AssignIn(BaseModel):
     user_uuid: str = Field(min_length=1)
-    package_id: int
+    package_id: int = 0
+    # Bind the user as a trial account (no plan) — for test users whose shop
+    # row was lost. package_id is ignored then.
+    is_test: bool = False
 
 
 def build_admin_router(ctx):
@@ -458,7 +465,15 @@ def build_admin_router(ctx):
         if not shop:
             return {"packages": []}
         rows = await ctx.db.fetch("SELECT * FROM plugin_pershop_packages WHERE shop_id=$1 ORDER BY sort, id", shop["id"])
-        return {"packages": [dict(r) for r in rows]}
+        from rwa_plugin_pershop.service import topup_package_map
+
+        links = await topup_package_map(ctx, shop["id"])
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["package_ids"] = links.get(d.get("id")) or []
+            out.append(d)
+        return {"packages": out}
 
     @router.post("/packages")
     async def pkg_create(payload: PkgIn, _a: AdminUser = Depends(require_permission("pershop", "edit"))):
@@ -466,12 +481,13 @@ def build_admin_router(ctx):
         shop = await shop_for_owner(ctx, me)
         if not shop:
             raise HTTPException(400, "create shop first")
-        if not payload.tier_id:
+        if not payload.tier_id and payload.effect == "full":
             raise HTTPException(400, "tier required")
-        tier = await ctx.db.fetchrow(
-            "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", payload.tier_id, shop["id"])
-        if not tier:
-            raise HTTPException(400, "tier not found")
+        if payload.tier_id:
+            tier = await ctx.db.fetchrow(
+                "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", payload.tier_id, shop["id"])
+            if not tier:
+                raise HTTPException(400, "tier not found")
         _check_hwid(payload)
         if payload.scope_tier_id:
             scope = await ctx.db.fetchrow(
@@ -490,6 +506,10 @@ def build_admin_router(ctx):
             payload.hwid_free, payload.hwid_percent, payload.hwid_fixed, payload.traffic_reset,
             payload.effect, payload.scope_tier_id, payload.sort,
         )
+        if payload.effect != "full":
+            from rwa_plugin_pershop.service import set_topup_packages
+
+            await set_topup_packages(ctx, shop["id"], row["id"], payload.package_ids)
         return {"id": row["id"]}
 
     @router.put("/packages/{pkg_id}")
@@ -498,12 +518,13 @@ def build_admin_router(ctx):
         shop = await shop_for_owner(ctx, me)
         if not shop:
             raise HTTPException(400, "no shop")
-        if not payload.tier_id:
+        if not payload.tier_id and payload.effect == "full":
             raise HTTPException(400, "tier required")
-        tier = await ctx.db.fetchrow(
-            "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", payload.tier_id, shop["id"])
-        if not tier:
-            raise HTTPException(400, "tier not found")
+        if payload.tier_id:
+            tier = await ctx.db.fetchrow(
+                "SELECT * FROM plugin_pershop_tiers WHERE id=$1 AND shop_id=$2", payload.tier_id, shop["id"])
+            if not tier:
+                raise HTTPException(400, "tier not found")
         _check_hwid(payload)
         if payload.scope_tier_id:
             scope = await ctx.db.fetchrow(
@@ -523,6 +544,10 @@ def build_admin_router(ctx):
             payload.hwid_percent, payload.hwid_fixed, payload.traffic_reset, payload.effect,
             payload.scope_tier_id, payload.sort, pkg_id, shop["id"],
         )
+        if payload.effect != "full":
+            from rwa_plugin_pershop.service import set_topup_packages
+
+            await set_topup_packages(ctx, shop["id"], pkg_id, payload.package_ids)
         return {"ok": True}
 
     @router.delete("/packages/{pkg_id}")
@@ -554,17 +579,20 @@ def build_admin_router(ctx):
 
     @router.post("/subs/assign-plan")
     async def subs_assign(payload: AssignIn, _a: AdminUser = Depends(require_permission("pershop", "edit"))):
-        """Owner matches one of their users to a shop package (quick-renew plan)."""
+        """Owner matches one of their users to a shop package (quick-renew
+        plan) — or, with is_test, to a trial account."""
         me = owner(_a)
         shop = await shop_for_owner(ctx, me)
         if not shop:
             raise HTTPException(400, "no shop")
         try:
-            res = await assign_plan(ctx, shop, payload.user_uuid.strip(), payload.package_id)
+            res = await assign_plan(ctx, shop, payload.user_uuid.strip(),
+                                    payload.package_id, is_test=payload.is_test)
         except ValueError as e:
             raise HTTPException(400, str(e))
         try:  # Buyer opted into renewal: tell them the moment it's unlocked.
-            if res.get("buyer_tg_id"):
+            # A trial binding is not a plan — no unlock message.
+            if res.get("buyer_tg_id") and not res.get("is_test"):
                 from rwa_plugin_pershop.crypto import decrypt_token
                 from rwa_plugin_pershop.lang import L
                 from rwa_plugin_pershop.telegram import TgClient
@@ -1170,6 +1198,10 @@ def build_admin_router(ctx):
         tbuttons = await ctx.settings.get("tutorial_buttons", default="")
         test_days = await ctx.settings.get("test_duration_days", default=1)
         test_gb = await ctx.settings.get("test_traffic_gb", default=1)
+        try:
+            test_gb = float(test_gb)
+        except (TypeError, ValueError):
+            test_gb = 1.0
         test_squad = await ctx.settings.get("test_squad_uuid", default="")
         test_hwid = await ctx.settings.get("test_hwid", default=None)
         base = await ctx.settings.get("public_base_url", default="")

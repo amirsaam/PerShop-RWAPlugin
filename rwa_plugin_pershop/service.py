@@ -673,10 +673,13 @@ async def unmapped_users(ctx, shop: dict) -> dict:
     """Owner-side plan matching pool: panel users created by this shop's
     owner that have no subs row yet (orphans), plus subs rows with no plan
     (unplanned: linked or legacy subs). One query via IS NOT DISTINCT FROM
-    covers both attributed and unattributed creators."""
+    covers both attributed and unattributed creators.
+
+    Trial accounts are listed separately: they have no plan by design, but
+    the owner may still want to turn one into a real subscription."""
     owner_id = await _owner_account_id(ctx, shop.get("owner_admin"))
     if owner_id is None and not await _owner_is_superadmin(ctx, shop):
-        return {"orphans": [], "unplanned": []}  # fail closed
+        return {"orphans": [], "unplanned": [], "trials": []}  # fail closed
     orphans = await ctx.db.fetch(
         """SELECT uuid, username, expire_at, traffic_limit_bytes FROM users
            WHERE created_by_admin_id IS NOT DISTINCT FROM $1 AND NOT EXISTS
@@ -688,20 +691,36 @@ async def unmapped_users(ctx, shop: dict) -> dict:
         " WHERE shop_id=$1 AND package_id IS NULL AND COALESCE(is_test,FALSE)=FALSE"
         " ORDER BY id",
         shop["id"])
+    trials = await ctx.db.fetch(
+        "SELECT id, user_uuid, username, buyer_tg_id FROM plugin_pershop_subs"
+        " WHERE shop_id=$1 AND COALESCE(is_test,FALSE)=TRUE"
+        " ORDER BY id",
+        shop["id"])
     return {"orphans": [dict(r) for r in orphans],
-            "unplanned": [dict(r) for r in unplanned]}
+            "unplanned": [dict(r) for r in unplanned],
+            "trials": [dict(r) for r in trials]}
 
 
-async def assign_plan(ctx, shop: dict, user_uuid: str, package_id: int) -> dict:
-    """Owner matches a user they created to a shop package. Same attribution
-    rule as linking: creator match, or unattributed user + superadmin owner.
-    Creates the subs row (buyer attached later on link) or plans an existing one."""
-    pkg = await ctx.db.fetchrow(
-        "SELECT * FROM plugin_pershop_packages WHERE id=$1 AND shop_id=$2", package_id, shop["id"])
-    if not pkg:
-        raise ValueError("package not found")
-    if pkg_effect(pkg) != "full":
-        raise ValueError("only full plans can be matched (top-ups are not plans)")
+async def assign_plan(ctx, shop: dict, user_uuid: str, package_id: int,
+                      is_test: bool = False) -> dict:
+    """Owner matches a user they created to a shop package — or, with
+    ``is_test``, to a trial account. Same attribution rule as linking: creator
+    match, or unattributed user + superadmin owner. Creates the subs row
+    (buyer attached later on link) or plans an existing one.
+
+    ``is_test`` binds the user as a trial account: no plan, flagged
+    ``is_test`` — the way to re-attach a test user whose shop row was lost.
+    """
+    if is_test:
+        pkg = None
+    else:
+        pkg = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_packages WHERE id=$1 AND shop_id=$2",
+            package_id, shop["id"])
+        if not pkg:
+            raise ValueError("package not found")
+        if pkg_effect(pkg) != "full":
+            raise ValueError("only full plans can be matched (top-ups are not plans)")
     prow = await ctx.db.fetchrow(
         "SELECT uuid, username, expire_at, traffic_limit_bytes, created_by_admin_id FROM users WHERE uuid=$1",
         user_uuid)
@@ -719,17 +738,19 @@ async def assign_plan(ctx, shop: dict, user_uuid: str, package_id: int) -> dict:
         shop["id"], user_uuid)
     if ex:
         await ctx.db.execute(
-            "UPDATE plugin_pershop_subs SET package_id=$1, updated_at=NOW() WHERE id=$2",
-            package_id, ex["id"])
+            """UPDATE plugin_pershop_subs SET package_id=$1, is_test=$2, updated_at=NOW()
+               WHERE id=$3""",
+            None if is_test else package_id, bool(is_test), ex["id"])
         return {"sub_id": ex["id"], "username": prow["username"], "created": False,
+                "is_test": bool(is_test),
                 "buyer_tg_id": ex.get("buyer_tg_id") if isinstance(ex, dict) else ex["buyer_tg_id"]}
     row = await ctx.db.fetchrow(
         """INSERT INTO plugin_pershop_subs(shop_id,buyer_tg_id,user_uuid,username,expire_at,
-           traffic_limit_bytes,package_id) VALUES($1,NULL,$2,$3,$4,$5,$6) RETURNING id""",
+           traffic_limit_bytes,package_id,is_test) VALUES($1,NULL,$2,$3,$4,$5,$6,$7) RETURNING id""",
         shop["id"], user_uuid, prow["username"], prow.get("expire_at"),
-        prow.get("traffic_limit_bytes"), package_id)
+        prow.get("traffic_limit_bytes"), None if is_test else package_id, bool(is_test))
     return {"sub_id": row["id"], "username": prow["username"], "created": True,
-            "buyer_tg_id": None}
+            "is_test": bool(is_test), "buyer_tg_id": None}
 
 
 def _units(value) -> float:
@@ -1140,7 +1161,8 @@ async def broadcast_audience(ctx, shop_id: int, target: str = "all") -> list[int
     parts never break the whole list."""
     ids: set[int] = set()
     if target == "buyers":
-        # Only people who actually opened the bot's language step.
+        # Everyone the bot ever messaged (a buyer row appears with the first
+        # screen — the language column is NULL unless the buyer picked one).
         try:
             for r in await ctx.db.fetch(
                     "SELECT DISTINCT tg_id FROM plugin_pershop_buyers WHERE shop_id=$1", shop_id):
@@ -1282,7 +1304,8 @@ async def buyer_detail(ctx, shop: dict, buyer_tg_id: int) -> dict:
             "SELECT tg_id, lang, credit_units FROM plugin_pershop_buyers"
             " WHERE shop_id=$1 AND tg_id=$2", shop["id"], tg)
         if b:
-            out["lang"] = b.get("lang")
+            # NULL = the buyer never picked a language -> the shop's one.
+            out["lang"] = b.get("lang") or shop.get("lang") or "en"
             out["credit_units"] = float(b.get("credit_units") or 0)
     except Exception:
         pass
@@ -1829,6 +1852,67 @@ async def approval_vars(ctx, shop: dict, order: dict, result: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Top-up ⇄ package links: which plans a top-up offer applies to.
+
+async def set_topup_packages(ctx, shop_id: int, topup_id: int,
+                              package_ids: list[int]) -> None:
+    """Bind a top-up to the packages it applies to (empty list = all subs)."""
+    try:
+        await ctx.db.execute(
+            "DELETE FROM plugin_pershop_topup_packages WHERE topup_id=$1", topup_id)
+        for pid in package_ids or []:
+            try:
+                pid = int(pid)
+            except (TypeError, ValueError):
+                continue
+            await ctx.db.execute(
+                """INSERT INTO plugin_pershop_topup_packages(topup_id, package_id)
+                   VALUES($1,$2) ON CONFLICT DO NOTHING""", topup_id, pid)
+    except Exception:
+        pass
+
+
+async def topup_package_map(ctx, shop_id: int) -> dict:
+    """{topup_id: [package_id, ...]} — the package links of a shop's top-ups."""
+    try:
+        rows = await ctx.db.fetch(
+            """SELECT t.topup_id, t.package_id FROM plugin_pershop_topup_packages t
+               JOIN plugin_pershop_packages p ON p.id = t.topup_id
+               WHERE p.shop_id=$1""", shop_id)
+    except Exception:
+        return {}
+    out: dict = {}
+    for r in rows or []:
+        out.setdefault(r["topup_id"], []).append(r["package_id"])
+    return out
+
+
+def topup_visible(offer: dict, links: dict, package_id, tier_id) -> bool:
+    """Is this top-up offer visible to a subscriber on `package_id`?
+
+    Package links win: a top-up bound to packages shows only for those
+    subs. Without links the legacy tier scope applies; without that the
+    offer is visible to everyone.
+    """
+    try:
+        bound = [int(x) for x in (links or {}).get(offer.get("id")) or []]
+    except (TypeError, ValueError):
+        bound = []
+    if bound:
+        try:
+            return package_id is not None and int(package_id) in bound
+        except (TypeError, ValueError):
+            return False
+    scope = offer.get("scope_tier_id")
+    if scope is not None:
+        try:
+            return tier_id is not None and int(scope) == int(tier_id)
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 def tutorial_link_rows(raw: str) -> list:
     """Inline-button rows for the buyer How-to-Use message.
 
@@ -1998,7 +2082,10 @@ async def shop_stats(ctx, shop: dict) -> dict:
 
 async def test_terms(ctx, shop: dict) -> dict:
     """Superadmin-configured test subscription size. Defaults: 1 day, 1 GB,
-    no squad (panel default), panel-default hwid limit."""
+    no squad (panel default), panel-default hwid limit.
+
+    Traffic is a float GB so a trial can be as small as 0.25 (250 MB).
+    """
     days = await ctx.settings.get("test_duration_days", default=1)
     gb = await ctx.settings.get("test_traffic_gb", default=1)
     try:
@@ -2006,9 +2093,9 @@ async def test_terms(ctx, shop: dict) -> dict:
     except (TypeError, ValueError):
         days = 1
     try:
-        gb = max(0, int(gb))
+        gb = max(0.0, float(gb))
     except (TypeError, ValueError):
-        gb = 1
+        gb = 1.0
     squad = (await ctx.settings.get("test_squad_uuid", default="") or "").strip()
     try:
         hwid = await ctx.settings.get("test_hwid", default=None)
@@ -2039,7 +2126,8 @@ async def claim_test_sub(ctx, shop: dict, buyer_tg_id: int, buyer_username: str)
     number = int(shop.get("test_counter") or 0) + 1
     username = f"{prefix}-Test-{number}"
     expire_at = datetime.now(timezone.utc) + timedelta(days=terms["days"])
-    traffic = terms["gb"] * 1024 * 1024 * 1024 if terms["gb"] else None
+    # Decimal GB, like every traffic number the plugin shows (0.25 GB = 250 MB).
+    traffic = int(round(terms["gb"] * 1000 * 1000 * 1000)) if terms["gb"] else None
     created = await panel_create_user(
         ctx, username=username, expire_at=expire_at,
         traffic_limit_bytes=traffic, telegram_id=buyer_tg_id,
@@ -2430,6 +2518,7 @@ async def shop_catalog(ctx, shop: dict) -> dict:
         tutorial = await ctx.settings.get("tutorial_text", default="") or ""
         test_days = await ctx.settings.get("test_duration_days", default=1) or 1
         test_gb = await ctx.settings.get("test_traffic_gb", default=1) or 0
+        test_gb = float(test_gb)
     except Exception:
         tutorial, test_days, test_gb = "", 1, 0
 

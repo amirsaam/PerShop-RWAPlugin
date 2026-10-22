@@ -414,7 +414,13 @@ window.rwaPluginUI['pershop'] = {
         + '<button id="addtier" class="' + BTN_S + '">+ Add tier</button></div>'
         + '<p class="' + HELP + ' mb-3">Buyer groups. Each tier puts sold accounts in one internal squad; each package belongs to exactly one tier.</p><div id="tiers" class="space-y-1.5"><i class="text-sm text-dark-300">loading…</i></div></div>'
         + '<div class="' + CARD + '"><div class="flex items-center justify-between mb-4"><h2 class="' + CARD_T + '">Packages</h2>'
-        + '<button id="addpkg" class="' + BTN_S + '">+ Add package</button></div><div id="pkgs" class="space-y-1.5"><i class="text-sm text-dark-300">loading…</i></div></div>'
+        + '<button id="addpkg" class="' + BTN_S + '">+ Add package</button></div>'
+        + '<p class="' + HELP + ' mb-3">Basic plans — a buyer subscribes with them (buy or renew). Top-ups live in their own card below.</p>'
+        + '<div id="pkgs" class="space-y-1.5"><i class="text-sm text-dark-300">loading…</i></div></div>'
+        + '<div class="' + CARD + '"><div class="flex items-center justify-between mb-4"><h2 class="' + CARD_T + '">Top-ups</h2>'
+        + '<button id="addtopup" class="' + BTN_S + '">+ Add top-up</button></div>'
+        + '<p class="' + HELP + ' mb-3">Extra-time (+days) and extra-traffic (+GB) offers. They only extend an existing subscription — they never create one.</p>'
+        + '<div id="topups" class="space-y-1.5"><i class="text-sm text-dark-300">loading…</i></div></div>'
         + '<div class="' + CARD + '"><div class="flex items-center justify-between mb-4"><h2 class="' + CARD_T + '">Plan matching</h2>'
         + '<button id="uload" class="' + BTN_M + '">Reload</button></div>'
         + '<p class="' + HELP + ' mb-2">Pre-existing panel users / linked subscriptions without a shop plan. "Match" links them to a package (they must pay their first order like everyone else).</p>'
@@ -457,13 +463,27 @@ window.rwaPluginUI['pershop'] = {
           }, isNew ? 'Add tier' : 'Save tier');
         squadOpts(t.squad_uuid).then((h) => { const w = el.querySelector('#m_squadwrap'); if (w) w.innerHTML = h; });
       };
-      const EFFLBL = {full: 'full plan', time_only: 'time top-up', traffic_only: 'traffic top-up'};
+      const GB = 1073741824;
+      const tierName = (tiers, p) => (tiers.find((x) => x.id === p.tier_id) || {}).name || ('tier ' + p.tier_id);
       const pkgBadges = (p, tiers) => {
-        const tn = (tiers.find((x) => x.id === p.tier_id) || {}).name || ('tier ' + p.tier_id);
+        const tn = tierName(tiers, p);
         return '<span class="' + pillFor('pending') + '">' + esc(tn) + '</span> '
           + '<span>' + esc(p.name) + ' · ' + (Number(p.duration_days) === 0 ? 'never expires' : p.duration_days + 'd') + ' · '
-          + (p.traffic_limit_bytes ? (p.traffic_limit_bytes / 1073741824) + 'GB' : 'unlimited') + ' · ' + fmtU(p.price_units)
-          + ' · ' + esc(EFFLBL[p.effect] || 'full plan') + (p.active ? '' : ' · off') + '</span>';
+          + (p.traffic_limit_bytes ? (p.traffic_limit_bytes / GB) + 'GB' : 'unlimited') + ' · ' + fmtU(p.price_units)
+          + (p.active ? '' : ' · off') + '</span>';
+      };
+      const topupBadges = (p, tiers, plans) => {
+        const tn = tierName(tiers, p);
+        const what = p.effect === 'traffic_only'
+          ? ('+' + (p.traffic_limit_bytes ? (p.traffic_limit_bytes / GB) + 'GB' : '0GB'))
+          : ('+' + (Number(p.duration_days) || 0) + 'd');
+        const bound = (p.package_ids || [])
+          .map((id) => ((plans || []).find((x) => x.id === Number(id)) || {}).name)
+          .filter(Boolean);
+        const scoped = bound.length ? (' · for ' + esc(bound.join(', '))) : ' · for all plans';
+        return '<span class="' + pillFor('pending') + '">' + esc(tn) + '</span> '
+          + '<span>' + esc(p.name) + ' · ' + what + ' · ' + fmtU(p.price_units) + scoped
+          + (p.active ? '' : ' · off') + '</span>';
       };
       const hwidFields = (p) => {
         p = p || {};
@@ -483,17 +503,13 @@ window.rwaPluginUI['pershop'] = {
       const pkgModal = (p, tiers) => {
         const isNew = !p;
         p = p || {name: '', duration_days: 30, traffic_limit_bytes: null, price_units: 1, effect: 'full', scope_tier_id: null, tier_id: null, active: true, traffic_reset: true};
-        const GB = 1073741824;
-        const ov = openModal(isNew ? 'Add package' : 'Edit package', 'Standalone sellable. Pick a tier to decide where buyers find it.',
+        const ov = openModal(isNew ? 'Add package' : 'Edit package', 'Basic plan — what a buyer subscribes with. Pick a tier to decide where buyers find it.',
           '<div class="grid gap-3 sm:grid-cols-2">'
           + '<div><label class="' + LBL + '">Package name</label><div class="flex items-center gap-2"><input id="m_pname" class="' + INP + '" value="' + esc(p.name) + '">' + emojiPicker('m_pname') + '</div></div>'
           + '<div><label class="' + LBL + '">Duration (days)</label><input id="m_pdays" class="' + INP + '" inputmode="numeric" value="' + (p.duration_days == null ? 30 : p.duration_days) + '"><p class="' + HELP + '">0 = never expires (∞).</p></div>'
           + '<div><label class="' + LBL + '">Traffic cap (GB)</label><input id="m_pgb" class="' + INP + '" inputmode="decimal" value="' + (p.traffic_limit_bytes ? p.traffic_limit_bytes / GB : '') + '"><p class="' + HELP + '">Blank = unlimited.</p></div>'
           + '<div><label class="' + LBL + '">Price (units)</label><input id="m_punits" class="' + INP + '" inputmode="decimal" value="' + (p.price_units || 0) + '"></div>'
           + '<div><label class="' + LBL + '">Sort order</label><input id="m_psort" class="' + INP + '" inputmode="numeric" value="' + (p.sort || 0) + '"><p class="' + HELP + '">Lower numbers show first in the bot.</p></div>'
-          + '<div><label class="' + LBL + '">Package type</label><select id="m_peffect" class="' + INP + '"><option value="full"' + (p.effect === 'full' ? ' selected' : '') + '>full plan</option><option value="time_only"' + (p.effect === 'time_only' ? ' selected' : '') + '>time top-up (+days)</option><option value="traffic_only"' + (p.effect === 'traffic_only' ? ' selected' : '') + '>traffic top-up (+GB)</option></select></div>'
-          + '<div><label class="' + LBL + '">Offer scope</label><select id="m_pscope" class="' + INP + '"><option value="">scope: all tiers</option>'
-          + tiers.map((x) => '<option value="' + x.id + '"' + (x.id === p.scope_tier_id ? ' selected' : '') + '>scope: ' + esc(x.name) + ' only</option>').join('') + '</select></div>'
           + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="m_pactive" class="h-4 w-4 accent-primary"' + (p.active === false ? '' : ' checked') + '> active</label></div>'
           + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="m_preset" class="h-4 w-4 accent-primary"' + (p.traffic_reset === false ? '' : ' checked') + '> reset traffic on renew</label></div>'
           + '</div>' + hwidFields(p),
@@ -507,8 +523,8 @@ window.rwaPluginUI['pershop'] = {
               traffic_limit_bytes: ovr.querySelector('#m_pgb').value.trim() === '' ? null : Math.round(Number(ovr.querySelector('#m_pgb').value) * GB),
               price_units: Number(ovr.querySelector('#m_punits').value) || 0,
               traffic_reset: ovr.querySelector('#m_preset').checked,
-              effect: ovr.querySelector('#m_peffect').value,
-              scope_tier_id: ovr.querySelector('#m_pscope').value ? Number(ovr.querySelector('#m_pscope').value) : null,
+              effect: 'full',
+              scope_tier_id: null,
               active: ovr.querySelector('#m_pactive').checked,
               hwid_mode: mode, hwid_min: 0, hwid_default: 0, hwid_max: 0, hwid_free: 0, hwid_percent: 0, hwid_fixed: null};
             if (!bbody.name) throw new Error('Package name is required.');
@@ -526,19 +542,85 @@ window.rwaPluginUI['pershop'] = {
         hm.onchange = () => { ov.querySelector('#m_hinput').style.display = hm.value === 'input' ? '' : 'none';
           ov.querySelector('#m_hfixed').style.display = hm.value === 'fixed' ? '' : 'none'; };
       };
+      // Top-ups: +days / +GB offers for an existing subscription. Their own
+      // modal — the basic package modal cannot create one. A top-up is tied
+      // to the packages it applies to (checkboxes); no picks = every sub.
+      const pkgChecks = (plans, sel) => {
+        if (!plans.length) return '<i class="text-sm text-dark-300">no basic packages yet</i>';
+        return plans.map((p) => '<label class="flex items-center gap-2 text-sm"><input type="checkbox" data-pk="' + p.id
+          + '" class="h-4 w-4 accent-primary"' + ((sel || []).map(Number).includes(Number(p.id)) ? ' checked' : '')
+          + '> ' + esc(p.name) + '</label>').join('');
+      };
+      const topupModal = (p, tiers, plans) => {
+        const isNew = !p;
+        p = p || {name: '', duration_days: 30, traffic_limit_bytes: null, price_units: 1,
+                  effect: 'time_only', scope_tier_id: null, tier_id: null, active: true, sort: 0,
+                  package_ids: []};
+        const ov = openModal(isNew ? 'Add top-up' : 'Edit top-up',
+          'Extra time (+days) or extra traffic (+GB) for a subscription that already exists. Never creates one.',
+          '<div class="grid gap-3 sm:grid-cols-2">'
+          + '<div><label class="' + LBL + '">Top-up name</label><div class="flex items-center gap-2"><input id="m_tname" class="' + INP + '" value="' + esc(p.name) + '">' + emojiPicker('m_tname') + '</div></div>'
+          + '<div><label class="' + LBL + '">Type</label><select id="m_teffect" class="' + INP + '"><option value="time_only"' + (p.effect === 'time_only' ? ' selected' : '') + '>time top-up (+days)</option><option value="traffic_only"' + (p.effect === 'traffic_only' ? ' selected' : '') + '>traffic top-up (+GB)</option></select></div>'
+          + '<div><label class="' + LBL + '">Days to add</label><input id="m_tdays" class="' + INP + '" inputmode="numeric" value="' + (p.duration_days == null ? 30 : p.duration_days) + '"><p class="' + HELP + '">For time top-ups. The days added to the expiry.</p></div>'
+          + '<div><label class="' + LBL + '">Traffic to add (GB)</label><input id="m_tgb" class="' + INP + '" inputmode="decimal" value="' + (p.traffic_limit_bytes ? p.traffic_limit_bytes / GB : '') + '"><p class="' + HELP + '">For traffic top-ups. Added on top of the leftover.</p></div>'
+          + '<div><label class="' + LBL + '">Price (units)</label><input id="m_tunits" class="' + INP + '" inputmode="decimal" value="' + (p.price_units || 0) + '"></div>'
+          + '<div><label class="' + LBL + '">Sort order</label><input id="m_tsort" class="' + INP + '" inputmode="numeric" value="' + (p.sort || 0) + '"><p class="' + HELP + '">Lower numbers show first in the bot.</p></div>'
+          + '<div><label class="text-sm text-dark-300"><input type="checkbox" id="m_tactive" class="h-4 w-4 accent-primary"' + (p.active === false ? '' : ' checked') + '> active</label></div>'
+          + '</div>'
+          + '<div><span class="' + LBL + '">Applies to these packages</span>'
+          + '<div class="mt-2 space-y-1.5">' + pkgChecks(plans || [], p.package_ids) + '</div>'
+          + '<p class="' + HELP + '">Tick the plans this offer belongs to. Nothing ticked = the offer shows for every subscriber.</p></div>',
+          async (ovr) => {
+            const effect = ovr.querySelector('#m_teffect').value;
+            const days = Math.max(0, Number(ovr.querySelector('#m_tdays').value) || 0);
+            const gbRaw = ovr.querySelector('#m_tgb').value.trim();
+            const packageIds = Array.from(ovr.querySelectorAll('[data-pk]'))
+              .filter((c) => c.checked).map((c) => Number(c.dataset.pk));
+            const tbody = {name: ovr.querySelector('#m_tname').value.trim(),
+              tier_id: null,
+              sort: Math.max(0, Number(ovr.querySelector('#m_tsort').value) || 0),
+              duration_days: effect === 'time_only' ? Math.max(1, days) : 0,
+              traffic_limit_bytes: effect === 'traffic_only'
+                ? (gbRaw === '' ? 0 : Math.round(Number(gbRaw) * GB)) : null,
+              price_units: Number(ovr.querySelector('#m_tunits').value) || 0,
+              traffic_reset: false,
+              effect: effect,
+              scope_tier_id: null,
+              package_ids: packageIds,
+              active: ovr.querySelector('#m_tactive').checked,
+              hwid_mode: 'default', hwid_min: 0, hwid_default: 0, hwid_max: 0,
+              hwid_free: 0, hwid_percent: 0, hwid_fixed: null};
+            if (!tbody.name) throw new Error('Top-up name is required.');
+            if (effect === 'traffic_only' && !tbody.traffic_limit_bytes) {
+              throw new Error('A traffic top-up needs the traffic it adds.');
+            }
+            if (isNew) await j(api + '/packages', {method: 'POST', body: JSON.stringify(tbody)});
+            else await j(api + '/packages/' + p.id, {method: 'PUT', body: JSON.stringify(tbody)});
+            loadCatalog();
+          }, isNew ? 'Add top-up' : 'Save top-up');
+      };
       const loadCatalog = async () => {
         try {
           const {tiers} = await j(api + '/tiers');
           const {packages} = await j(api + '/packages');
           const names = await squadNames();
+          // Basic plans and top-ups live in separate cards: a top-up is never
+          // a plan, and the two have their own modals.
+          const isTop = (p) => (p.effect || 'full') !== 'full';
+          const plans = packages.filter((p) => !isTop(p));
+          const topups = packages.filter(isTop);
           q('tiers').innerHTML = (tiers.map((t) =>
             '<div class="' + ROW + '" data-t="' + t.id + '"><span>' + esc(t.name)
             + (t.squad_uuid ? ' · ' + esc(names[t.squad_uuid] || t.squad_uuid.slice(0, 8)) : ' · no squad')
             + (t.active ? '' : ' · off') + '</span><span class="flex gap-1.5"><button data-te="1" class="' + BTN_M + '">Edit</button> <button data-td="1" class="' + BTN_M + '">Del</button></span></div>').join('')
             || '<i class="text-sm text-dark-300">none</i>');
-          q('pkgs').innerHTML = (packages.map((p) =>
+          q('pkgs').innerHTML = (plans.map((p) =>
             '<div class="' + ROW + '" data-p="' + p.id + '">' + pkgBadges(p, tiers)
             + '<span class="flex gap-1.5"><button data-pe="1" class="' + BTN_M + '">Edit</button> <button data-pd="1" class="' + BTN_M + '">Del</button></span></div>').join('')
+            || '<i class="text-sm text-dark-300">none</i>');
+          q('topups').innerHTML = (topups.map((p) =>
+            '<div class="' + ROW + '" data-u="' + p.id + '">' + topupBadges(p, tiers, plans)
+            + '<span class="flex gap-1.5"><button data-ue="1" class="' + BTN_M + '">Edit</button> <button data-ud="1" class="' + BTN_M + '">Del</button></span></div>').join('')
             || '<i class="text-sm text-dark-300">none</i>');
           q('tiers').querySelectorAll('[data-te]').forEach((b) => { b.onclick = () => {
             const t = tiers.find((x) => x.id === Number(b.closest('[data-t]').dataset.t)); tierModal(t, names); }; });
@@ -548,20 +630,33 @@ window.rwaPluginUI['pershop'] = {
             try { await j(api + '/tiers/' + t.id, {method: 'DELETE'}); loadCatalog(); }
             catch (e) { alert('Delete failed: ' + e.message); } }; });
           q('pkgs').querySelectorAll('[data-pe]').forEach((b) => { b.onclick = () => {
-            const p = packages.find((x) => x.id === Number(b.closest('[data-p]').dataset.p)); pkgModal(p, tiers); }; });
+            const p = plans.find((x) => x.id === Number(b.closest('[data-p]').dataset.p)); pkgModal(p, tiers); }; });
           q('pkgs').querySelectorAll('[data-pd]').forEach((b) => { b.onclick = async () => {
             if (!confirm('Delete this package?')) return;
             await j(api + '/packages/' + b.closest('[data-p]').dataset.p, {method: 'DELETE'}); loadCatalog(); }; });
+          q('topups').querySelectorAll('[data-ue]').forEach((b) => { b.onclick = () => {
+            const p = topups.find((x) => x.id === Number(b.closest('[data-u]').dataset.u));
+            topupModal(p, tiers, plans); }; });
+          q('topups').querySelectorAll('[data-ud]').forEach((b) => { b.onclick = async () => {
+            if (!confirm('Delete this top-up?')) return;
+            await j(api + '/packages/' + b.closest('[data-u]').dataset.u, {method: 'DELETE'}); loadCatalog(); }; });
         } catch (e) {
-          q('tiers').innerHTML = q('pkgs').innerHTML = '<span class="text-sm text-red-400">Load failed: ' + esc(e.message) + '</span>';
+          q('tiers').innerHTML = q('pkgs').innerHTML = q('topups').innerHTML = '<span class="text-sm text-red-400">Load failed: ' + esc(e.message) + '</span>';
         }
       };
       q('addtier').onclick = async () => { const names = await squadNames(); tierModal(null, names); };
       q('addpkg').onclick = async () => { const {tiers} = await j(api + '/tiers'); pkgModal(null, tiers || []); };
+      q('addtopup').onclick = async () => {
+        const [{tiers}, {packages}] = await Promise.all([j(api + '/tiers'), j(api + '/packages')]);
+        const plans = (packages || []).filter((p) => (p.effect || 'full') === 'full');
+        topupModal(null, tiers || [], plans);
+      };
       const loadUnmapped = async () => {
         try {
-          const [{orphans, unplanned}, {packages}] = await Promise.all([j(api + '/unmapped'), j(api + '/packages')]);
-          const opts = () => '<select data-pick="1" class="' + INP + '" style="width:auto"><option value="">— plan —</option>' + packages.filter((p) =>
+          const [{orphans, unplanned, trials}, {packages}] = await Promise.all([j(api + '/unmapped'), j(api + '/packages')]);
+          const opts = () => '<select data-pick="1" class="' + INP + '" style="width:auto"><option value="">— plan —</option>'
+            + '<option value="trial">🎁 trial account (test)</option>'
+            + packages.filter((p) =>
             (p.effect || 'full') === 'full').map((p) =>
             '<option value="' + p.id + '">' + esc(p.name) + ' · ' + fmtU(p.price_units) + '</option>').join('')
             + '</select>';
@@ -570,16 +665,21 @@ window.rwaPluginUI['pershop'] = {
           q('unmapped').innerHTML = '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Your panel users with no shop plan (' + orphans.length + ')</h5><div class="space-y-1.5 mb-4">'
             + (orphans.map((o) => row(o.uuid, '👤 ' + esc(o.username)
               + ' <span class="text-dark-300">' + esc(String(o.uuid).slice(0, 8)) + '</span>')).join('') || '<i class="text-sm text-dark-300">none</i>') + '</div>'
-            + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Shop subscriptions with no plan (' + unplanned.length + ')</h5><div class="space-y-1.5">'
+            + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Shop subscriptions with no plan (' + unplanned.length + ')</h5><div class="space-y-1.5 mb-4">'
             + (unplanned.map((s) => row(s.user_uuid, '📦 ' + esc(s.username)
-              + (s.buyer_tg_id ? '' : ' <span class="text-dark-300">not linked</span>'))).join('') || '<i class="text-sm text-dark-300">none</i>') + '</div>';
+              + (s.buyer_tg_id ? '' : ' <span class="text-dark-300">not linked</span>'))).join('') || '<i class="text-sm text-dark-300">none</i>') + '</div>'
+            + '<h5 class="text-xs font-medium uppercase tracking-wider text-dark-300 mb-2">Trial accounts (' + (trials || []).length + ')</h5><div class="space-y-1.5">'
+            + ((trials || []).map((s) => row(s.user_uuid, '🎁 ' + esc(s.username)
+              + ' <span class="text-dark-300">no plan by design</span>')).join('') || '<i class="text-sm text-dark-300">none</i>') + '</div>';
           q('unmapped').querySelectorAll('[data-assign]').forEach((b) => { b.onclick = async () => {
             const div = b.closest('[data-u]');
-            const pid = div.querySelector('[data-pick]').value;
-            if (!pid) { alert('Pick a plan first.'); return; }
+            const pick = div.querySelector('[data-pick]').value;
+            if (!pick) { alert('Pick a plan first.'); return; }
+            const isTest = pick === 'trial';
             try {
               await j(api + '/subs/assign-plan', {method: 'POST',
-                body: JSON.stringify({user_uuid: div.dataset.u, package_id: Number(pid)})});
+                body: JSON.stringify({user_uuid: div.dataset.u,
+                  package_id: isTest ? 0 : Number(pick), is_test: isTest})});
               loadUnmapped();
             } catch (e) { alert('Match failed: ' + e.message); }
           }; });
@@ -1111,6 +1211,7 @@ window.rwaPluginUI['pershop'] = {
           const {r, w} = await saveShop(body);
           const msg = (w && w.error) ? ('Saved. Webhook note: ' + w.error) : 'Saved.';
           if (q('msg_text')) q('msg_text').textContent = msg;
+          botextState('Saved — the bot uses this text now.');
         } catch (e) { if (q('msg_text')) q('msg_text').textContent = 'Save failed: ' + e.message; }
       };
       q('connect').onclick = async () => {
@@ -1167,6 +1268,18 @@ window.rwaPluginUI['pershop'] = {
       wireFmt(el);
     };
     let BOTXT = {welcome: '', thanks: '', approved: '', denied: '', referral: '', support: ''};
+    // What the bot will actually send for the selected text. Lives here (not
+    // inside botextInit) because the save handlers use it too.
+    const botextState = (note) => {
+      const st = q('bostate');
+      if (!st) return;
+      const k = (q('bosel') && q('bosel').dataset.cur) || 'welcome';
+      const cur = (BOTXT[k] || '').trim();
+      st.textContent = note
+        ? note
+        : (cur ? 'Custom text — the bot sends this instead of the built-in default.'
+          : 'Empty — the bot sends the built-in default for the selected language.');
+    };
     const botextInit = () => {
       const BOTEXT_VARS = {welcome: ['shop'], thanks: ['order'],
         approved: ['username', 'dot', 'status', 'plan', 'price', 'when', 'traffic', 'hwid', 'url'],
@@ -1184,6 +1297,7 @@ window.rwaPluginUI['pershop'] = {
           referral: 'Explains the referral program; buyers open this from the Referral menu.',
           support: 'Support section header message — usually a contact or rules text.'}[key] || '';
         q('bovars').innerHTML = varBar('botext', BOTEXT_VARS[key] || []);
+        botextState();
         wireFmt(el);
       };
       q('bosel').onchange = () => {
@@ -1191,6 +1305,12 @@ window.rwaPluginUI['pershop'] = {
         const k = q('bosel').value;
         q('bosel').dataset.cur = k;
         botextShow(k);
+      };
+      // Live sync: every save button (shop card + texts card) sends BOTXT,
+      // so typing must land there immediately — not only on a select change.
+      q('botext').oninput = () => {
+        BOTXT[(q('bosel') && q('bosel').dataset.cur) || 'welcome'] = q('botext').value;
+        botextState();
       };
       q('bodef').onclick = () => {
         const map = {welcome: 'welcome', thanks: 'thank_you', approved: 'approved',
@@ -1200,6 +1320,7 @@ window.rwaPluginUI['pershop'] = {
         j(api + '/shops/default-texts?lang=' + encodeURIComponent(lng)).then(({defaults}) => {
           const v = defaults ? defaults[map[k]] : undefined;
           if (v !== undefined) { q('botext').value = v; BOTXT[k] = v; }
+          botextState('Loaded the built-in default — press “Save bot texts” to store it.');
         }).catch(() => {});
       };
       q('bosel').dataset.cur = 'welcome';
@@ -1250,7 +1371,7 @@ window.rwaPluginUI['pershop'] = {
           + '<div><span class="' + LBL + '">Test subscription size (every shop, one trial per person across all shops)</span>'
           + '<div class="grid gap-4 sm:grid-cols-4">'
           + '<div><label class="' + LBL + '" for="tdays">Duration (days)</label><input id="tdays" inputmode="numeric" class="' + INP + '" value="' + esc(d.test_duration_days == null ? 1 : d.test_duration_days) + '"></div>'
-          + '<div><label class="' + LBL + '" for="tgb">Traffic GB (0 = unlimited)</label><input id="tgb" inputmode="numeric" class="' + INP + '" value="' + esc(d.test_traffic_gb == null ? 1 : d.test_traffic_gb) + '"></div>'
+          + '<div><label class="' + LBL + '" for="tgb">Traffic GB (0 = unlimited)</label><input id="tgb" inputmode="decimal" class="' + INP + '" value="' + esc(d.test_traffic_gb == null ? 1 : d.test_traffic_gb) + '"><p class="' + HELP + '">Fractions allowed: 0.25 = 250 MB, 0.5 = 500 MB.</p></div>'
           + '<div><label class="' + LBL + '" for="tsquad">Test squad</label><select id="tsquad" class="' + INP + '"><option value="">panel default</option></select><p class="' + HELP + '">Trial accounts join the selected internal squad.</p></div>'
           + '<div><label class="' + LBL + '" for="thwid">HWID limit (blank = panel default)</label><input id="thwid" inputmode="numeric" class="' + INP + '" value="' + esc(d.test_hwid == null ? '' : d.test_hwid) + '"></div>'
           + '</div></div>'

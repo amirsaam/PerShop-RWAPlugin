@@ -14,7 +14,7 @@ One admin = one shop = one bot. The superadmin installs and configures the plugi
 - **Panel-facing only.** Reads via `ctx.db`; writes via `panel_api()` facade (`create_user`, `update_user`, etc.). No direct Remnawave core calls.
 - **Bot transport.** `POST /api/v2/plugins/pershop/tg/{shop_id}`; auth via `X-Telegram-Bot-Api-Secret-Token` vs `shops.webhook_secret`. Polling fallback (`polling_enabled`) every 15 s when no public HTTPS endpoint.
 - **Scheduled tasks.** `pershop-notifier` (900 s: expiry/traffic reminders + pending nudge), `pershop-broadcast` (30 s: fan-out ~25 recipients at a time), `pershop-poller` (15 s: polling only).
-- **Database.** `pershop_001` (base schema: shops, tiers, packages, orders, subs, buyers, referrals, promotions, service categories/services, sessions, test claims, broadcasts, scammers). `pershop_002` (updates). `pershop_003` (`plugin_pershop_events`: append-only feed of shop moments — orders, approvals, denials, links, promos, device resets/reissues, broadcasts). `pershop_004` (`plugin_pershop_promos.applies_to`: promo scope — `both` / `packages` / `services`). Never edit frozen revisions; new DDL = `pershop_005`+.
+- **Database.** `pershop_001` (base schema: shops, tiers, packages, orders, subs, buyers, referrals, promotions, service categories/services, sessions, test claims, broadcasts, scammers). `pershop_002` (updates). `pershop_003` (`plugin_pershop_events`: append-only feed of shop moments — orders, approvals, denials, links, promos, device resets/reissues, broadcasts). `pershop_004` (`plugin_pershop_promos.applies_to`: promo scope — `both` / `packages` / `services`). `pershop_005` (`plugin_pershop_topup_packages`: which packages a top-up offer applies to; plus `plugin_pershop_buyers.lang` nullable with no default — NULL = the buyer never picked a language, so the shop's language applies). Never edit frozen revisions; new DDL = `pershop_006`+.
 
 ---
 
@@ -36,7 +36,7 @@ One admin = one shop = one bot. The superadmin installs and configures the plugi
 | `public_base_url` | Origin for webhook registration (`https://...`). |
 | `tutorial_text` | Global buyer-facing "How to Use" body. |
 | `test_duration_days` (1–365, def 1) | Trial lifetime. |
-| `test_traffic_gb` (0–100000, def 1) | Trial cap (`0` = unlimited). |
+| `test_traffic_gb` (0–100000, def 1) | Trial cap in GB, fractions allowed (`0.25` = 250 MB). `0` = unlimited. |
 | `test_squad_uuid` | Squad for trial accounts (`active_internal_squads`). |
 | `test_hwid` | Device limit stamped on trials (blank = panel default). |
 
@@ -51,7 +51,7 @@ Returns `version` (wheel version) + `counts: {shops, pending_orders, subs}`.
 `GET / PUT /api/v2/plugins/pershop/shops/mine` (owner-scoped). One admin = one shop.
 
 1. **Bot token** (`bot_token_enc`, Fernet-encrypted); owner Telegram id; **prefix** (globally unique, first half of sold username).
-2. **Language** (`en` / `fa` / `ru` / `zh`): owner DM language; buyers choose independently (`plugin_pershop_buyers.lang`).
+2. **Language** (`en` / `fa` / `ru` / `zh`): owner DM language; buyers choose independently (`plugin_pershop_buyers.lang`, NULL = they never chose → the shop's language applies).
 3. **Pricing display:** `currency_label` (e.g. `تومان`) + `unit_rate` (local per unit). Empty = raw `2.5u`.
 4. **Catalog grouping:** `tiers_internal` (`bool`, default `false`). When `true`, buyers skip tier buttons and see one flat package list sorted by `sort`; tiers stay internal.
 5. **Texts (buyer-facing):** `welcome_text` (`{shop}`), `thank_you_text` (`{order}`), `approved_text` (`{username} {dot} {status} {plan} {price} {when} {traffic} {hwid} {url}`; legacy `{expire}` accepted), `denied_text` (`{reason} {username} {plan}`), `referral_text` (`{percent} {link}`), `support_text`. Each field has a **↺ Default** button that refetches `GET /shops/default-texts?lang=xx` in the currently selected form language (`lang`); empty fields fall back automatically, except card details and support (button hidden until set).
@@ -73,9 +73,11 @@ Internal squad mapping + device default. `name` (1–120, unique per shop), `squ
 
 ### 5.2 Packages (`GET / POST /packages`, `PUT / DELETE /packages/{id}`)
 
-Predefined VPN plans. `name` (1–120), `tier_id` (required), `traffic_limit_bytes` (`null` = unlimited), `duration_days` (`0` = timeless, year 2999), `price_units` (≥ 0), `effect`: `full` (plan) / `time_only` (+days top-up) / `traffic_only` (+GB top-up; requires cap), `traffic_reset` (`true` = discard leftover; `false` = roll over + cap), `hwid_mode`: `default` / `fixed` (`hwid_fixed`) / `input` (`hwid_min`/`max`/`default`/`free`/`percent`) / `unlimited`, `scope_tier_id` (top-up visibility), `squad_uuid` (legacy fallback), `sort`, `active`.
+Predefined VPN plans. `name` (1–120), `tier_id` (required for `full` plans, optional for top-ups), `traffic_limit_bytes` (`null` = unlimited), `duration_days` (`0` = timeless, year 2999), `price_units` (≥ 0), `effect`: `full` (plan) / `time_only` (+days top-up) / `traffic_only` (+GB top-up; requires cap), `traffic_reset` (`true` = discard leftover; `false` = roll over + cap), `hwid_mode`: `default` / `fixed` (`hwid_fixed`) / `input` (`hwid_min`/`max`/`default`/`free`/`percent`) / `unlimited`, `package_ids` (top-up only: the plans the offer applies to; empty = all subscribers), `scope_tier_id` (legacy tier visibility, superseded by `package_ids`), `squad_uuid` (legacy fallback), `sort`, `active`.
 
 Deleting a package referenced by orders/subs is refused (409).
+
+Panel (Shops tab → Packages): **Packages** card = basic plans only (`effect: full`) with the plan modal (no type choice, no scope — scope is a top-up concept); a separate **Top-ups** card lists the top-up packages (`time_only` / `traffic_only`) with its own modal (type, days to add / traffic to add, price, sort, active, and **checkboxes of the packages the offer applies to** — nothing ticked = every subscriber). A top-up can no longer be created from the basic-package modal, and it no longer needs a tier.
 
 ### 5.3 Other Services (`GET / POST /service-cats`, `PUT / DELETE /service-cats/{id}`; `GET / POST /services`, `PUT / DELETE /services/{svc_id}`)
 
@@ -91,10 +93,11 @@ Non-VPN sellables: `name`, `price_units`, `description`, `done_text`, `cat_id`, 
 - **Promo codes (`promo`).** Buyer enters at checkout (package *or* service contract); owner manages `promo` rows (`code`, `percent`/`units`, `max_uses`, `valid_until`, `applies_to` = `both`/`packages`/`services`). A code scoped to the other kind of purchase is refused with its own line (`promo_only_packages` / `promo_only_services`). Lines: `promo_line` (buyer-facing discount), `promo_owner_line` (owner card), `promo_applied`, `promo_invalid`, `promo_remove_btn`. The applied code is stored in the order snapshot, and one use is burned at approval.
 - **Invitee discount (`campaign_percent`).** Applied automatically on first purchase via invite link (`start=r_…`); line shown: `campaign_line`. No manual code needed.
 - **My Subscriptions — status dashboard.** States: 🟢 healthy · 🟡 running out (≤3 days or traffic ≥80%) · 🔴 expired/overdue (traffic ≥100%) · ♾️ lifetime (`duration_days=0`, rendered as "never expires", year 2999) · ⏳ waiting for admin. Tapping username: live status, exact date beside relative word, traffic used/of, valid actions (Quick renew, Change plan, Add traffic, Add days). Fully lifetime = no actions; linked pre-shop subs show system values.
+- **Where top-ups live.** Top-up offers (`time_only` / `traffic_only`) never appear in the Buy menu or the renew plan list (both show `full` plans only). They surface on the **sub card** (My Subscriptions → the subscription) as the "Add traffic" / "Add days" buttons, and in the offer screen those buttons open. An offer is shown to a subscriber when it is bound to that subscriber's plan (`package_ids`), or — when it is bound to nothing — to everyone (legacy rows still honour the tier `scope_tier_id`).
 - **Link subscription.** Eligibility: `creator_id` = owner id + short UUID matches; creator-less + matching short UUID links only to superadmin shop; else refused (`404`). Once linked, subscription joins notifier/renewals/My Subs; renewal uses shop packages.
 - **Pending state.** After receipt: buttons disappear, ⏳ shown, "receipt received". Second receipt discarded (no duplicate). Reminders silent until decided.
 - **Withdraw.** Only undecided orders. Marks `withdraw_requested`; owner's previous buttons replaced with single **Process cancellation** card. Process: **Approve cancellation / Deny (fake receipt)**. Approving shows buyer's bank details; owner sends refund receipt, bot forwards to buyer, settles `withdrawn`. Denying runs standard denial then offers scam report. Mixed payment: credit returns immediately at submit; transfer portion refunded manually; owner's card records only transfer portion outstanding.
-- **Test Subscription.** If `test_enabled`: one confirmation creates `prefix-Test-N` account (`trial` package); one per person panel-wide (`test_claims`). Size/squad/device from superadmin settings. Informational in My Subs; no renewals/top-ups.
+- **Test Subscription.** If `test_enabled`: one confirmation creates `prefix-Test-N` account (`trial` package); one per person panel-wide (`test_claims`). Size/squad/device from superadmin settings (traffic is decimal GB — `0.25` = 250 MB). Informational in My Subs; no renewals/top-ups.
 - **Referral Program.** `referral_percent` (reward %). Deep-link `?start=r_...`; `getMe` re-fetches bot username if missing and caches. Owner text: `{percent}`, `{link}`. Empty text falls back to built-in pitch with invite link auto-appended. Inviter gets DM per reward; `referral_earned` in stats. No reward for denied/withdrawn orders. Credit refund on deny/withdraw. Full-credit purchase can be self-cancelled by buyer: panel account disabled, units returned, owner read-only note.
 - **My account (last).** Last 10 orders (human-readable dates, converted prices, localized states), language chooser (`en`/`fa`/`ru`/`zh`), credit balance line (`buyer` table). All bot messages from that point use buyer's language; owner DMs use shop default (`_buyer_lang` stripped via `_owner_shop`).
 - **Dates.** Relative words ("in 5 days", "tomorrow", "3 days ago") + exact `YYYY-MM-DD`. Year 2999 = "never expires".
@@ -109,7 +112,7 @@ Non-VPN sellables: `name`, `price_units`, `description`, `done_text`, `cat_id`, 
 - **Change plan** re-selects tier → package through contract screen; squad moves only on tier change; only `full` plans.
 - **Top-ups** (`time_only` / `traffic_only`) adjust one resource; reset only that resource's reminder flag (`plugin_pershop_subs`).
 - **Linking pre-shop subs.** Buyers attach via My Subs → Link (`plugin_pershop_subs` by `username` or `user_uuid`); linked rows show system values; renewing uses shop packages.
-- **Plan matching (Shops tab).** `GET /unmapped`: owner's panel users without subscription row + sub rows with no plan. `POST /subs/assign-plan {user_uuid, package_id}` attaches (`full` only). Buyer self-assignment unavailable; buyer linked = plan assignment announced by DM.
+- **Plan matching (Shops tab).** `GET /unmapped`: owner's panel users without subscription row + sub rows with no plan + trial accounts (no plan by design). `POST /subs/assign-plan {user_uuid, package_id}` attaches (`full` only); `POST /subs/assign-plan {user_uuid, package_id: 0, is_test: true}` binds the user as a **trial account** (no plan, `is_test`) — the way to re-attach a test user whose shop row was lost. Picking a real plan for a trial converts it back. Buyer self-assignment unavailable; buyer linked = plan assignment announced by DM.
 
 ---
 
@@ -180,7 +183,7 @@ See table in section 5–8; includes health (`hcheck`), KPI (`/stats`), buyer lo
 
 ## 13. Development
 
-- `rwa_plugin_pershop/` structure: `routes_telegram.py` (bot/webhook/update handler; keyboard `_back_home_row` unpacked with `*`; emoji picker with embedded `FULL_EMOJIS` array + `emoji-picker-element` module import; sub card URL retrieval via `plugin_pershop_subs.user_uuid` with `::text` cast; trial package `"trial"`), `routes_admin.py` (admin CRUD; `ShopIn` includes `campaign_percent`, `tiers_internal`, `pending_nag_hours`, `referral_percent`; `PromoIn`, `SvcIn`; `PubUserCreate`), `service.py`, `telegram.py`, `crypto.py`, `naming.py`, `tasks.py` (`broadcast_tick`, `notifier_tick`, `poller_tick`), `lang.py` (`fa`: `بازنشانی`; never overwritten, keys added only), `migrations/versions/pershop_001/002/003/004.py`, `tests/test_shop.py` (39 flows).
+- `rwa_plugin_pershop/` structure: `routes_telegram.py` (bot/webhook/update handler; keyboard `_back_home_row` unpacked with `*`; emoji picker with embedded `FULL_EMOJIS` array + `emoji-picker-element` module import; sub card URL retrieval via `plugin_pershop_subs.user_uuid` with `::text` cast; trial package `"trial"`), `routes_admin.py` (admin CRUD; `ShopIn` includes `campaign_percent`, `tiers_internal`, `pending_nag_hours`, `referral_percent`; `PromoIn`, `SvcIn`; `PubUserCreate`), `service.py`, `telegram.py`, `crypto.py`, `naming.py`, `tasks.py` (`broadcast_tick`, `notifier_tick`, `poller_tick`), `lang.py` (`fa`: `بازنشانی`; never overwritten, keys added only), `migrations/versions/pershop_001/002/003/004/005.py`, `tests/test_shop.py` (43 flows).
 - Console: `node --check rwa_plugin_pershop/static/app.js`; `static/app.js` contains `FULL_EMOJIS`, `emojiPicker()` (body-appended `fixed` dropdown, `zIndex: 99999`, `overflow-x-visible`), `fmtBar()` (formatting toolbar: `b`/`i`/`u`/`s`/`code`/`link`), `varBar()` (variables: `{username}`, `{price}`, `{plan}`, etc.), split saves (`save_conn`/`save_price`/`save_text`), `openModal()` (glass card UI).
-- Tests: `python3 tests/test_shop.py` — 39 flows (fake panel facade, Telegram, DB — buy/renew/top-up/link/withdraw/broadcast/scammer/services/promo/promo-scope/invitee/referral/public-API).
+- Tests: `python3 tests/test_shop.py` — 43 flows (fake panel facade, Telegram, DB — buy/renew/top-up/top-up-links/link/withdraw/broadcast/scammer/services/promo/promo-scope/trial/plan-matching/language/invitee/referral/public-API).
 - Build: `rm -rf dist build *.egg-info && pip wheel . --no-deps -w dist_local/`. No manual uploads.
