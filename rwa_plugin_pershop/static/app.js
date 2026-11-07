@@ -1038,10 +1038,26 @@ window.rwaPluginUI['pershop'] = {
           const {broadcasts} = await j(api + '/broadcasts');
           q('bcstat2').innerHTML = (broadcasts || []).map((x) =>
             '#' + x.id + ' · ' + esc(x.status) + ' · ' + x.done + '/' + x.total + ' sent'
-            + (x.failed ? ' · ' + x.failed + ' failed' : '')).join('<br>') || '<i>no broadcasts yet</i>';
+            + (x.failed ? ' · ' + x.failed + ' failed' : '')
+            + ((x.status === 'queued' || x.status === 'sending')
+               ? ' <button data-bccancel="' + x.id + '" class="' + BTN_M + '">Cancel</button>' : '')).join('<br>') || '<i>no broadcasts yet</i>';
+          el.querySelectorAll('[data-bccancel]').forEach((btn) => {
+            btn.onclick = async () => {
+              if (btn.disabled) return;
+              btn.disabled = true;
+              try {
+                const r = await j(api + '/broadcasts/' + btn.dataset.bccancel + '/cancel', {method: 'POST'});
+                q('bcstat').textContent = r.cancelled
+                  ? 'Broadcast #' + r.id + ' cancelled — ' + r.sent + ' sent, ' + r.skipped + ' skipped.'
+                  : 'Broadcast #' + btn.dataset.bccancel + ' already finished.';
+              } catch (e) { q('bcstat').textContent = 'Cancel failed: ' + e.message; }
+              loadBc();
+            };
+          });
         } catch (e) { q('bcstat2').textContent = 'status unavailable'; }
       };
       q('bcsend').onclick = async () => {
+        if (q('bcsend').disabled) return;  // double-click used to queue the blast twice
         const f = q('bcphoto').files[0];
         if (f && f.size > 5 * 1024 * 1024) { alert('Photo must be under 5MB'); return; }
         const fd = new FormData();
@@ -1049,6 +1065,7 @@ window.rwaPluginUI['pershop'] = {
         if (q('bccat')) fd.append('target', q('bccat').value);
         if (f) fd.append('photo', f);
         q('bcstat').textContent = 'Queueing…';
+        q('bcsend').disabled = true;
         try {
           const h = {};
           const m = document.cookie.match(/(?:^|; )rw_csrf=([^;]*)/);
@@ -1061,6 +1078,7 @@ window.rwaPluginUI['pershop'] = {
           q('bctext').value = ''; q('bcphoto').value = ''; q('bcsize').textContent = '';
           loadBc();
         } catch (e) { q('bcstat').textContent = 'Failed: ' + e.message; }
+        q('bcsend').disabled = false;
       };
       loadBc();
     };

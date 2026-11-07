@@ -272,6 +272,8 @@ async def broadcast_tick(ctx) -> None:
 
     The owner writes the text once (HTML formatting intact, optional photo);
     each buyer send is contained so one blocked bot never stops the blast.
+    A broadcast cancelled in the panel stops at the next slot claim —
+    delivered ids are past pos and never revisited.
     """
     import json
 
@@ -293,53 +295,93 @@ async def broadcast_tick(ctx) -> None:
 
 
 async def _broadcast_step(ctx, b: dict, json, decrypt_token, TgClient) -> None:
+    """Send the next chunk of one broadcast, at-most-once per recipient.
+
+    Each recipient slot is claimed with an atomic pos=pos+1 UPDATE guarded
+    by the expected pos and a live status: overlapping ticks/workers lose
+    the claim instead of double-sending, a crash only retries the unclaimed
+    tail, and a cancelled broadcast stops at the next claim. Delivered ids
+    sit below pos, so they are never revisited — cancelling drops exactly
+    the pending tail.
+    """
+    bid = b.get("id")
     try:
-        all_ids = [int(x) for x in (json.loads(b.get("recipients") or "[]"))]
+        cur = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_broadcasts WHERE id=$1", bid)
+    except Exception:
+        return
+    if not cur:
+        return
+    cur = dict(cur)
+    if cur.get("status") not in ("queued", "sending"):
+        return  # done or cancelled: never touch again
+    try:
+        all_ids = [int(x) for x in (json.loads(cur.get("recipients") or "[]"))]
     except Exception:
         all_ids = []
-    pos = int(b.get("pos") or 0)
-    if pos == 0:
+    total = len(all_ids)
+    pos = int(cur.get("pos") or 0)
+    if total == 0 or pos >= total:
         try:
             await ctx.db.execute(
-                "UPDATE plugin_pershop_broadcasts SET status='sending' WHERE id=$1", b["id"])
-        except Exception:
-            pass
-    if pos >= len(all_ids):
-        try:
-            await ctx.db.execute(
-                "UPDATE plugin_pershop_broadcasts SET status='done' WHERE id=$1", b["id"])
+                "UPDATE plugin_pershop_broadcasts SET status='done' WHERE id=$1 "
+                "AND status IN ('queued','sending')", bid)
         except Exception:
             pass
         return
     try:
         shop = await ctx.db.fetchrow(
-            "SELECT * FROM plugin_pershop_shops WHERE id=$1", b["shop_id"])
+            "SELECT * FROM plugin_pershop_shops WHERE id=$1", cur["shop_id"])
         tg = TgClient(await decrypt_token(ctx, shop["bot_token_enc"]))
     except Exception:
         return
-    chunk = all_ids[pos:pos + BROADCAST_CHUNK]
-    done, failed = int(b.get("done") or 0), int(b.get("failed") or 0)
-    photo = b.get("photo")
+    photo = cur.get("photo")
     if isinstance(photo, memoryview):
         photo = photo.tobytes()
-    for tg_id in chunk:
+    sent = 0
+    while sent < BROADCAST_CHUNK and pos < total:
+        try:
+            claimed = await ctx.db.fetchrow(
+                "UPDATE plugin_pershop_broadcasts SET status='sending', pos=pos+1 "
+                "WHERE id=$1 AND pos=$2 AND status IN ('queued','sending') "
+                "RETURNING pos",
+                bid, pos)
+        except Exception:
+            return
+        if not claimed:
+            return  # lost the race to another worker, or cancelled mid-chunk
+        try:
+            pos = int(dict(claimed).get("pos") or 0)
+        except Exception:
+            return
+        tg_id = all_ids[pos - 1]
         try:
             if photo:
-                ok = await tg.send_photo(tg_id, photo, caption=b.get("html_text") or "")
+                ok = await tg.send_photo(tg_id, photo, caption=cur.get("html_text") or "")
                 if ok is None:
                     raise RuntimeError("photo failed")
             else:
-                await tg.send_message(tg_id, b.get("html_text") or "")
-            done += 1
+                await tg.send_message(tg_id, cur.get("html_text") or "")
+            ok_send = True
         except Exception:
-            failed += 1
-    try:
-        await ctx.db.execute(
-            "UPDATE plugin_pershop_broadcasts SET pos=$1, done=$2, failed=$3,"
-            " status=CASE WHEN $1 >= $4 THEN 'done' ELSE 'sending' END WHERE id=$5",
-            pos + len(chunk), done, failed, len(all_ids), b["id"])
-    except Exception:
-        pass
+            ok_send = False
+        try:
+            if ok_send:
+                await ctx.db.execute(
+                    "UPDATE plugin_pershop_broadcasts SET done=done+1 WHERE id=$1", bid)
+            else:
+                await ctx.db.execute(
+                    "UPDATE plugin_pershop_broadcasts SET failed=failed+1 WHERE id=$1", bid)
+        except Exception:
+            pass
+        sent += 1
+    if pos >= total:
+        try:
+            await ctx.db.execute(
+                "UPDATE plugin_pershop_broadcasts SET status='done' WHERE id=$1 "
+                "AND status IN ('queued','sending')", bid)
+        except Exception:
+            pass
 
 
 async def poller_tick(ctx) -> None:

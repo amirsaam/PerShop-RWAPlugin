@@ -95,11 +95,17 @@ class FakeDB:
         if "FROM plugin_pershop_shops" in q:
             return list(self.shops.values())
         if "FROM plugin_pershop_subs WHERE shop_id" in q and "expire_at IS NOT NULL" in q:
-            return [dict(s) for s in self.subs.values()
-                    if s["shop_id"] == a[0] and s.get("expire_at")]
+            out = [dict(s) for s in self.subs.values()
+                   if s["shop_id"] == a[0] and s.get("expire_at")]
+            if "NOT cancelled" in q:
+                out = [s for s in out if not s.get("cancelled")]
+            return out
         if "DISTINCT buyer_tg_id FROM plugin_pershop_subs WHERE shop_id" in q:
-            return [{"buyer_tg_id": s["buyer_tg_id"]} for s in self.subs.values()
-                    if s["shop_id"] == a[0] and s.get("buyer_tg_id")]
+            out = [s for s in self.subs.values()
+                   if s["shop_id"] == a[0] and s.get("buyer_tg_id")]
+            if "NOT cancelled" in q:
+                out = [s for s in out if not s.get("cancelled")]
+            return [{"buyer_tg_id": s["buyer_tg_id"]} for s in out]
         if "FROM plugin_pershop_subs WHERE shop_id" in q and "package_id IS NULL" in q:
             return [s for s in self.subs.values()
                     if s["shop_id"] == a[0] and not s.get("package_id") and not s.get("is_test")]
@@ -174,6 +180,8 @@ class FakeDB:
         if "FROM plugin_pershop_scammers WHERE tg_id" in q:
             r = self.scammers.get(a[0])
             return [r] if r else []
+        if "FROM plugin_pershop_scammers" in q:
+            return [{"tg_id": tg} for tg in self.scammers]
         if "scam_noted_at" in q and "FROM plugin_pershop_buyers" in q:
             ts = datetime.now(timezone.utc) if (a[0], a[1]) in self.scam_noted else None
             return [{"scam_noted_at": ts}]
@@ -398,6 +406,23 @@ class FakeDB:
             return [{"n": sum(1 for pid, _ in self.promo_uses if pid == a[0])}]
         if "FROM plugin_pershop_promo_uses WHERE promo_id" in q:
             return [{"n": 1}] if (a[0], a[1]) in self.promo_uses else []
+        if "FROM plugin_pershop_broadcasts WHERE id=" in q:
+            b = self.bcs.get(a[0])
+            return [b] if b else []
+        if "SET status='sending', pos=pos+1" in q and "RETURNING pos" in q:
+            b = self.bcs.get(a[0])
+            if b and b["pos"] == a[1] and b["status"] in ("queued", "sending"):
+                b["pos"] += 1
+                b["status"] = "sending"
+                return [{"pos": b["pos"]}]
+            return []
+        if "SET status='cancelled'" in q and "RETURNING id" in q:
+            b = self.bcs.get(a[0])
+            if b and b.get("shop_id") == a[1] and b["status"] in ("queued", "sending"):
+                b["status"] = "cancelled"
+                return [{"id": b["id"], "pos": b["pos"],
+                         "total": b["total"], "done": b["done"]}]
+            return []
         if "FROM plugin_pershop_broadcasts WHERE status IN" in q:
             return [b for b in self.bcs.values() if b["status"] in ("queued", "sending")]
         if "INSERT INTO plugin_pershop_buyers" in q and "RETURNING credit_units" in q:
@@ -664,6 +689,17 @@ class FakeDB:
             b = self.bcs[a[4]]
             b["pos"], b["done"], b["failed"] = a[0], a[1], a[2]
             b["status"] = "done" if a[0] >= a[3] else "sending"
+            return
+        if "UPDATE plugin_pershop_broadcasts SET done=done+1" in q:
+            self.bcs[a[0]]["done"] += 1
+            return
+        if "UPDATE plugin_pershop_broadcasts SET failed=failed+1" in q:
+            self.bcs[a[0]]["failed"] += 1
+            return
+        if "UPDATE plugin_pershop_broadcasts SET status='done' WHERE id=" in q:
+            b = self.bcs[a[0]]
+            if b["status"] in ("queued", "sending"):
+                b["status"] = "done"
             return
         if "UPDATE plugin_pershop_broadcasts SET status=" in q:
             self.bcs[a[0]]["status"] = "sending" if "'sending'" in q else "done"
@@ -3160,9 +3196,17 @@ async def _broadcast_flow():
            " VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id")
     await db.fetchrow(ins, sid, 1, 222, "bob", "f", "photo", None, 1.0, "{}")
     db.referrals.add((sid, 111, 333))
+    db.referrals.add((sid, 111, 444))  # stray: never started the bot, must be excluded
     db.buyers[(sid, 111)] = "fa"
+    db.buyers[(sid, 333)] = None  # invitee opened the bot via the referral link
+    db.subs[2] = {"id": 2, "shop_id": sid, "buyer_tg_id": 555, "user_uuid": "uu-2",
+                  "username": "vip-gone", "expire_at": future,
+                  "traffic_limit_bytes": None, "package_id": None,
+                  "is_test": False, "is_linked": False, "cancelled": True,
+                  "notified_80": False, "notified_72h": False,
+                  "notified_expired": False, "notified_out": False}
     res = await queue_broadcast(ctx, sid, "<b>Hi all</b>", b"PHOTO")
-    assert res["recipients"] == 3, res
+    assert res["recipients"] == 3, res  # {111, 222, 333}: 444 never started, 555 cancelled
     FakeTg.instances.clear()
     await broadcast_tick(ctx)
     got = {}
@@ -3177,19 +3221,27 @@ async def _broadcast_flow():
 
     # --- broadcast segments narrow the audience (Bedolaga-style) ---
     r_sub = await queue_broadcast(ctx, sid, "s", None, "subs")
-    assert r_sub["recipients"] == 1, r_sub  # buyer 111 has the sub row
+    assert r_sub["recipients"] == 1, r_sub  # 111; 555's sub is cancelled
     r_inv = await queue_broadcast(ctx, sid, "i", None, "invited")
-    assert r_inv["recipients"] == 1, r_inv  # buyer 333 was invited
+    assert r_inv["recipients"] == 1, r_inv  # 333; 444 never started the bot
     r_buy = await queue_broadcast(ctx, sid, "b", None, "buyers")
-    assert r_buy["recipients"] == 1, r_buy  # only 111 chose a language
+    assert r_buy["recipients"] == 2, r_buy  # 111 + 333 opened the bot
     r_no = await queue_broadcast(ctx, sid, "n", None, "noorders")
-    assert r_no["recipients"] == 1, r_no  # nobody has an approved order yet
+    assert r_no["recipients"] == 2, r_no  # nobody has an approved order yet
     import rwa_plugin_pershop.service as svc_mod
     svc_mod._panel_client = lambda: FakePanel()
     db.subs[1]["expire_at"] = datetime.now(timezone.utc) - timedelta(days=3)
     r_exp = await queue_broadcast(ctx, sid, "e", None, "expired")
     assert r_exp["recipients"] == 1, r_exp
     db.subs[1]["expire_at"] = future
+
+    # --- scammers never get broadcasts ---
+    db.scammers[333] = {"tg_id": 333, "marked_by_admin": "admin1", "reason": "t"}
+    r_all2 = await queue_broadcast(ctx, sid, "x", None, "all")
+    assert r_all2["recipients"] == 2, r_all2  # {111, 222}: 333 flagged
+    r_inv2 = await queue_broadcast(ctx, sid, "y", None, "invited")
+    assert r_inv2["recipients"] == 0, r_inv2  # 333 flagged, 444 never started
+    del db.scammers[333]
 
     # --- health probes ---
     from rwa_plugin_pershop.service import shop_health, list_events
@@ -3209,6 +3261,92 @@ async def _broadcast_flow():
 
 def test_broadcast_flow():
     asyncio.run(_broadcast_flow())
+
+
+async def _broadcast_cancel_flow():
+    """Cancel drops the pending tail; delivered ids are never re-sent; two
+    overlapping workers never double-send the same recipient (atomic claim)."""
+    import json as json_mod
+
+    import rwa_plugin_pershop.crypto as crypto_mod
+    import rwa_plugin_pershop.tasks as tasks_mod
+    import rwa_plugin_pershop.telegram as tgmod
+    from rwa_plugin_pershop.service import cancel_broadcast, queue_broadcast
+    from rwa_plugin_pershop.tasks import _broadcast_step, broadcast_tick
+
+    async def _fake_dec(_c, _e):
+        return "DUMMY"
+
+    crypto_mod.decrypt_token = _fake_dec
+    tgmod.TgClient = FakeTg
+    db = FakeDB()
+    ctx = FakeCtx(db)
+    sid, _legacy = make_shop(db)
+    future = datetime.now(timezone.utc) + timedelta(days=10)
+    db.subs[1] = {"id": 1, "shop_id": sid, "buyer_tg_id": 111, "user_uuid": "uu-1",
+                  "username": "vip-alice", "expire_at": future,
+                  "traffic_limit_bytes": None, "package_id": None,
+                  "is_test": False, "is_linked": False, "cancelled": False,
+                  "notified_80": False, "notified_72h": False,
+                  "notified_expired": False, "notified_out": False}
+    ins = ("INSERT INTO plugin_pershop_orders(shop_id,package_id,buyer_tg_id,buyer_username,"
+           "receipt_file_id,receipt_kind,renew_username,total_units,options_snapshot)"
+           " VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id")
+    await db.fetchrow(ins, sid, 1, 222, "bob", "f", "photo", None, 1.0, "{}")
+    db.referrals.add((sid, 111, 333))
+    db.buyers[(sid, 111)] = "fa"
+    db.buyers[(sid, 333)] = None
+
+    def _sends():
+        return [(m, p) for inst in FakeTg.instances for m, p in inst.sent
+                if m in ("sendMessage", "sendPhoto")]
+
+    old_chunk = tasks_mod.BROADCAST_CHUNK
+    tasks_mod.BROADCAST_CHUNK = 1
+    try:
+        res = await queue_broadcast(ctx, sid, "cancel me", None, "all")
+        assert res["recipients"] == 3, res
+        FakeTg.instances.clear()
+        await broadcast_tick(ctx)  # one slot claimed + sent
+        bc = db.bcs[res["id"]]
+        assert bc["pos"] == 1 and bc["done"] == 1 and bc["status"] == "sending", bc
+
+        # Two overlapping workers holding the same fresh row: each wins a
+        # different slot — all three recipients get exactly one message.
+        snap = dict(db.bcs[res["id"]])
+        await asyncio.gather(
+            _broadcast_step(ctx, dict(snap), json_mod, _fake_dec, FakeTg),
+            _broadcast_step(ctx, dict(snap), json_mod, _fake_dec, FakeTg))
+        bc = db.bcs[res["id"]]
+        assert bc["pos"] == 3 and bc["done"] == 3 and bc["status"] == "done", bc
+        chats = [p["chat_id"] for _, p in _sends()]
+        assert len(chats) == 3 and len(set(chats)) == 3, chats
+
+        # Cancel: the pending tail is dropped, delivered ids stay delivered.
+        res2 = await queue_broadcast(ctx, sid, "stop this", None, "all")
+        assert res2["recipients"] == 3, res2
+        FakeTg.instances.clear()
+        await broadcast_tick(ctx)  # one slot claimed + sent
+        bc2 = db.bcs[res2["id"]]
+        assert bc2["pos"] == 1 and bc2["done"] == 1 and bc2["status"] == "sending", bc2
+        r = await cancel_broadcast(ctx, sid, res2["id"])
+        assert r == {"cancelled": True, "id": res2["id"], "sent": 1, "skipped": 2}, r
+        assert db.bcs[res2["id"]]["status"] == "cancelled", db.bcs[res2["id"]]
+        await broadcast_tick(ctx)
+        await broadcast_tick(ctx)
+        assert len(_sends()) == 1, _sends()  # nothing more went out
+        assert db.bcs[res2["id"]]["status"] == "cancelled", db.bcs[res2["id"]]
+        # Cancelling again (or a finished/missing id) reports False, never raises.
+        assert (await cancel_broadcast(ctx, sid, res2["id"]))["cancelled"] is False
+        assert (await cancel_broadcast(ctx, sid, res["id"]))["cancelled"] is False
+        assert (await cancel_broadcast(ctx, sid, 999999))["cancelled"] is False
+    finally:
+        tasks_mod.BROADCAST_CHUNK = old_chunk
+    print("BROADCAST CANCEL FLOW PASSED")
+
+
+def test_broadcast_cancel_flow():
+    asyncio.run(_broadcast_cancel_flow())
 
 
 async def _nag_flow():
@@ -4966,6 +5104,7 @@ if __name__ == "__main__":
     test_buyer_lang_flow()
     test_account_hub_flow()
     test_broadcast_flow()
+    test_broadcast_cancel_flow()
     test_nag_flow()
     test_followup6_flow()
     test_scope_flow()

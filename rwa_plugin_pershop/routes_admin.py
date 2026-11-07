@@ -1287,6 +1287,18 @@ def build_admin_router(ctx):
                ORDER BY id DESC LIMIT 10""", shop["id"])
         return {"broadcasts": [dict(r) for r in rows]}
 
+    @router.post("/broadcasts/{bc_id}/cancel")
+    async def broadcast_cancel(bc_id: int, _a: AdminUser = Depends(require_permission("pershop", "edit"))):
+        """Cancel a queued/sending broadcast. Delivered stays delivered;
+        the pending tail is dropped (the tick skips cancelled rows)."""
+        from rwa_plugin_pershop.service import cancel_broadcast
+
+        me = owner(_a)
+        shop = await shop_for_owner(ctx, me)
+        if not shop:
+            raise HTTPException(400, "no shop")
+        return await cancel_broadcast(ctx, shop["id"], bc_id)
+
     @router.get("/events")
     async def events(_a: AdminUser = Depends(require_permission("pershop", "view"))):
         """Recent activity feed for the owner's shop (newest first)."""

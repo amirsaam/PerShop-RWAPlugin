@@ -1163,33 +1163,65 @@ async def cancel_credit_sub(ctx, sub_id: int, buyer_tg_id: int) -> dict:
     return {"order_id": order["id"], "amount": amount, "username": sub["username"]}
 
 
+async def _broadcast_blocked(ctx) -> set[int]:
+    """Network-flagged scammer ids — never broadcast to them. Best-effort."""
+    try:
+        rows = await ctx.db.fetch("SELECT tg_id FROM plugin_pershop_scammers")
+    except Exception:
+        return set()
+    out: set[int] = set()
+    for r in rows or []:
+        try:
+            if r.get("tg_id"):
+                out.add(int(r["tg_id"]))
+        except Exception:
+            pass
+    return out
+
+
+async def _broadcast_started(ctx, shop_id: int) -> set[int]:
+    """Buyer ids that started the bot in this shop (a buyer row appears
+    with the first screen). Best-effort."""
+    try:
+        rows = await ctx.db.fetch(
+            "SELECT DISTINCT tg_id FROM plugin_pershop_buyers WHERE shop_id=$1", shop_id)
+    except Exception:
+        return set()
+    out: set[int] = set()
+    for r in rows or []:
+        try:
+            if r.get("tg_id"):
+                out.add(int(r["tg_id"]))
+        except Exception:
+            pass
+    return out
+
+
 async def broadcast_audience(ctx, shop_id: int, target: str = "all") -> list[int]:
-    """Telegram ids picked per broadcast segment. 'all' = every id that
-    ever bought, linked, chose a language, or was referred in this shop;
-    the other segments narrow that pool by purchase state. Best-effort
-    parts never break the whole list."""
+    """Telegram ids picked per broadcast segment. 'all' = every reachable
+    buyer: sub owners (not cancelled), bot starters, and order contacts;
+    referrals count only when they started the bot (unsolicited bot DMs get
+    the bot spam-flagged). Flagged scammers are never included. The other
+    segments narrow that pool by purchase state. Best-effort parts never
+    break the whole list."""
+    blocked = await _broadcast_blocked(ctx)
+    started = await _broadcast_started(ctx, shop_id)
     ids: set[int] = set()
     if target == "buyers":
         # Everyone the bot ever messaged (a buyer row appears with the first
         # screen — the language column is NULL unless the buyer picked one).
-        try:
-            for r in await ctx.db.fetch(
-                    "SELECT DISTINCT tg_id FROM plugin_pershop_buyers WHERE shop_id=$1", shop_id):
-                if r.get("tg_id"):
-                    ids.add(int(r["tg_id"]))
-        except Exception:
-            pass
-        return sorted(ids)
+        return sorted(started - blocked)
     if target == "subs":
         try:
             for r in await ctx.db.fetch(
-                    "SELECT DISTINCT buyer_tg_id FROM plugin_pershop_subs WHERE shop_id=$1",
+                    "SELECT DISTINCT buyer_tg_id FROM plugin_pershop_subs "
+                    "WHERE shop_id=$1 AND NOT cancelled AND buyer_tg_id IS NOT NULL",
                     shop_id):
                 if r.get("buyer_tg_id"):
                     ids.add(int(r["buyer_tg_id"]))
         except Exception:
             pass
-        return sorted(ids)
+        return sorted(ids - blocked)
     if target == "invited":
         try:
             for r in await ctx.db.fetch(
@@ -1199,13 +1231,13 @@ async def broadcast_audience(ctx, shop_id: int, target: str = "all") -> list[int
                     ids.add(int(r["referred_tg_id"]))
         except Exception:
             pass
-        return sorted(ids)
+        return sorted((ids & started) - blocked)
     if target == "expired":
         had = []
         try:
             had = [r for r in await ctx.db.fetch(
                 "SELECT buyer_tg_id, expire_at FROM plugin_pershop_subs WHERE shop_id=$1 "
-                "AND expire_at IS NOT NULL", shop_id)]
+                "AND NOT cancelled AND expire_at IS NOT NULL", shop_id)]
         except Exception:
             had = []
         from datetime import datetime, timezone
@@ -1218,15 +1250,9 @@ async def broadcast_audience(ctx, shop_id: int, target: str = "all") -> list[int
                 exp = exp.replace(tzinfo=timezone.utc)
             if exp <= now:
                 ids.add(int(r["buyer_tg_id"]))
-        return sorted(ids)
+        return sorted(ids - blocked)
     if target == "noorders":
-        try:
-            for r in await ctx.db.fetch(
-                    "SELECT DISTINCT tg_id FROM plugin_pershop_buyers WHERE shop_id=$1", shop_id):
-                if r.get("tg_id"):
-                    ids.add(int(r["tg_id"]))
-        except Exception:
-            pass
+        ids = set(started)
         try:
             for r in await ctx.db.fetch(
                     "SELECT DISTINCT buyer_tg_id FROM plugin_pershop_orders "
@@ -1234,28 +1260,33 @@ async def broadcast_audience(ctx, shop_id: int, target: str = "all") -> list[int
                 ids.discard(int(r["buyer_tg_id"]))
         except Exception:
             pass
-        return sorted(ids)
+        return sorted(ids - blocked)
     try:
         for r in await ctx.db.fetch(
-                "SELECT DISTINCT buyer_tg_id FROM plugin_pershop_subs WHERE shop_id=$1", shop_id):
+                "SELECT DISTINCT buyer_tg_id FROM plugin_pershop_subs "
+                "WHERE shop_id=$1 AND NOT cancelled AND buyer_tg_id IS NOT NULL", shop_id):
             if r.get("buyer_tg_id"):
                 ids.add(int(r["buyer_tg_id"]))
     except Exception:
         pass
-    for table, col in (("plugin_pershop_buyers", "tg_id"),
-                       ("plugin_pershop_orders", "buyer_tg_id"),
-                       ("plugin_pershop_referrals", "referred_tg_id")):
-        try:
-            q = (f"SELECT DISTINCT {col} FROM {table} WHERE shop_id=$1"
-                 if table != "plugin_pershop_buyers" else
-                 f"SELECT DISTINCT tg_id FROM {table} WHERE shop_id=$1")
-            for r in await ctx.db.fetch(q, shop_id):
-                v = r.get(col)
-                if v:
-                    ids.add(int(v))
-        except Exception:
-            pass
-    return sorted(ids)
+    ids |= started
+    try:
+        for r in await ctx.db.fetch(
+                "SELECT DISTINCT buyer_tg_id FROM plugin_pershop_orders WHERE shop_id=$1",
+                shop_id):
+            if r.get("buyer_tg_id"):
+                ids.add(int(r["buyer_tg_id"]))
+    except Exception:
+        pass
+    try:
+        for r in await ctx.db.fetch(
+                "SELECT DISTINCT referred_tg_id FROM plugin_pershop_referrals WHERE shop_id=$1",
+                shop_id):
+            if r.get("referred_tg_id") and int(r["referred_tg_id"]) in started:
+                ids.add(int(r["referred_tg_id"]))
+    except Exception:
+        pass
+    return sorted(ids - blocked)
 
 
 async def queue_broadcast(ctx, shop_id: int, html_text: str, photo: bytes | None,
@@ -1274,6 +1305,27 @@ async def queue_broadcast(ctx, shop_id: int, html_text: str, photo: bytes | None
     await log_event(ctx, shop_id, "broadcast", None,
                     f"target={target} recipients={len(audience)}")
     return {"id": row["id"], "recipients": len(audience), "target": target}
+
+
+async def cancel_broadcast(ctx, shop_id: int, bc_id: int) -> dict:
+    """Cancel a queued/sending broadcast. Already-delivered recipients keep
+    their message (pos only moves forward); the pending tail is dropped —
+    the tick skips any row whose status is not queued/sending."""
+    try:
+        row = await ctx.db.fetchrow(
+            "UPDATE plugin_pershop_broadcasts SET status='cancelled' "
+            "WHERE id=$1 AND shop_id=$2 AND status IN ('queued','sending') "
+            "RETURNING id, pos, total, done",
+            bc_id, shop_id)
+    except Exception:
+        return {"cancelled": False, "id": bc_id}
+    if not row:
+        return {"cancelled": False, "id": bc_id}
+    row = dict(row)
+    total = int(row.get("total") or 0)
+    pos = int(row.get("pos") or 0)
+    return {"cancelled": True, "id": bc_id, "sent": int(row.get("done") or 0),
+            "skipped": max(0, total - pos)}
 
 
 async def log_event(ctx, shop_id: int, kind: str, buyer_tg_id=None, detail: str = "") -> None:
