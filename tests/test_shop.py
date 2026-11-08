@@ -136,13 +136,14 @@ class FakeDB:
             return [{"username": s["username"]} for s in self.subs.values() if s["shop_id"] == a[0]]
         if "created_by_admin_id IS NOT DISTINCT FROM" in q:
             # plan-matching orphans: panel users of this owner (plus the
-            # superadmin's own users inside superadmin-owned shops) with no subs row
+            # superadmin's own and unattributed legacy users inside
+            # superadmin-owned shops) with no subs row
             is_super = len(a) > 2 and bool(a[1])
             shop_arg = a[2] if len(a) > 2 else a[1]
             out = []
             for u in self.users.values():
                 c = u.get("created_by_admin_id")
-                if c != a[0] and not (is_super and c == "superadmin"):
+                if c != a[0] and not (is_super and (c == "superadmin" or c is None)):
                     continue
                 if any(s["shop_id"] == shop_arg and s["user_uuid"] == u.get("uuid")
                        for s in self.subs.values()):
@@ -1437,12 +1438,17 @@ async def _match_topup_flow():
     db.users["uu-god"] = {"uuid": "uu-god", "username": "god-user", "status": "ACTIVE",
                           "expire_at": exp, "used_traffic_bytes": 0,
                           "traffic_limit_bytes": 5 * GB, "created_by_admin_id": "superadmin"}
+    # unattributed legacy user: same rule (nil -> superadmin-only)
+    db.users["uu-legacy"] = {"uuid": "uu-legacy", "username": "legacy-user", "status": "ACTIVE",
+                            "expire_at": exp, "used_traffic_bytes": 0,
+                            "traffic_limit_bytes": 5 * GB, "created_by_admin_id": None}
 
     async def _fake_is_super(_c, _s):
         return True
 
     pool = await svc.unmapped_users(ctx, shop)
     assert "god-user" not in {o["username"] for o in pool["orphans"]}, pool
+    assert "legacy-user" not in {o["username"] for o in pool["orphans"]}, pool
     try:
         await svc.assign_plan(ctx, shop, "uu-god", pid)
         raise SystemExit("superadmin-created assign should fail for sub-admin")
@@ -1451,8 +1457,11 @@ async def _match_topup_flow():
     svc._owner_is_superadmin = _fake_is_super
     pool = await svc.unmapped_users(ctx, shop)
     assert "god-user" in {o["username"] for o in pool["orphans"]}, pool
+    assert "legacy-user" in {o["username"] for o in pool["orphans"]}, pool
     res_god = await svc.assign_plan(ctx, shop, "uu-god", pid)
     assert res_god["created"] is True and res_god["username"] == "god-user", res_god
+    res_legacy = await svc.assign_plan(ctx, shop, "uu-legacy", pid)
+    assert res_legacy["created"] is True and res_legacy["username"] == "legacy-user", res_legacy
     svc._owner_is_superadmin = _fake_not_super
 
     pool = await svc.unmapped_users(ctx, shop)

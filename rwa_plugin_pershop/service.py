@@ -672,7 +672,8 @@ async def unmapped_users(ctx, shop: dict) -> dict:
     covers both attributed and unattributed creators.
 
     Inside superadmin-owned shops the pool also lists the superadmin's own
-    users (created_by_admin_id = 'superadmin'); elsewhere those stay hidden.
+    users (created_by_admin_id = 'superadmin') and unattributed legacy users
+    (created_by_admin_id IS NULL); elsewhere those stay hidden.
     Trial accounts are listed separately: they have no plan by design, but
     the owner may still want to turn one into a real subscription."""
     owner_id = await _owner_account_id(ctx, shop.get("owner_admin"))
@@ -682,7 +683,8 @@ async def unmapped_users(ctx, shop: dict) -> dict:
     orphans = await ctx.db.fetch(
         """SELECT uuid, username, expire_at, traffic_limit_bytes FROM users
            WHERE (created_by_admin_id IS NOT DISTINCT FROM $1
-                  OR ($2 AND created_by_admin_id = 'superadmin')) AND NOT EXISTS
+                  OR ($2 AND (created_by_admin_id::text = 'superadmin'
+                              OR created_by_admin_id IS NULL))) AND NOT EXISTS
            (SELECT 1 FROM plugin_pershop_subs s WHERE s.shop_id=$3 AND s.user_uuid=users.uuid::text)
            ORDER BY username""",
         owner_id, superadmin_owner, shop["id"])
