@@ -556,31 +556,27 @@ async def _owner_account_row(ctx, owner_admin: str | None) -> tuple[bool, Any | 
 
 async def _link_allowed(ctx, shop: dict, row: dict) -> bool:
     """Attribution only, no squad check:
-    - createdByAdminId == 'superadmin' -> link (any owner);
-    - createdByAdminId empty + superadmin-owner (role_name='superadmin') -> link;
-    - anything else (numeric admin id different from owner, non-superadmin owner,
-      unknown owner, crashed lookup) -> foreign."""
+    - no creator (nil/empty) -> only superadmin-owned shops (legacy users);
+    - creator present -> only that admin's own shop bot: a numeric creator
+      must equal the owner's account id, the literal 'superadmin' links
+      only inside superadmin-owned shops;
+    - anything else (another admin's user, unknown owner, crashed
+      lookup) -> foreign."""
     creator_raw = row.get("createdByAdminId", row.get("created_by_admin_id"))
-    # Creator may be numeric admin id, or the literal "superadmin" string.
     creator_str = str(creator_raw).strip() if creator_raw is not None else None
+    if not creator_str or creator_str == "superadmin":
+        # Unattributed legacy users, and the superadmin's own users, link
+        # only inside superadmin-owned shops. (True, None) = row-less
+        # legacy/env superadmin, whom the panel's own RBAC treats as
+        # unrestricted (account_id None = full access).
+        ok, acct = await _owner_account_row(ctx, shop.get("owner_admin"))
+        return bool(ok and (acct is None or (acct and acct.get("role_name") == "superadmin")))
     try:
-        creator_num = int(creator_raw) if creator_str else None
+        creator_num = int(creator_str)
     except (TypeError, ValueError):
-        creator_num = None
+        return False  # creator names no admin: fail closed
     owner_id = await _owner_account_id(ctx, shop.get("owner_admin"))
-    # Linking allowed ONLY for:
-    #   - explicit superadmin creator ("superadmin")
-    #   - empty creator + superadmin-owned shop
-    if creator_str == "superadmin":
-        return True
-    if creator_str is None:
-        ok2, acct2 = await _owner_account_row(ctx, shop.get("owner_admin"))
-        is_s = bool(ok2 and (acct2 is None or (acct2 and acct2.get("role_name") == "superadmin")))
-    if creator_num is not None:
-        return False  # any non-empty, non-superadmin creator = foreign
-    ok, acct = await _owner_account_row(ctx, shop.get("owner_admin"))
-    is_super = bool(ok and (acct is None or (acct and acct.get("role_name") == "superadmin")))
-    return bool(ok and is_super)
+    return owner_id is not None and creator_num == owner_id
 
 
 async def link_subscription(ctx, shop: dict, token: str, tg_id: int) -> tuple[str, dict]:
@@ -675,17 +671,21 @@ async def unmapped_users(ctx, shop: dict) -> dict:
     (unplanned: linked or legacy subs). One query via IS NOT DISTINCT FROM
     covers both attributed and unattributed creators.
 
+    Inside superadmin-owned shops the pool also lists the superadmin's own
+    users (created_by_admin_id = 'superadmin'); elsewhere those stay hidden.
     Trial accounts are listed separately: they have no plan by design, but
     the owner may still want to turn one into a real subscription."""
     owner_id = await _owner_account_id(ctx, shop.get("owner_admin"))
     if owner_id is None and not await _owner_is_superadmin(ctx, shop):
         return {"orphans": [], "unplanned": [], "trials": []}  # fail closed
+    superadmin_owner = await _owner_is_superadmin(ctx, shop)
     orphans = await ctx.db.fetch(
         """SELECT uuid, username, expire_at, traffic_limit_bytes FROM users
-           WHERE created_by_admin_id IS NOT DISTINCT FROM $1 AND NOT EXISTS
-           (SELECT 1 FROM plugin_pershop_subs s WHERE s.shop_id=$2 AND s.user_uuid=users.uuid::text)
+           WHERE (created_by_admin_id IS NOT DISTINCT FROM $1
+                  OR ($2 AND created_by_admin_id = 'superadmin')) AND NOT EXISTS
+           (SELECT 1 FROM plugin_pershop_subs s WHERE s.shop_id=$3 AND s.user_uuid=users.uuid::text)
            ORDER BY username""",
-        owner_id, shop["id"])
+        owner_id, superadmin_owner, shop["id"])
     unplanned = await ctx.db.fetch(
         "SELECT id, user_uuid, username, buyer_tg_id FROM plugin_pershop_subs"
         " WHERE shop_id=$1 AND package_id IS NULL AND COALESCE(is_test,FALSE)=FALSE"
@@ -705,7 +705,9 @@ async def assign_plan(ctx, shop: dict, user_uuid: str, package_id: int,
                       is_test: bool = False) -> dict:
     """Owner matches a user they created to a shop package — or, with
     ``is_test``, to a trial account. Same attribution rule as linking: creator
-    match, or unattributed user + superadmin owner. Creates the subs row
+    match (a numeric creator must equal the owner's account id, the literal
+    'superadmin' only inside superadmin-owned shops), or unattributed user +
+    superadmin owner. Creates the subs row
     (buyer attached later on link) or plans an existing one.
 
     ``is_test`` binds the user as a trial account: no plan, flagged
@@ -728,7 +730,10 @@ async def assign_plan(ctx, shop: dict, user_uuid: str, package_id: int,
         raise ValueError("user not found")
     owner_id = await _owner_account_id(ctx, shop.get("owner_admin"))
     creator = prow.get("created_by_admin_id")
-    if creator is not None:
+    if isinstance(creator, str) and creator.strip() == "superadmin":
+        if not await _owner_is_superadmin(ctx, shop):
+            raise ValueError("foreign user")
+    elif creator is not None:
         if owner_id is None or creator != owner_id:
             raise ValueError("foreign user")
     elif not await _owner_is_superadmin(ctx, shop):

@@ -135,12 +135,16 @@ class FakeDB:
         if "SELECT username FROM plugin_pershop_subs" in q:
             return [{"username": s["username"]} for s in self.subs.values() if s["shop_id"] == a[0]]
         if "created_by_admin_id IS NOT DISTINCT FROM" in q:
-            # plan-matching orphans: panel users of this owner with no subs row
+            # plan-matching orphans: panel users of this owner (plus the
+            # superadmin's own users inside superadmin-owned shops) with no subs row
+            is_super = len(a) > 2 and bool(a[1])
+            shop_arg = a[2] if len(a) > 2 else a[1]
             out = []
             for u in self.users.values():
-                if u.get("created_by_admin_id") != a[0]:
+                c = u.get("created_by_admin_id")
+                if c != a[0] and not (is_super and c == "superadmin"):
                     continue
-                if any(s["shop_id"] == a[1] and s["user_uuid"] == u.get("uuid")
+                if any(s["shop_id"] == shop_arg and s["user_uuid"] == u.get("uuid")
                        for s in self.subs.values()):
                     continue
                 out.append({"uuid": u.get("uuid"), "username": u.get("username"),
@@ -1429,6 +1433,28 @@ async def _match_topup_flow():
     svc._panel_client = lambda: panel
     shop = dict(db.shops[sid])
 
+    # superadmin-created users pool + match only inside superadmin-owned shops
+    db.users["uu-god"] = {"uuid": "uu-god", "username": "god-user", "status": "ACTIVE",
+                          "expire_at": exp, "used_traffic_bytes": 0,
+                          "traffic_limit_bytes": 5 * GB, "created_by_admin_id": "superadmin"}
+
+    async def _fake_is_super(_c, _s):
+        return True
+
+    pool = await svc.unmapped_users(ctx, shop)
+    assert "god-user" not in {o["username"] for o in pool["orphans"]}, pool
+    try:
+        await svc.assign_plan(ctx, shop, "uu-god", pid)
+        raise SystemExit("superadmin-created assign should fail for sub-admin")
+    except ValueError:
+        pass
+    svc._owner_is_superadmin = _fake_is_super
+    pool = await svc.unmapped_users(ctx, shop)
+    assert "god-user" in {o["username"] for o in pool["orphans"]}, pool
+    res_god = await svc.assign_plan(ctx, shop, "uu-god", pid)
+    assert res_god["created"] is True and res_god["username"] == "god-user", res_god
+    svc._owner_is_superadmin = _fake_not_super
+
     pool = await svc.unmapped_users(ctx, shop)
     assert {o["username"] for o in pool["orphans"]} == {"own-one", "own-two"}, pool
     assert pool["unplanned"] == [], pool
@@ -1456,24 +1482,27 @@ async def _match_topup_flow():
                               "expireAt": exp.isoformat(), "trafficLimitBytes": 64 * GB,
                               "activeInternalSquads": [{"uuid": "sqT"}]}
     status, _info = await svc.link_subscription(ctx, shop, "tok1", 111)
-    # stricter rule: numeric owner-match no longer passes; only superadmin/empty link
-    assert status == "foreign", (status, _info)
+    # owner-match: numeric creator equal to the owner's own id links
+    assert status == "linked", (status, _info)
     # use a superadmin empty-creator token instead for the link test
     db.short_users["tokS"] = {"uuid": "uu-s", "username": "super-bob", "shortUuid": "tokS",
                               "telegramId": None, "createdByAdminId": "superadmin",
                               "expireAt": exp.isoformat(), "trafficLimitBytes": 64 * GB,
                               "activeInternalSquads": [{"uuid": "sqT"}]}
-    svc._owner_account_row = lambda _c, _o: (True, None)
+    async def _fake_acct_row(_c, _o):
+        return True, None
+
+    svc._owner_account_row = _fake_acct_row
     status2, info2 = await svc.link_subscription(ctx, shop, "tokS", 222)
     assert status2 == "linked" and info2["username"] == "super-bob", (status2, info2)
-    # superadmin-created token: the buyer himself can claim his premapped user
-    # (numerics stay foreign, but "superadmin" creator links regardless of owner)
-    db.short_users["tok1S"] = {"uuid": "uu-1", "username": "own-one", "shortUuid": "tok1S",
-                               "telegramId": None, "createdByAdminId": "superadmin",
-                               "expireAt": exp.isoformat(), "trafficLimitBytes": 64 * GB,
-                               "activeInternalSquads": [{"uuid": "sqT"}]}
-    status3, info3 = await svc.link_subscription(ctx, shop, "tok1S", 111)
-    assert status3 == "linked" and info3["username"] == "own-one", (status3, info3)
+    # superadmin-created token links (row-less owner counts as superadmin);
+    # another admin's user stays foreign even here.
+    db.short_users["tokX"] = {"uuid": "uu-x", "username": "other-one", "shortUuid": "tokX",
+                              "telegramId": None, "createdByAdminId": 99,
+                              "expireAt": exp.isoformat(), "trafficLimitBytes": 10 * GB,
+                              "activeInternalSquads": []}
+    statusX, _ = await svc.link_subscription(ctx, shop, "tokX", 113)
+    assert statusX == "foreign", statusX
     res3 = await svc.assign_plan(ctx, shop, "uu-1", pid)
     assert res3["created"] is False and res3["buyer_tg_id"] == 111, res3
     sub = [s for s in db.subs.values() if s["username"] == "own-one"][0]
@@ -1609,12 +1638,12 @@ async def _effects_flow():
     svc._panel_client = lambda: panel
     shop = dict(db.shops[sid])
     db.short_users["tok1"] = {"uuid": "uu-1", "username": "own-one", "shortUuid": "tok1",
-                              "telegramId": None, "createdByAdminId": "superadmin",
+                              "telegramId": None, "createdByAdminId": 42,
                               "expireAt": exp.isoformat(), "trafficLimitBytes": 64 * GB,
                               "activeInternalSquads": [{"uuid": "sqT"}]}
     assert await svc.assign_plan(ctx, shop, "uu-1", pid)
     status, _info = await svc.link_subscription(ctx, shop, "tok1", 111)
-    assert status == "linked", (status, _info)  # superadmin-created token links
+    assert status == "linked", (status, _info)  # owner-match: creator 42 == owner 42
     sub = [s for s in db.subs.values() if s["username"] == "own-one"][0]
 
     assert svc.is_timeless(_dt(2999, 6, 1, tzinfo=_tz.utc))
@@ -2683,10 +2712,10 @@ async def _link_flow():
                                   "trafficLimitBytes": None,
                                   "activeInternalSquads": [{"uuid": "sqt", "name": "Tier A"}]}
 
-        # service-level: only superadmin ("superadmin") or empty creator link;
-        # matching numeric owner no longer passes (stricter rule).
+        # service-level: owner-match links (creator 42 == owner 42);
+        # another admin's users stay foreign.
         st, info = await svc.link_subscription(ctx, shop, "tokA", 111)
-        assert st == "foreign", (st, info)  # numeric creator (42) != superadmin/empty
+        assert st == "linked", (st, info)  # owner's own user
         st, _ = await svc.link_subscription(ctx, shop, "tokD", 112)
         assert st == "foreign", st  # different creator: shop squad no longer helps
         st, _ = await svc.link_subscription(ctx, shop, "tokB", 111)
@@ -2716,7 +2745,7 @@ async def _link_flow():
         assert st == "linked" and info["username"] == "legacy-max", (st, info)
         assert panel.updated[-1] == ("uu-f", {"telegramId": 113}), panel.updated
         linked = [s for s in db.subs.values() if s.get("is_linked")]
-        assert len(linked) == 2, db.subs
+        assert len(linked) == 3, db.subs
 
         # bot-level: my_subs shows link button, prompt, paste link, success
         FakeTg.instances.clear()
