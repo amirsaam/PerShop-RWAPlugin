@@ -34,8 +34,6 @@ async def _notify_shop(ctx, shop: dict) -> None:
     from rwa_plugin_pershop.telegram import TgClient
 
     subs = await ctx.db.fetch("SELECT * FROM plugin_pershop_subs WHERE shop_id=$1 AND NOT cancelled", shop["id"])
-    if not subs:
-        return
     try:
         tg = TgClient(await decrypt_token(ctx, shop["bot_token_enc"]))
     except Exception as e:
@@ -69,7 +67,7 @@ async def _nag_pending(ctx, tg, shop: dict, now: datetime) -> None:
     try:
         rows = await ctx.db.fetch(
             "SELECT o.* FROM plugin_pershop_orders o WHERE o.shop_id=$1"
-            " AND o.status IN ('pending','withdraw_requested') ORDER BY o.id", shop["id"])
+            " AND o.status IN ('pending','approving','withdraw_requested') ORDER BY o.id", shop["id"])
     except Exception:
         return
     window = hours * 3600
@@ -87,7 +85,12 @@ async def _nag_pending(ctx, tg, shop: dict, now: datetime) -> None:
             due.append(o)
     if not due:
         return
-    await tg.send_message(admin, L(shop, "nag_header", n=len(due), h=hours))
+    awaiting = [o for o in due if o.get("status") != "approving"]
+    recovering = [o for o in due if o.get("status") == "approving"]
+    if awaiting:
+        await tg.send_message(admin, L(shop, "nag_header", n=len(awaiting), h=hours))
+    if recovering:
+        await tg.send_message(admin, L(shop, "nag_reconcile_header", n=len(recovering)))
     for o in due:
         try:
             await ctx.db.execute(
@@ -401,7 +404,7 @@ async def poller_tick(ctx) -> None:
     except Exception:
         return
     from rwa_plugin_pershop.crypto import decrypt_token
-    from rwa_plugin_pershop.routes_telegram import handle_update
+    from rwa_plugin_pershop.routes_telegram import handle_update_once
     from rwa_plugin_pershop.telegram import TgClient
 
     for s in shops:
@@ -413,12 +416,12 @@ async def poller_tick(ctx) -> None:
             updates = await tg.get_updates(offset, timeout_s=5)
             for u in updates:
                 try:
-                    await handle_update(ctx, shop, u)
+                    await handle_update_once(ctx, shop, u)
                 except Exception as e:
                     ctx.logger.warning("shop.poll_update_failed",
                                        extra={"shop": shop["id"], "err": str(e)})
+                    break
                 offset = max(offset or 0, u.get("update_id", 0) + 1)
-            if updates:
                 await ctx.settings.set(key, offset)
         except Exception as e:
             ctx.logger.warning("shop.poll_failed", extra={"shop": s["id"], "err": str(e)})

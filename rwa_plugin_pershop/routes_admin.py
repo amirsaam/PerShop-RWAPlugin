@@ -911,8 +911,8 @@ def build_admin_router(ctx):
 
     @router.get("/orders")
     async def orders(status: str = "pending", _a: AdminUser = Depends(require_permission("pershop", "moderate"))):
-        if status not in ("pending", "approved", "denied", "cancelled", "withdrawn", "all"):
-            raise HTTPException(400, "status must be pending|approved|denied|cancelled|withdrawn|all")
+        if status not in ("pending", "approving", "approved", "denied", "cancelled", "withdrawn", "all"):
+            raise HTTPException(400, "status must be pending|approving|approved|denied|cancelled|withdrawn|all")
         me = owner(_a)
         shop = await shop_for_owner(ctx, me)
         if not shop:
@@ -929,7 +929,7 @@ def build_admin_router(ctx):
                    WHERE o.shop_id=$1 ORDER BY o.id DESC LIMIT 200""", shop["id"])
         else:
             if status == "pending":
-                filt = "o.status IN ('pending', 'withdraw_requested')"
+                filt = "o.status IN ('pending', 'withdraw_requested', 'approving')"
                 args: tuple = (shop["id"],)
             else:
                 filt = "o.status=$2"
@@ -1072,7 +1072,7 @@ def build_admin_router(ctx):
         if not order:
             raise HTTPException(404, "order not found")
         try:
-            result = await approve_order(ctx, order_id, me)
+            result = await approve_order(ctx, order_id, me, shop_id=shop["id"])
         except ValueError as e:
             raise HTTPException(409, str(e))
         from rwa_plugin_pershop.lang import L
@@ -1135,7 +1135,7 @@ def build_admin_router(ctx):
         if not order:
             raise HTTPException(404, "order not found")
         try:
-            refunded = await deny_order(ctx, order_id, me, payload.reason)
+            refunded = await deny_order(ctx, order_id, me, payload.reason, shop_id=shop["id"])
         except ValueError as e:
             raise HTTPException(409, str(e))
         from rwa_plugin_pershop.lang import L
@@ -1207,7 +1207,7 @@ def build_admin_router(ctx):
         test_hwid = await ctx.settings.get("test_hwid", default=None)
         base = await ctx.settings.get("public_base_url", default="")
         n_shops = await ctx.db.fetchval("SELECT COUNT(*) FROM plugin_pershop_shops")
-        n_pending = await ctx.db.fetchval("SELECT COUNT(*) FROM plugin_pershop_orders WHERE status IN ('pending','withdraw_requested')")
+        n_pending = await ctx.db.fetchval("SELECT COUNT(*) FROM plugin_pershop_orders WHERE status IN ('pending','approving','withdraw_requested')")
         n_subs = await ctx.db.fetchval("SELECT COUNT(*) FROM plugin_pershop_subs")
         return {"version": _own_version(), "polling_enabled": bool(polling),
                 "tutorial_text": tutorial or "", "tutorial_buttons": tbuttons or "",

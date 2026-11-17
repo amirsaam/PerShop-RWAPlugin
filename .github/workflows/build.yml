@@ -9,17 +9,51 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PERSHOP_TEST_POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install cryptography fastapi
-      - run: python3 tests/test_shop.py
-      - run: python3 tests/test_routes_build.py
-      - run: node --check rwa_plugin_pershop/static/app.js
+      - name: Install package and test dependencies
+        run: python3 -m pip install '.[test]'
+      - name: Run shop and safety regression tests
+        timeout-minutes: 5
+        run: |
+          python3 tests/test_shop.py
+          python3 -m pytest -q tests/test_safety_regressions.py
+      - name: Run route build tests
+        timeout-minutes: 5
+        run: python3 tests/test_routes_build.py
+      - name: Run Telegram client tests
+        timeout-minutes: 5
+        run: python3 tests/test_telegram_client.py
+      - name: Check JavaScript syntax
+        timeout-minutes: 2
+        run: node --check rwa_plugin_pershop/static/app.js
+      - name: Run PostgreSQL billing and trial recovery tests
+        timeout-minutes: 10
+        run: pytest -q tests/test_postgres_billing.py tests/test_postgres_trials.py
 
   wheel:
+    needs: test
+    timeout-minutes: 10
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
@@ -49,9 +83,12 @@ jobs:
             echo "pyproject already at $TAG_VERSION"
           fi
       - run: pip install setuptools wheel cryptography fastapi
-      - run: python3 tests/test_shop.py
-      - run: python3 tests/test_routes_build.py
       - run: pip wheel . --no-deps -w dist
+      - name: Validate wheel installation and import
+        run: |
+          python3 -m pip install --no-index --no-deps --target "$RUNNER_TEMP/pershop-wheel" dist/*.whl
+          cd "$RUNNER_TEMP"
+          PYTHONPATH="$RUNNER_TEMP/pershop-wheel" python3 -c "import rwa_plugin_pershop; print(rwa_plugin_pershop.__file__)"
       - uses: actions/upload-artifact@v4
         with:
           name: pershop-wheel

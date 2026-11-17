@@ -354,7 +354,7 @@ window.rwaPluginUI['pershop'] = {
     // ---- Orders: status filter + table; approve/deny inline.
     const renderOrders = (body) => {
       body.innerHTML = '<div class="flex gap-1.5 mb-4">'
-        + ['pending', 'approved', 'denied', 'withdrawn'].map((s) =>
+        + ['pending', 'approving', 'approved', 'denied', 'withdrawn'].map((s) =>
           '<button data-s="' + s + '" class="inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium capitalize transition-all border '
           + (s === orderFilter ? 'bg-background text-foreground shadow' : 'text-muted-foreground hover:text-foreground')
           + '">' + s + '</button>').join('')
@@ -376,8 +376,10 @@ window.rwaPluginUI['pershop'] = {
             + '<td>' + (o.renew_username ? 'renew ' + esc(o.renew_username) : 'new') + '</td>'
             + '<td>' + (o.status === 'withdraw_requested' ? '<span class="' + pillFor('withdraw_requested') + '">withdraw requested</span><div class="text-xs text-dark-300 mt-1">reason: ' + esc(o.withdraw_reason || '') + ' · refund to: ' + esc(o.withdraw_card || '') + ' (decide in the bot DM)</div>'
               : '<span class="' + pillFor(o.status) + '">' + esc(o.status) + '</span>') + '</td>'
-            + '<td class="whitespace-nowrap">' + (status === 'pending' && o.status === 'pending'
-              ? '<button data-a="ok" class="' + BTN_M + '">Approve</button> <button data-a="no" class="' + BTN_M + '">Deny</button>' : '') + '</td></tr>';
+            + '<td class="whitespace-nowrap">' + (o.status === 'approving'
+              ? '<button data-a="ok" class="' + BTN_M + '">Resume</button><div class="text-xs text-dark-300 mt-1">panel outcome must be checked; no duplicate account will be created</div>'
+              : (status === 'pending' && o.status === 'pending'
+                ? '<button data-a="ok" class="' + BTN_M + '">Approve</button> <button data-a="no" class="' + BTN_M + '">Deny</button>' : '')) + '</td></tr>';
           })
             || '<tr><td colspan="7"><i class="text-sm text-dark-300">none</i></td></tr>';
           q('ob').querySelectorAll('button').forEach((b) => { b.onclick = async () => {

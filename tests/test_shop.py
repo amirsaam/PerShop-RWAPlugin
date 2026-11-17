@@ -50,13 +50,17 @@ class FakeDB:
         self.last_mids = {}  # (shop_id, tg_id) -> tracked last bot message id
         self.credits = {}  # (shop_id, tg_id) -> credit units
         self.scammers = {}  # tg_id -> {marked_by_admin, reason}
-        self.test_claims = set()  # tg_ids with a panel-global test claim
+        self.test_claims = {}  # tg_id -> durable trial claim journal
         self.scam_noted = set()  # (shop_id, tg_id) warned in last 24h
         self.svc_cats = {}
         self.svcs = {}
         self.bcs = {}
         self.promos = {}  # id -> promo row
         self.promo_uses = set()  # (promo_id, buyer_tg_id)
+        self.promo_use_orders = {}  # (promo_id, buyer_tg_id) -> order_id
+        self.campaign_uses = {}  # (shop_id, buyer_tg_id) -> order_id
+        self.ledger = {}  # (shop_id, idempotency_key) -> row
+        self.updates = {}  # (shop_id, update_id) -> row
         self.topup_pkgs = {}  # topup_id -> {package_id, ...} (top-up links)
         self.events = []  # activity-feed rows
         self.versions = {"pershop_001"}  # fake alembic_version rows
@@ -67,6 +71,199 @@ class FakeDB:
     def _next(self, k):
         self.seq[k] += 1
         return self.seq[k]
+
+    def _grant_ledger(self, shop_id, buyer, amount, key, kind, order_id=None, sub_id=None):
+        amount = float(amount or 0)
+        ledger_key = (shop_id, key)
+        if ledger_key in self.ledger or amount <= 0:
+            return 0.0
+        self.ledger[ledger_key] = {"shop_id": shop_id, "tg_id": buyer, "order_id": order_id,
+                                   "sub_id": sub_id, "kind": kind, "units": amount,
+                                   "idempotency_key": key}
+        self.credits[(shop_id, buyer)] = self.credits.get((shop_id, buyer), 0.0) + amount
+        return amount
+
+    def _release_discounts(self, order_id):
+        for key, oid in list(self.promo_use_orders.items()):
+            if oid == order_id:
+                self.promo_uses.discard(key)
+                self.promo_use_orders.pop(key, None)
+                promo = self.promos.get(key[0])
+                if promo:
+                    promo["uses_reserved"] = max(0, int(promo.get("uses_reserved") or 0) - 1)
+        for key, oid in list(self.campaign_uses.items()):
+            if oid == order_id:
+                self.campaign_uses.pop(key, None)
+
+    async def _billing_fetch(self, q, *a):
+        if "SELECT * FROM created" in q and "INSERT INTO plugin_pershop_credit_ledger" in q:
+            key = (a[0], a[11])
+            existing_order = next((o for o in self.orders.values()
+                                   if o["shop_id"] == a[0] and o.get("idempotency_key") == a[11]), None)
+            if key in self.ledger or existing_order:
+                return []
+            amount = float(a[10] or 0)
+            self.ledger[key] = {"shop_id": a[0], "tg_id": a[3], "order_id": None,
+                                "kind": "checkout", "units": 0, "idempotency_key": a[11]}
+            if self.credits.get((a[0], a[3]), 0.0) < amount:
+                return []
+            if amount:
+                self.credits[(a[0], a[3])] -= amount
+            oid = self._next("order")
+            now = datetime.now(timezone.utc)
+            row = {"id": oid, "shop_id": a[0], "package_id": a[1], "service_id": a[2],
+                   "buyer_tg_id": a[3], "buyer_username": a[4], "receipt_file_id": a[5],
+                   "receipt_kind": a[6], "renew_username": a[7], "total_units": float(a[8] or 0),
+                   "credit_units": 0, "options_snapshot": a[9], "idempotency_key": a[11],
+                   "status": "pending", "created_at": now}
+            self.orders[oid] = row
+            return [dict(row)]
+        if "WHERE shop_id=$1 AND idempotency_key=$2" in q and "plugin_pershop_orders" in q:
+            return [dict(o) for o in self.orders.values()
+                    if o["shop_id"] == a[0] and o.get("idempotency_key") == a[1]]
+        if "SELECT (SELECT credit_units FROM wallet) AS balance" in q:
+            amount = self._grant_ledger(a[0], a[1], a[6], a[7], a[5], a[2], a[4])
+            return [{"balance": self.credits.get((a[0], a[1]), 0.0), "applied": amount > 0}]
+        if "WITH eligible AS" in q and "refund" in q:
+            order = self.orders.get(a[0])
+            refunded = 0.0
+            if (order and order["shop_id"] == a[1] and order["buyer_tg_id"] == a[2]
+                    and order["status"] in ("pending", "withdraw_requested")):
+                refunded = self._grant_ledger(a[1], a[2], a[3], a[4], "refund", a[0])
+                if refunded:
+                    import json
+                    snap = json.loads(order.get("options_snapshot") or "{}")
+                    snap["credit_prefunded"] = True
+                    order["options_snapshot"] = json.dumps(snap)
+            return [{"refunded": refunded}]
+        if "WITH decision AS" in q and "SET status='denied'" in q:
+            order = self.orders.get(a[0])
+            if (not order or order["status"] not in ("pending", "withdraw_requested")
+                    or (a[3] is not None and order["shop_id"] != a[3])):
+                return []
+            order.update(status="denied", deny_reason=a[1], decided_by=a[2],
+                         decided_at=datetime.now(timezone.utc))
+            refunded = self._grant_ledger(order["shop_id"], order["buyer_tg_id"], a[4],
+                                          a[5], "refund", order["id"])
+            self._release_discounts(order["id"])
+            return [dict(order, credit_refunded=refunded)]
+        if "WITH decision AS" in q and "status=$2" in q and "withdraw_requested" in q:
+            order = self.orders.get(a[0])
+            if not order or order["shop_id"] != a[3] or order["status"] != "withdraw_requested":
+                return []
+            order.update(status=a[1], decided_by=a[2], decided_at=datetime.now(timezone.utc))
+            refunded = self._grant_ledger(order["shop_id"], order["buyer_tg_id"], a[4],
+                                          a[5], "refund", order["id"])
+            if a[6]:
+                self._release_discounts(order["id"])
+            return [dict(order, credit_refunded=refunded)]
+        if "WITH decision AS" in q and "UPDATE plugin_pershop_subs" in q:
+            sub = self.subs.get(a[0])
+            order = self.orders.get(a[2])
+            if (not sub or sub.get("cancelled") or sub.get("buyer_tg_id") != a[1] or not order
+                    or order.get("renew_username") != sub.get("username")
+                    or order.get("status") != "approved" or order.get("receipt_kind") != "credit"):
+                return []
+            sub["cancelled"] = True
+            refunded = self._grant_ledger(sub["shop_id"], a[1], a[3], a[4],
+                                          "cancel_refund", a[2], a[0])
+            self._release_discounts(a[2])
+            return [{"sub_id": a[0], "refunded": refunded}]
+        if "WITH claimed AS" in q and "plugin_pershop_promos" in q:
+            promo = next((p for p in self.promos.values() if p["shop_id"] == a[0] and p["code"] == a[1]), None)
+            code_ok = not a[1]
+            if promo and (promo["id"], a[2]) not in self.promo_uses:
+                valid = promo.get("active", True)
+                until = promo.get("valid_until")
+                if until and until <= datetime.now(timezone.utc):
+                    valid = False
+                reserved = int(promo.get("uses_reserved") or 0)
+                if promo.get("max_uses") and reserved >= promo["max_uses"]:
+                    valid = False
+                if a[5] == "pkg" and promo.get("applies_to") == "services":
+                    valid = False
+                if a[5] == "svc" and promo.get("applies_to") == "packages":
+                    valid = False
+                if valid:
+                    self.promo_uses.add((promo["id"], a[2]))
+                    self.promo_use_orders[(promo["id"], a[2])] = a[3]
+                    promo["uses_reserved"] = reserved + 1
+            if a[1]:
+                code_ok = bool(promo and self.promo_use_orders.get((promo["id"], a[2])) == a[3])
+            if a[4]:
+                invited = any(sid == a[0] and invited == a[2] for sid, _ref, invited in self.referrals)
+                prior = any(o["shop_id"] == a[0] and o["buyer_tg_id"] == a[2]
+                            and o["status"] == "approved" and o["id"] != a[3]
+                            for o in self.orders.values())
+                key = (a[0], a[2])
+                if invited and not prior and key not in self.campaign_uses:
+                    self.campaign_uses[key] = a[3]
+                campaign_ok = self.campaign_uses.get(key) == a[3]
+            else:
+                campaign_ok = True
+            return [{"promo_ok": code_ok, "campaign_ok": campaign_ok}]
+        if "WITH decision AS" in q and "credit_units=$4" in q:
+            order = self.orders.get(a[0])
+            if not order or order["status"] != "approving":
+                return []
+            amount = float(a[3] or 0)
+            order.update(status="approved", decided_by=a[1], decided_at=datetime.now(timezone.utc),
+                         credit_units=amount if a[2] is not None else 0, approval_stage=None,
+                         provision_username=None)
+            if a[2] is not None and amount:
+                self._grant_ledger(order["shop_id"], a[2], amount, a[4], "referral", a[0])
+            return [dict(order, referrer_earned=amount if a[2] is not None else 0)]
+        if "INSERT INTO plugin_pershop_updates" in q:
+            current = self.updates.get((a[0], a[1]))
+            now = datetime.now(timezone.utc)
+            if current and (current.get("processed_at") or current["locked_at"] >= now - timedelta(minutes=5)):
+                return []
+            self.updates[(a[0], a[1])] = {"shop_id": a[0], "update_id": a[1],
+                                          "owner_token": a[2],
+                                          "locked_at": now, "processed_at": None}
+            return [{"owner_token": a[2]}]
+        if "UPDATE plugin_pershop_updates SET processed_at=NOW()" in q:
+            row = self.updates.get((a[0], a[1]))
+            if row and row.get("owner_token") == a[2] and row.get("processed_at") is None:
+                row["processed_at"] = datetime.now(timezone.utc)
+                return [{"update_id": a[1]}]
+            return []
+        if "SELECT tg_id,order_id,sub_id,kind,units" in q:
+            row = self.ledger.get((a[0], a[1]))
+            return [dict(row)] if row else []
+        return NotImplemented
+
+    async def _billing_execute(self, q, *a):
+        if "UPDATE plugin_pershop_credit_ledger" in q and "idempotency_key=$4" in q:
+            row = self.ledger.get((a[2], a[3]))
+            if row:
+                row.update(order_id=a[0], kind="debit", units=-float(a[1] or 0))
+            return None
+        if "DELETE FROM plugin_pershop_credit_ledger" in q and "kind='checkout'" in q:
+            row = self.ledger.get((a[0], a[1]))
+            if row and row.get("kind") == "checkout" and row.get("order_id") is None:
+                self.ledger.pop((a[0], a[1]), None)
+            return None
+        if "WITH deleted AS" in q and "plugin_pershop_campaign_uses" in q:
+            self._release_discounts(a[0])
+            return None
+        if "UPDATE plugin_pershop_orders SET approval_stage=$1" in q \
+                and "IS NOT DISTINCT" not in q:
+            if self.orders.get(a[1], {}).get("status") == "approving":
+                self.orders[a[1]]["approval_stage"] = a[0]
+            return None
+        if "UPDATE plugin_pershop_updates SET processed_at=NOW()" in q:
+            row = self.updates.get((a[0], a[1]))
+            if row and (len(a) < 3 or row.get("owner_token") == a[2]):
+                row["processed_at"] = datetime.now(timezone.utc)
+            return None
+        if "DELETE FROM plugin_pershop_updates" in q:
+            row = self.updates.get((a[0], a[1]))
+            if (row and row.get("processed_at") is None
+                    and row.get("owner_token") == a[2]):
+                self.updates.pop((a[0], a[1]), None)
+            return None
+        return NotImplemented
 
     # -- reads --
     def _chk(self, q, a):
@@ -85,6 +282,96 @@ class FakeDB:
 
     async def fetch(self, q, *a):
         self._chk(q, a)
+        handled = await self._billing_fetch(q, *a)
+        if handled is not NotImplemented:
+            return handled
+        if "INSERT INTO plugin_pershop_test_claims" in q:
+            if a[0] in self.test_claims:
+                return []
+            shop = self.shops.get(a[1])
+            if not shop or not shop.get("test_enabled") or not (shop.get("prefix") or "").strip():
+                return []
+            row = {"tg_id": a[0], "shop_id": a[1],
+                   "created_at": datetime.now(timezone.utc),
+                   "provision_stage": a[2], "provision_username": None}
+            self.test_claims[a[0]] = row
+            return [dict(row)]
+        if "SELECT * FROM plugin_pershop_test_claims WHERE tg_id=$1" in q:
+            row = self.test_claims.get(a[0])
+            return [dict(row)] if row else []
+        if "SELECT provision_username AS username FROM plugin_pershop_test_claims" in q:
+            return [{"username": row["provision_username"]}
+                    for row in self.test_claims.values()
+                    if row.get("provision_stage") and row.get("provision_username")]
+        if "UPDATE plugin_pershop_shops SET test_counter=test_counter+1" in q:
+            shop = self.shops.get(a[0])
+            if not shop:
+                return []
+            shop["test_counter"] = int(shop.get("test_counter") or 0) + 1
+            return [{"prefix": shop["prefix"], "owner_admin": shop.get("owner_admin"),
+                     "test_counter": shop["test_counter"]}]
+        if "UPDATE plugin_pershop_test_claims" in q:
+            if len(a) == 5 and "provision_username=$2" in q:
+                row = self.test_claims.get(a[2])
+                if not row or row["shop_id"] != a[3] or row.get("provision_stage") != a[4]:
+                    return []
+                row["provision_stage"] = a[0]
+                row["provision_username"] = a[1]
+                return [dict(row)]
+            if "COALESCE($4,provision_username)" in q:
+                row = self.test_claims.get(a[1])
+                if not row or row["shop_id"] != a[2] or row.get("provision_stage") != a[4]:
+                    return []
+                row["provision_stage"] = a[0]
+                if a[3] is not None:
+                    row["provision_username"] = a[3]
+                return [{"tg_id": row["tg_id"]}]
+            row = self.test_claims.get(a[1])
+            if not row or row["shop_id"] != a[2] or row.get("provision_stage") != a[3]:
+                return []
+            row["provision_stage"] = a[0]
+            return [{"tg_id": row["tg_id"]}]
+        if "UPDATE plugin_pershop_orders SET approval_stage=$1" in q:
+            o = self.orders.get(a[1])
+            if (not o or o.get("status") != "approving"
+                    or o.get("approval_stage") != a[2]):
+                return []
+            o["approval_stage"] = a[0]
+            if len(a) > 3 and a[3] is not None:
+                o["provision_username"] = a[3]
+            return [{"id": o["id"]}]
+        if "UPDATE plugin_pershop_orders SET status='approving'" in q:
+            o = self.orders.get(a[1])
+            if not o or o["status"] != "pending" or (len(a) > 2 and o["shop_id"] != a[2]):
+                return []
+            o["status"] = "approving"
+            o["approval_stage"] = '{"state":"preparing"}'
+            o["decided_at"] = datetime.now(timezone.utc)
+            o["decided_by"] = a[0]
+            return [dict(o)]
+        if "UPDATE plugin_pershop_orders SET status='denied', deny_reason" in q:
+            o = self.orders.get(a[2])
+            if not o or o["status"] not in ("pending", "withdraw_requested"):
+                return []
+            if "shop_id=$4" in q and o["shop_id"] != a[3]:
+                return []
+            o.update(status="denied", deny_reason=a[0], decided_by=a[1],
+                     decided_at=datetime.now(timezone.utc))
+            return [dict(o)]
+        if "UPDATE plugin_pershop_orders SET status='withdraw_requested'" in q:
+            o = self.orders.get(a[2])
+            if not o or o["buyer_tg_id"] != a[3] or o["status"] != "pending":
+                return []
+            if len(a) > 4 and o["shop_id"] != a[4]:
+                return []
+            o.update(status="withdraw_requested", withdraw_reason=a[0], withdraw_card=a[1])
+            return [dict(o)]
+        if "UPDATE plugin_pershop_orders SET status=$1, decided_at" in q:
+            o = self.orders.get(a[2])
+            if not o or o["shop_id"] != a[3] or o["status"] != "withdraw_requested":
+                return []
+            o.update(status=a[0], decided_by=a[1], decided_at=datetime.now(timezone.utc))
+            return [dict(o)]
         if "FROM plugin_pershop_shops WHERE owner_admin" in q:
             return [s for s in self.shops.values() if s["owner_admin"] == a[0]]
         if "FROM plugin_pershop_shops WHERE public_key_hash" in q:
@@ -152,6 +439,11 @@ class FakeDB:
                             "expire_at": u.get("expire_at"),
                             "traffic_limit_bytes": u.get("traffic_limit_bytes")})
             return out
+        if "SELECT * FROM users WHERE username=$1" in q or "lower(username)" in q:
+            want = a[0] if a else None
+            return [u for u in self.users.values()
+                    if isinstance(u.get("username"), str) and isinstance(want, str)
+                    and u.get("username").lower() == want.lower()]
         if "SELECT username FROM users" in q:
             return [{"username": u["username"]} for u in self.users.values()]
         if "FROM users WHERE uuid" in q:
@@ -461,11 +753,6 @@ class FakeDB:
                                 "created_at": datetime.now(timezone.utc), "decided_at": None, "decided_by": None,
                                 "owner_nudged_at": None}
             return [{"id": nid}]
-        if "INSERT INTO plugin_pershop_test_claims" in q:
-            if a[0] in self.test_claims:
-                return []
-            self.test_claims.add(a[0])
-            return [{"tg_id": a[0]}]
         if "INSERT INTO plugin_pershop_broadcasts" in q:
             nid = self._next("bc")
             self.bcs[nid] = {"id": nid, "shop_id": a[0], "html_text": a[1], "photo": a[2],
@@ -479,7 +766,7 @@ class FakeDB:
                     " \"uq_pershop_promos_shop_code\"")
             pid = self._next("promo")
             row = {"id": pid, "shop_id": a[0], "code": a[1], "kind": a[2],
-                   "value": float(a[3]), "max_uses": int(a[4] or 0),
+                   "value": float(a[3]), "max_uses": int(a[4] or 0), "uses_reserved": 0,
                    "valid_until": a[5], "active": True,
                    "created_by_owner": a[6], "uses": 0,
                    "applies_to": (a[7] if len(a) > 7 else "both")}
@@ -501,6 +788,8 @@ class FakeDB:
                             "expire_at": user.get("expireAt", user.get("expire_at")),
                             "traffic_limit_bytes": user.get("trafficLimitBytes",
                                                             user.get("traffic_limit_bytes")),
+                            "telegram_id": user.get("telegramId", user.get("telegram_id")),
+                            "description": user.get("description"),
                             "used_traffic_bytes": 0, "created_by_admin_id": None,
                             "_panel_id": user.get("id")}
         return uuid
@@ -516,6 +805,15 @@ class FakeDB:
 
     async def fetchval(self, q, *a):
         self._chk(q, a)
+        if "SELECT -units FROM plugin_pershop_credit_ledger" in q:
+            for row in self.ledger.values():
+                if (row.get("shop_id") == a[0] and row.get("order_id") == a[1]
+                        and row.get("kind") == "debit" and float(row.get("units") or 0) < 0):
+                    return -float(row["units"])
+            return None
+        if "SELECT EXISTS" in q and "plugin_pershop_credit_ledger" in q:
+            row = self.ledger.get((a[0], a[1]))
+            return bool(row and float(row.get("units") or 0) > 0)
         if "SELECT last_mid FROM plugin_pershop_buyers" in q:
             return self.last_mids.get((a[0], a[1]))
         if "FROM plugin_pershop_buyers" in q and "credit_units" in q:
@@ -538,15 +836,17 @@ class FakeDB:
                        if o["shop_id"] == a[0] and o.get("buyer_tg_id") == a[1])
         if "COUNT(*)" in q and "plugin_pershop_promo_uses" in q:
             return sum(1 for pid, _ in self.promo_uses if pid == a[0])
-        if "status IN (" in q and "plugin_pershop_orders" in q:
-            return sum(1 for o in self.orders.values()
-                       if o["shop_id"] == a[0] and o["status"] in ("pending", "withdraw_requested"))
         if "COUNT(*)" in q and "plugin_pershop_orders" in q and "created_at <" in q:
             thr = datetime.now(timezone.utc) - timedelta(hours=24)
             return sum(1 for o in self.orders.values()
-                       if o["shop_id"] == a[0] and o["status"] == "pending"
+                       if o["shop_id"] == a[0]
+                       and o["status"] in ("pending", "approving", "withdraw_requested")
                        and isinstance(o.get("created_at"), datetime)
                        and o["created_at"] < thr)
+        if "status IN (" in q and "plugin_pershop_orders" in q:
+            return sum(1 for o in self.orders.values()
+                       if o["shop_id"] == a[0]
+                       and o["status"] in ("pending", "approving", "withdraw_requested"))
         if "status='" in q and "plugin_pershop_orders" in q:
             st = q.split("status='")[1].split("'")[0]
             return sum(1 for o in self.orders.values() if o["shop_id"] == a[0] and o["status"] == st)
@@ -567,6 +867,9 @@ class FakeDB:
 
     async def execute(self, q, *a):
         self._chk(q, a)
+        handled = await self._billing_execute(q, *a)
+        if handled is not NotImplemented:
+            return handled
         if q.strip().startswith("DROP TABLE IF EXISTS"):
             for _t, _s in (("plugin_pershop_broadcasts", self.bcs),
                             ("plugin_pershop_referrals", self.referrals),
@@ -601,6 +904,9 @@ class FakeDB:
                 self.sessions.pop((a[0], a[1], a[2]), None)
             return
         if "INSERT INTO plugin_pershop_subs" in q:
+            if "ON CONFLICT(username) DO NOTHING" in q and any(
+                    row.get("username") == a[3] for row in self.subs.values()):
+                return
             nid = self._next("sub")
             self.subs[nid] = {"id": nid, "shop_id": a[0], "buyer_tg_id": a[1], "user_uuid": a[2],
                               "username": a[3], "expire_at": a[4], "traffic_limit_bytes": a[5],
@@ -631,6 +937,19 @@ class FakeDB:
             return
         if "DELETE FROM plugin_pershop_scammers WHERE tg_id" in q:
             self.scammers.pop(a[0], None)
+            return
+        if "SET status='pending',decided_at=NULL" in q:
+            o = self.orders.get(a[0])
+            if (o and o["status"] == "approving"
+                    and (len(a) < 2 or o.get("approval_stage") == a[1])):
+                o.update(status="pending", decided_at=None, approval_stage=None,
+                         provision_username=None)
+            return
+        if "SET status='pending', decided_at=NULL" in q:
+            o = self.orders.get(a[0])
+            if o and o["status"] == "approving":
+                o["status"] = "pending"
+                o["decided_at"] = None
             return
         if "SET status='denied', decided_at=NOW()" in q:
             o = self.orders[a[0]]
@@ -778,6 +1097,23 @@ class FakeDB:
             o["decided_by"] = a[1]
             o["decided_at"] = datetime.now(timezone.utc)
             return
+        if ("plugin_pershop_subs SET expire_at=$1" in q
+                and "WHERE shop_id=$3 AND username=$4" in q):
+            matches = [s for s in self.subs.values()
+                       if s["shop_id"] == a[2] and s.get("username") == a[3]]
+            for s in matches:
+                s["expire_at"] = a[0]
+                if "traffic_limit_bytes" in q and a[1] is not None:
+                    s["traffic_limit_bytes"] = a[1]
+                if "notified_80=FALSE" in q:
+                    s["notified_80"] = False
+                if "notified_72h=FALSE" in q:
+                    s["notified_72h"] = False
+                if "notified_expired=FALSE" in q:
+                    s["notified_expired"] = False
+                if "notified_out=FALSE" in q:
+                    s["notified_out"] = False
+            return
         if "plugin_pershop_subs SET expire_at=$1" in q:
             s = self.subs[a[2]]
             s["expire_at"] = a[0]
@@ -844,7 +1180,7 @@ class FakeDB:
             pid = self._next("promo")
             self.promos[pid] = {
                 "id": pid, "shop_id": a[0], "code": a[1], "kind": a[2],
-                "value": float(a[3]), "max_uses": int(a[4] or 0),
+                "value": float(a[3]), "max_uses": int(a[4] or 0), "uses_reserved": 0,
                 "valid_until": a[5], "active": True,
                 "created_by_owner": a[6], "uses": 0,
                 "applies_to": (a[7] if len(a) > 7 else "both")}
@@ -896,7 +1232,9 @@ class FakePanel:
         user = {"id": 1000 + n, "username": kwargs["username"],
                 "subscriptionUrl": "https://sub/x",
                 "trafficLimitBytes": kwargs.get("traffic_limit_bytes"),
-                "expireAt": kwargs.get("expire_at")}
+                "expireAt": kwargs.get("expire_at"),
+                "telegramId": kwargs.get("telegram_id"),
+                "description": kwargs.get("description")}
         if not self.v3_numeric:
             user["uuid"] = f"uuid-{n}"
         return {"response": user}
@@ -1724,7 +2062,8 @@ async def _effects_flow():
     res = await svc.approve_order(ctx, pend[0]["id"], "admin1")
     assert res["effect"] == "time_only" and res["renewed"] is True, res
     assert res["traffic_limit_bytes"] == 82 * GB, res  # untouched
-    assert ("uu-1", 15) in panel.extended, panel.extended
+    assert any(u == "uu-1" and f.get("expireAt") == res["expire_at"].isoformat()
+               and "trafficLimitBytes" not in f for u, f in panel.updated), panel.updated
 
     # timeless buy: 2999 expiry, infinity row in My subs
     await cb("pershop:buy", "e7")
@@ -4767,7 +5106,7 @@ async def _shop_admin_flow():
     await ctx.settings.set("tg_offset:1", 42)
     assert len(db.shops) == 1
     res = await svc.reset_all(ctx)
-    assert res["ok"] is True and len(res["dropped"]) == 16, res
+    assert res["ok"] is True and len(res["dropped"]) == 19, res
     assert db.dropped is True and db.versions == set(), res
     assert db.shops == {} and db.pkgs == {} and db.subs == {}, db
     assert ctx.settings.d == {}, ctx.settings.d
@@ -5110,6 +5449,57 @@ async def _buyer_referral_flow():
 
 def test_buyer_referral_flow():
     asyncio.run(_buyer_referral_flow())
+
+
+def test_approval_recovers_uncertain_panel_create():
+    """A successful create followed by a lost response is finalized, not repeated."""
+    import rwa_plugin_pershop.service as svc
+
+    async def go():
+        db = FakeDB()
+        ctx = FakeCtx(db)
+        sid, pid = make_shop(db)
+        panel = FakePanel()
+        old_client = svc._panel_client
+        old_create = svc.panel_create_user
+        svc._panel_client = lambda: panel
+        calls = 0
+
+        async def create_then_lose_response(ctx, **kwargs):
+            nonlocal calls
+            calls += 1
+            await old_create(ctx, **kwargs)
+            raise RuntimeError("response lost after commit")
+
+        svc.panel_create_user = create_then_lose_response
+        try:
+            row = await db.fetchrow(
+                "INSERT INTO plugin_pershop_orders(shop_id,package_id,buyer_tg_id,buyer_username,"
+                "receipt_file_id,receipt_kind,renew_username,total_units,options_snapshot)"
+                " VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
+                sid, pid, 111, "alice", "receipt", "photo", None, 2.5,
+                '{"credit_used":0}')
+            try:
+                await svc.approve_order(ctx, row["id"], "admin1", shop_id=sid)
+            except RuntimeError as exc:
+                assert "response lost" in str(exc)
+            else:
+                raise AssertionError("the injected lost response must propagate")
+            assert db.orders[row["id"]]["status"] == "approving"
+            assert calls == 1
+
+            result = await svc.approve_order(ctx, row["id"], "admin1", shop_id=sid)
+            assert result["username"] == "vip-alice"
+            assert result["user_uuid"] == "uuid-1"
+            assert calls == 1, "recovery must adopt the completed create"
+            assert db.orders[row["id"]]["status"] == "approved"
+            assert db.orders[row["id"]]["renew_username"] == "vip-alice"
+            assert len(db.subs) == 1
+        finally:
+            svc.panel_create_user = old_create
+            svc._panel_client = old_client
+
+    asyncio.run(go())
 
 
 if __name__ == "__main__":

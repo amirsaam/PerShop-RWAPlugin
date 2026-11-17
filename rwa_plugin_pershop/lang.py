@@ -120,6 +120,7 @@ LOCALES: dict[str, dict[str, str]] = {
         "service_done_default": "Your order is confirmed. The owner will contact you shortly.",
         "svc_unavailable": "Sorry, this service is no longer available.",
         "approve_btn": "✅ Approve",
+        "resume_btn": "↻ Resume provisioning",
         "deny_btn": "❌ Deny",
         "scam_btn": "🚫 Scammer",
         "scam_done": "Order #{id} marked as scam. Buyer {buyer_id} is now flagged network-wide.",
@@ -210,11 +211,13 @@ LOCALES: dict[str, dict[str, str]] = {
         "test_no_renew": "Trial accounts can't be renewed. Grab a full plan from the Buy menu instead.",
         "trial_plan": "trial",
         "ord_pending": "waiting for admin",
+        "ord_approving": "being provisioned",
         "ord_approved": "approved",
         "ord_denied": "denied",
         "ord_cancelled": "withdrawn",
         "cancel_receipt_btn": "Withdraw receipt",
         "nag_header": "👋 Friendly reminder: you have {n} order(s) waiting for action (older than {h}h). Open the Orders tab or the decision messages to approve or deny.",
+        "nag_reconcile_header": "⚠️ {n} order(s) still need a provisioning review. Open Orders → Approving and choose Resume. Do not create a replacement account.",
         "rel_tomorrow": "tomorrow",
         "rel_yesterday": "yesterday",
         "rel_in_days": "in {n} days",
@@ -350,6 +353,7 @@ LOCALES: dict[str, dict[str, str]] = {
         "service_done_default": "سفارش شما تأیید شد. فروشنده به‌زودی با شما تماس می‌گیرد.",
         "svc_unavailable": "متأسفانه این خدمت دیگر در دسترس نیست.",
         "approve_btn": "✅ تأیید",
+        "resume_btn": "↻ ادامه‌ی ساخت اشتراک",
         "deny_btn": "❌ رد",
         "scam_btn": "🚫 کلاهبردار",
         "scam_done": "سفارش #{id} به‌عنوان کلاهبرداری ثبت شد. خریدار {buyer_id} در کل شبکه علامت خورد.",
@@ -465,12 +469,15 @@ LOCALES: dict[str, dict[str, str]] = {
         "test_no_renew": "اشتراک آزمایشی قابل تمدید نیست. از منوی خرید یک بسته کامل بگیرید.",
         "trial_plan": "آزمایشی",
         "ord_pending": "منتظر فروشنده",
+        "ord_approving": "در حال ساخت اشتراک",
         "ord_approved": "تأیید شد",
         "ord_denied": "رد شد",
         "ord_cancelled": "پس گرفته شد",
         "cancel_receipt_btn": "پس گرفتن رسید",
         "nag_header": "👋 یادآوری: {n} سفارش بیش از {h} ساعت منتظر اقدام شماست. "
                       "از تب سفارش‌ها یا پیام‌های تصمیم، تأیید یا رد کنید.",
+        "nag_reconcile_header": "⚠️ {n} سفارش در مرحله‌ی ساخت اشتراک هنوز به بررسی نیاز دارد. "
+                                "از بخش Approving در سفارش‌ها، Resume را بزنید و اشتراک جایگزین نسازید.",
         "rel_tomorrow": "فردا",
         "rel_yesterday": "دیروز",
         "rel_in_days": "{n} روز دیگر",
@@ -582,6 +589,7 @@ LOCALES: dict[str, dict[str, str]] = {
         "service_done_default": "Ваш заказ подтверждён — владелец скоро с вами свяжется.",
         "svc_unavailable": "Извините, эта услуга больше недоступна.",
         "approve_btn": "✅ Одобрить",
+        "resume_btn": "↻ Продолжить создание",
         "deny_btn": "❌ Отклонить",
         "scam_btn": "🚫 Мошенник",
         "scam_done": "Заказ #{id} помечен как мошенничество. Покупатель {buyer_id} теперь помечен по всей сети.",
@@ -672,11 +680,13 @@ LOCALES: dict[str, dict[str, str]] = {
         "test_no_renew": "Пробные аккаунты не продлеваются — вместо этого возьмите полный тариф в меню покупки.",
         "trial_plan": "пробный",
         "ord_pending": "ждёт владельца",
+        "ord_approving": "подписка создаётся",
         "ord_approved": "одобрен",
         "ord_denied": "отклонён",
         "ord_cancelled": "отозван",
         "cancel_receipt_btn": "Отозвать чек",
         "nag_header": "👋 Напоминание: у вас {n} заказ(а) ждут решения (старше {h} ч.). Откройте вкладку заказов или сообщения с решениями.",
+        "nag_reconcile_header": "⚠️ Для {n} заказ(а) нужно проверить создание подписки. Откройте Заказы → Approving и нажмите Resume. Не создавайте другую подписку.",
         "rel_tomorrow": "завтра",
         "rel_yesterday": "вчера",
         "rel_in_days": "через {n} дн.",
@@ -788,6 +798,7 @@ LOCALES: dict[str, dict[str, str]] = {
         "service_done_default": "您的订单已确认——店主会尽快与您联系。",
         "svc_unavailable": "抱歉，该服务已下架。",
         "approve_btn": "✅ 通过",
+        "resume_btn": "↻ 继续创建订阅",
         "deny_btn": "❌ 拒绝",
         "scam_btn": "🚫 骗子",
         "scam_done": "订单 #{id} 已标记为诈骗。买家 {buyer_id} 已在全网标记。",
@@ -878,11 +889,13 @@ LOCALES: dict[str, dict[str, str]] = {
         "test_no_renew": "试用账号不可续费——请改为从购买菜单选择完整套餐。",
         "trial_plan": "试用",
         "ord_pending": "等待店主",
+        "ord_approving": "正在创建订阅",
         "ord_approved": "已通过",
         "ord_denied": "已拒绝",
         "ord_cancelled": "已撤回",
         "cancel_receipt_btn": "撤回凭证",
         "nag_header": "👋 友好提醒：您有 {n} 笔订单等待处理（已超过 {h} 小时）。请打开订单选项卡或决策消息进行批准或拒绝。",
+        "nag_reconcile_header": "⚠️ {n} 笔订单仍需检查订阅创建结果。请打开订单 → Approving，然后选择 Resume。请勿另外创建订阅。",
         "rel_tomorrow": "明天",
         "rel_yesterday": "昨天",
         "rel_in_days": "{n}天后",
@@ -906,12 +919,36 @@ def shop_lang(shop: dict | None) -> str:
     return normalize_lang(shop.get("_buyer_lang") or shop.get("lang"))
 
 
+class HTML(str):
+    """Trusted markup supplied by the application, never by a buyer."""
+
+
+def H(value: object) -> HTML:
+    return HTML("" if value is None else str(value))
+
+
+class _EscapedValue:
+    def __init__(self, value: object):
+        self.value = value
+
+    def __format__(self, spec: str) -> str:
+        import html
+
+        return html.escape(format(self.value, spec))
+
+
+def html_vars(values: dict) -> dict:
+    """Escape substitutions while preserving format specs and trusted markup."""
+    return {key: value if isinstance(value, HTML) else _EscapedValue(value)
+            for key, value in values.items()}
+
+
 def L(shop_or_lang: dict | str | None, key: str, **vars: object) -> str:
-    """Localized string with English fallback. Never raises on missing keys."""
+    """Localized HTML with English fallback and escaped substitutions."""
     lang = shop_or_lang if isinstance(shop_or_lang, str) else shop_lang(shop_or_lang)
     tpl = LOCALES.get(lang, {}).get(key) or LOCALES["en"].get(key) or key
     try:
-        return tpl.format(**vars)
+        return tpl.format(**html_vars(vars))
     except Exception:
         return tpl
 

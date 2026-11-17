@@ -4,10 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rwa-plugin-pershop"
-version = "0.1.8"
+version = "0.1.9"
 description = "Per-admin Telegram shop for Remnawave Admin (Plugin API v1)"
 requires-python = ">=3.11"
 dependencies = ["fastapi>=0.110", "pydantic>=2.5", "httpx>=0.27", "cryptography>=42"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "asyncpg>=0.29"]
 
 [project.entry-points."rwa.plugin"]
 pershop = "rwa_plugin_pershop:manifest"

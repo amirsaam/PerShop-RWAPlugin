@@ -20,10 +20,11 @@ def allocate_username(prefix: str, tg_username: str | None, tg_id: int, existing
     clean_prefix = sanitize_fragment(prefix)[:24] or "shop"
     clean_user = sanitize_fragment(tg_username or f"id{tg_id}")[:32]
     base = f"{clean_prefix}-{clean_user}"
-    if base not in existing:
+    existing_lower = {str(name).casefold() for name in existing}
+    if base.casefold() not in existing_lower:
         return base
     i = 2
-    while f"{base}{i}" in existing:
+    while f"{base}{i}".casefold() in existing_lower:
         i += 1
     return f"{base}{i}"
 

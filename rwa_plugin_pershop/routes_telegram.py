@@ -1,11 +1,12 @@
-"""Telegram webhook (open route, Telegram calls it) + shared update handler.
+"""Telegram webhook authenticated by the per-shop secret and update handler.
 
-Auth: optional X-Telegram-Bot-Api-Secret-Token compared to shops.webhook_secret.
-This is the ONLY open route in the plugin; everything else requires RBAC.
+This is the only open route in the plugin; everything else requires RBAC.
+Handler failures propagate so webhooks and polling can retry instead of
+acknowledging updates whose side effects failed.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 
 
 async def handle_update(ctx, shop: dict, update: dict) -> None:
@@ -16,43 +17,52 @@ async def handle_update(ctx, shop: dict, update: dict) -> None:
     cb = update.get("callback_query") or {}
     sender = ((cb.get("from") or {}).get("id")
               if cb else (msg.get("from") or {}).get("id"))
-    what = (cb.get("data") or "") if cb else (msg.get("text") or "")[:60]
+    kind = "cb" if cb else "msg"
     try:
         ctx.logger.info(
-            "shop.update_in shop=%s sender=%s kind=%s what=%r"
-            % ((shop or {}).get("prefix"), sender, "cb" if cb else "msg", what))
+            "shop.update_in shop=%s sender=%s kind=%s update_id=%s"
+            % ((shop or {}).get("prefix"), sender, kind, update.get("update_id")))
     except Exception:
         pass
-    try:
-        tg = TgClient(await decrypt_token(ctx, shop["bot_token_enc"]))
-        if cb:
-            sender = (cb.get("from") or {}).get("id")
-            if sender and sender != shop.get("admin_tg_id"):
-                shop = await _with_buyer_lang(ctx, shop, sender)
-            await _on_callback(ctx, shop, tg, cb)
-            return
-        if not msg:
-            return
-        from_id = (msg.get("from") or {}).get("id")
-        text = (msg.get("text") or "").strip()
-        if not from_id:
-            return
-        if from_id == shop["admin_tg_id"]:
-            await _on_admin_message(ctx, shop, tg, msg, text)
-        else:
-            shop = await _with_buyer_lang(ctx, shop, from_id)
-            await _on_buyer_message(ctx, shop, tg, msg, text)
-    except Exception as e:
-        try:
-            import traceback as _tb
+    tg = TgClient(await decrypt_token(ctx, shop["bot_token_enc"]))
+    if cb:
+        sender = (cb.get("from") or {}).get("id")
+        if sender and sender != shop.get("admin_tg_id"):
+            shop = await _with_buyer_lang(ctx, shop, sender)
+        await _on_callback(ctx, shop, tg, cb)
+        return
+    if not msg:
+        return
+    from_id = (msg.get("from") or {}).get("id")
+    text = (msg.get("text") or "").strip()
+    if not from_id:
+        return
+    if from_id == shop["admin_tg_id"]:
+        await _on_admin_message(ctx, shop, tg, msg, text)
+    else:
+        shop = await _with_buyer_lang(ctx, shop, from_id)
+        await _on_buyer_message(ctx, shop, tg, msg, text)
 
-            _err = f"{type(e).__name__}: {e}"
-            ctx.logger.error(
-                "shop.update_failed shop=%s sender=%s kind=%s what=%r err=%s\n%s"
-                % ((shop or {}).get("prefix"), sender, "cb" if cb else "msg",
-                   what, _err, _tb.format_exc(limit=8)))
-        except Exception:
-            pass
+
+async def handle_update_once(ctx, shop: dict, update: dict) -> bool:
+    """Process a Telegram update once, leaving failures retryable."""
+    from rwa_plugin_pershop.billing import abandon_update, begin_update, finish_update
+
+    update_id = update.get("update_id")
+    owner_token = await begin_update(ctx, shop["id"], update_id)
+    if owner_token is None:
+        return False
+    try:
+        await handle_update(ctx, shop, update)
+        await finish_update(ctx, shop["id"], update_id, owner_token)
+        return True
+    except Exception:
+        try:
+            await abandon_update(ctx, shop["id"], update_id, owner_token)
+        except Exception as cleanup_error:
+            ctx.logger.error("shop.update_reservation_cleanup_failed",
+                             extra={"shop": shop["id"], "err": str(cleanup_error)})
+        raise
 
 
 async def _with_buyer_lang(ctx, shop: dict, tg_id: int) -> dict:
@@ -243,6 +253,13 @@ def _extract_receipt(msg: dict, text: str) -> tuple[str | None, str, int | None]
     return (text or None), "text", msg.get("message_id")
 
 
+def _receipt_checkout_key(shop_id: int, buyer_id: int, message_id, receipt: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256((receipt or "").encode()).hexdigest()
+    return f"checkout:{shop_id}:{buyer_id}:message:{message_id or 'none'}:{digest}"
+
+
 def _cancel_row(shop) -> list:
     from rwa_plugin_pershop.lang import L
 
@@ -364,7 +381,7 @@ async def _send_test_offer(ctx, shop, tg, sender, edit=None) -> None:
 async def _send_referral(ctx, shop, tg, chat_id, tg_id, edit=None) -> None:
     """Referral screen: owner text (with {percent}/{link} filled in) plus the
     copyable invite link. Self-heals a missing bot username via getMe."""
-    from rwa_plugin_pershop.lang import L
+    from rwa_plugin_pershop.lang import H, L
     from rwa_plugin_pershop.service import ensure_bot_username, fmt_safe
     from rwa_plugin_pershop.telegram import kb
 
@@ -379,11 +396,11 @@ async def _send_referral(ctx, shop, tg, chat_id, tg_id, edit=None) -> None:
     text = fmt_safe(text, percent=pct, link=link or f"r_{tg_id}", invitee_discount=invitee)
     if bot_un:
         await _show(ctx, shop, tg, chat_id, edit,
-                    L(shop, "referral_body", text=text, link=link),
+                    L(shop, "referral_body", text=H(text), link=link),
                     reply_markup=kb(_back_row(shop)))
     else:
         await _show(ctx, shop, tg, chat_id, edit,
-                    L(shop, "referral_nocode", text=text, id=tg_id),
+                    L(shop, "referral_nocode", text=H(text), id=tg_id),
                     reply_markup=kb(_back_row(shop)))
 
 
@@ -688,13 +705,10 @@ async def _submit_svc_receipt(ctx, shop, tg, msg, text, buyer_id, buyer_un, chat
     total = float(total) if total is not None else list_total
     credit_used = 0.0
     if data.get("credit"):
-        from rwa_plugin_pershop.service import add_credit as _ac2
         from rwa_plugin_pershop.service import credit_balance as _cb3
 
         _bal = await _cb3(ctx, shop["id"], buyer_id)
         credit_used = min(_bal, total)
-        if credit_used > 0:
-            await _ac2(ctx, shop["id"], buyer_id, -credit_used)
     snapshot = _json.dumps({"service": svc["id"], "note": note,
                             "total_units": total, "list_units": list_total,
                             "credit_used": credit_used,
@@ -703,12 +717,21 @@ async def _submit_svc_receipt(ctx, shop, tg, msg, text, buyer_id, buyer_un, chat
                             "promo_units": float(data.get("promo_units") or 0),
                             "campaign_units": float(data.get("campaign_units") or 0),
                             "campaign_pct": data.get("campaign_pct")})
-    row = await ctx.db.fetchrow(
-        """INSERT INTO plugin_pershop_orders(shop_id,service_id,buyer_tg_id,buyer_username,
-           receipt_file_id,receipt_kind,total_units,options_snapshot)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id""",
-        shop["id"], svc["id"], buyer_id, buyer_un, receipt_ref, kind, total, snapshot)
+    from rwa_plugin_pershop.billing import InsufficientCredit, create_order_with_credit
+
+    try:
+        row = await create_order_with_credit(
+            ctx, shop_id=shop["id"], service_id=svc["id"], buyer_tg_id=buyer_id,
+            buyer_username=buyer_un, receipt_file_id=receipt_ref, receipt_kind=kind,
+            total_units=total, options_snapshot=snapshot, credit_units=credit_used,
+            idempotency_key=_receipt_checkout_key(shop["id"], buyer_id, message_id, receipt_ref))
+    except InsufficientCredit:
+        await _clear_session(ctx, shop["id"], buyer_id, "buyer")
+        await _show(ctx, shop, tg, chat_id, data.get("pm"), L(shop, "session_expired"))
+        return
     await _clear_session(ctx, shop["id"], buyer_id, "buyer")
+    if not row.pop("_created", False):
+        return
     from rwa_plugin_pershop.service import log_event as _le1
     await _le1(ctx, shop["id"], "order_new", buyer_id, f"#{row['id']} {buyer_un}")
     await _maybe_scam_warn(ctx, shop, tg, buyer_id, buyer_un)
@@ -1151,7 +1174,8 @@ async def _send_history(ctx, shop, tg, sender, edit=None) -> None:
         " LEFT JOIN plugin_pershop_services s ON s.id=o.service_id"
         " WHERE o.shop_id=$1 AND o.buyer_tg_id=$2 ORDER BY o.id DESC LIMIT 10",
         shop["id"], sender)
-    status_word = {"pending": L(shop, "ord_pending"), "approved": L(shop, "ord_approved"),
+    status_word = {"pending": L(shop, "ord_pending"), "approving": L(shop, "ord_approving"),
+                   "approved": L(shop, "ord_approved"),
                    "denied": L(shop, "ord_denied"), "cancelled": L(shop, "ord_cancelled"),
                    "withdraw_requested": L(shop, "pending_badge")}
     if not rows:
@@ -1205,7 +1229,8 @@ async def _send_withdraw_reason(ctx, shop, tg, sender, order_id: str, edit=None)
 
     try:
         order = await ctx.db.fetchrow(
-            "SELECT * FROM plugin_pershop_orders WHERE id=$1", int(order_id))
+            "SELECT * FROM plugin_pershop_orders WHERE id=$1 AND shop_id=$2",
+            int(order_id), shop["id"])
     except (TypeError, ValueError):
         order = None
     if not order or order.get("buyer_tg_id") != sender:
@@ -1235,7 +1260,8 @@ async def _finalize_withdraw(ctx, shop, tg, sender, chat_id, order_id: int,
     from rwa_plugin_pershop.telegram import kb
 
     try:
-        order = await request_withdraw(ctx, order_id, sender, reason, card)
+        order = await request_withdraw(
+            ctx, order_id, sender, reason, card, shop_id=shop["id"])
     except ValueError:
         await _clear_session(ctx, shop["id"], sender, "buyer")
         await tg.send_message(sender, L(shop, "withdraw_too_late"))
@@ -1922,14 +1948,11 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
         total = float(total) if total is not None else order_total(base, pkg, hwid_value)
         credit_used = 0.0
         if data.get("credit"):
-            # Re-check at submit: balance may have moved since Pay.
-            from rwa_plugin_pershop.service import add_credit as _ac
+            # Checkout conditionally debits this amount in the order transaction.
             from rwa_plugin_pershop.service import credit_balance as _cb2
 
             _bal = await _cb2(ctx, shop["id"], buyer_id)
             credit_used = min(_bal, total)
-            if credit_used > 0:
-                await _ac(ctx, shop["id"], buyer_id, -credit_used)
         applied = await resolve_applied(ctx, pkg, hwid_value)
         _disc = float(data.get("discount_units") or 0)
         snapshot = _json.dumps({"hwid": hwid_value, "total_units": total,
@@ -1939,14 +1962,23 @@ async def _on_buyer_message(ctx, shop, tg, msg, text) -> None:
                                 "promo_units": float(data.get("promo_units") or 0),
                                 "campaign_units": float(data.get("campaign_units") or 0),
                                 "campaign_pct": data.get("campaign_pct")})
-        row = await ctx.db.fetchrow(
-            """INSERT INTO plugin_pershop_orders(shop_id,package_id,buyer_tg_id,buyer_username,
-               receipt_file_id,receipt_kind,renew_username,total_units,options_snapshot)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
-            shop["id"], data["package_id"], buyer_id, buyer_un, receipt_ref, kind,
-            data.get("renew_username"), total, snapshot,
-        )
+        from rwa_plugin_pershop.billing import InsufficientCredit, create_order_with_credit
+
+        try:
+            row = await create_order_with_credit(
+                ctx, shop_id=shop["id"], package_id=data["package_id"],
+                buyer_tg_id=buyer_id, buyer_username=buyer_un,
+                receipt_file_id=receipt_ref, receipt_kind=kind,
+                renew_username=data.get("renew_username"), total_units=total,
+                options_snapshot=snapshot, credit_units=credit_used,
+                idempotency_key=_receipt_checkout_key(shop["id"], buyer_id, message_id, receipt_ref))
+        except InsufficientCredit:
+            await _clear_session(ctx, shop["id"], buyer_id, "buyer")
+            await tg.send_message(chat_id, L(shop, "session_expired"))
+            return
         await _clear_session(ctx, shop["id"], buyer_id, "buyer")
+        if not row.pop("_created", False):
+            return
         from rwa_plugin_pershop.service import log_event as _le2
         await _le2(ctx, shop["id"], "order_new", buyer_id, f"#{row['id']} {buyer_un}")
         await _maybe_scam_warn(ctx, shop, tg, buyer_id, buyer_un)
@@ -2044,7 +2076,7 @@ async def _on_admin_message(ctx, shop, tg, msg, text) -> None:
         try:
             cnt = await ctx.db.fetchval(
                 "SELECT COUNT(*) FROM plugin_pershop_orders WHERE shop_id=$1"
-                " AND status IN ('pending','withdraw_requested')",
+                " AND status IN ('pending','approving','withdraw_requested')",
                 shop["id"])
         except Exception:
             cnt = "?"
@@ -2137,8 +2169,17 @@ async def _on_admin_message(ctx, shop, tg, msg, text) -> None:
         from rwa_plugin_pershop.service import deny_order
 
         reason = text or L(shop, "no_reason")
+        order = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_orders WHERE id=$1 AND shop_id=$2",
+            order_id, shop["id"])
+        if not order or order.get("status") not in ("pending", "withdraw_requested"):
+            await tg.send_message(chat_id, L(shop, "order_error", id=order_id,
+                                               err="order is not awaiting a decision"))
+            await _clear_session(ctx, shop["id"], shop["admin_tg_id"], "admin")
+            return
         try:
-            refunded = await deny_order(ctx, order_id, "admin-tg", reason)
+            refunded = await deny_order(
+                ctx, order_id, "admin-tg", reason, shop_id=shop["id"])
         except ValueError as e:
             await tg.send_message(chat_id, L(shop, "order_error", id=order_id, err=e))
             await _clear_session(ctx, shop["id"], shop["admin_tg_id"], "admin")
@@ -2287,9 +2328,7 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
     import json as _json3
 
     from rwa_plugin_pershop.lang import L
-    from rwa_plugin_pershop.service import add_credit as _ac4
     from rwa_plugin_pershop.service import approve_order as _ao2
-    from rwa_plugin_pershop.service import credit_balance as _cb5
     from rwa_plugin_pershop.service import format_price as _fp7
     from rwa_plugin_pershop.service import resolve_applied as _ra2
 
@@ -2297,11 +2336,8 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
     buyer_un = (cb.get("from") or {}).get("username") or str(sender)
     total = float(saved.get("total_units") or 0)
     free = total <= 0  # fully discounted: a 100% coupon pays everything
-    if not free:
-        if not saved.get("credit"):
-            return False
-        if (await _cb5(ctx, shop["id"], sender)) < total:
-            return False
+    if not free and not saved.get("credit"):
+        return False
     pay_kind = "promo" if free else "credit"
     if kind == "svc":
         snapshot = _json3.dumps({"service": item["id"],
@@ -2314,11 +2350,7 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
                                  "promo_units": float(saved.get("promo_units") or 0),
                                  "campaign_units": float(saved.get("campaign_units") or 0),
                                  "campaign_pct": saved.get("campaign_pct")})
-        row = await ctx.db.fetchrow(
-            """INSERT INTO plugin_pershop_orders(shop_id,service_id,buyer_tg_id,buyer_username,
-               receipt_file_id,receipt_kind,total_units,options_snapshot)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id""",
-            shop["id"], item["id"], sender, buyer_un, None, pay_kind, total, snapshot)
+        item_key = {"service_id": item["id"]}
     else:
         applied = await _ra2(ctx, item, saved.get("hwid"))
         snapshot = _json3.dumps({"hwid": saved.get("hwid"), "total_units": total,
@@ -2329,18 +2361,35 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
                                  "promo_units": float(saved.get("promo_units") or 0),
                                  "campaign_units": float(saved.get("campaign_units") or 0),
                                  "campaign_pct": saved.get("campaign_pct")})
-        row = await ctx.db.fetchrow(
-            """INSERT INTO plugin_pershop_orders(shop_id,package_id,buyer_tg_id,buyer_username,
-               receipt_file_id,receipt_kind,renew_username,total_units,options_snapshot)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
-            shop["id"], item["id"], sender, buyer_un, None, pay_kind,
-            saved.get("renew_username"), total, snapshot)
-    if not free:
-        # Credit covers it: spend the balance. A 100% coupon touches no wallet.
-        await _ac4(ctx, shop["id"], sender, -total)
-    from rwa_plugin_pershop.service import log_event as _le3
-    await _le3(ctx, shop["id"], "order_free" if free else "order_credit",
-               sender, f"#{row['id']} {buyer_un}")
+        item_key = {"package_id": item["id"], "renew_username": saved.get("renew_username")}
+    from rwa_plugin_pershop.billing import InsufficientCredit, create_order_with_credit
+
+    callback_id = cb.get("id") or (cb.get("message") or {}).get("message_id")
+    try:
+        row = await create_order_with_credit(
+            ctx, shop_id=shop["id"], buyer_tg_id=sender, buyer_username=buyer_un,
+            receipt_file_id=None, receipt_kind=pay_kind, total_units=total,
+            options_snapshot=snapshot, credit_units=0 if free else total,
+            idempotency_key=f"checkout:{shop['id']}:{sender}:callback:{callback_id}",
+            **item_key)
+    except InsufficientCredit:
+        return False
+    created = row.pop("_created", False)
+    if not created and row.get("status") not in ("pending", "approving"):
+        # The committed order already reached a final state. A Telegram replay
+        # must never provision it or grant its referral reward again.
+        if row.get("status") == "approved":
+            await _show(ctx, shop, tg, sender, (cb.get("message") or {}).get("message_id"),
+                L(shop, "auto_approved_note", id=row["id"], item=item.get("name") or "?",
+                  amount=_fp7(shop, total)))
+        else:
+            await _show(ctx, shop, tg, sender, (cb.get("message") or {}).get("message_id"),
+                        L(shop, "order_error", id=row["id"], err=row.get("status")))
+        return True
+    if created:
+        from rwa_plugin_pershop.service import log_event as _le3
+        await _le3(ctx, shop["id"], "order_free" if free else "order_credit",
+                   sender, f"#{row['id']} {buyer_un}")
     order = await ctx.db.fetchrow(
         "SELECT * FROM plugin_pershop_orders WHERE id=$1", row["id"])
     sub_pre = None
@@ -2348,22 +2397,44 @@ async def _auto_credit_order(ctx, shop, tg, cb, kind, item, saved) -> bool:
         sub_pre = await ctx.db.fetchrow(
             "SELECT expire_at FROM plugin_pershop_subs WHERE shop_id=$1 AND username=$2",
             shop["id"], saved["renew_username"])
-    try:
-        res = await _ao2(ctx, row["id"], "auto-promo" if free else "auto-credit")
-    except Exception as e:
-        # Panel call failed: give the balance back, drop the order row, and
-        # let the buyer fall through to the normal receipt flow.
-        ctx.logger.warning("shop.auto_approve_failed", extra={"err": str(e)})
-        try:
-            if not free:
-                await _ac4(ctx, shop["id"], sender, total)
-            await ctx.db.execute(
-                "DELETE FROM plugin_pershop_orders WHERE id=$1", row["id"])
-        except Exception:
-            pass
-        return False
     osh = _owner_shop(shop)
     label = item.get("name") or "?"
+    try:
+        res = await _ao2(ctx, row["id"], "auto-promo" if free else "auto-credit",
+                         shop_id=shop["id"])
+    except Exception as e:
+        # An exception after a panel call has an uncertain outcome. Keep the
+        # order and its debit for reconciliation instead of enabling a second
+        # purchase against an already-provisioned account.
+        ctx.logger.warning("shop.auto_approve_failed", extra={"err": str(e)})
+        current = await ctx.db.fetchrow(
+            "SELECT status FROM plugin_pershop_orders WHERE id=$1", row["id"])
+        if (current or {}).get("status") == "approved":
+            await _show(ctx, shop, tg, sender, (cb.get("message") or {}).get("message_id"),
+                L(shop, "auto_approved_note", id=row["id"], item=label,
+                  amount=_fp7(shop, total)))
+            return True
+        await _show(ctx, shop, tg, sender, (cb.get("message") or {}).get("message_id"),
+                    L(shop, "order_error", id=row["id"], err=str(e)[:300]))
+        try:
+            await tg.send_message(shop["admin_tg_id"],
+                L(_owner_shop(shop), "order_error", id=row["id"], err=str(e)[:300]))
+            status = (current or {}).get("status")
+            if status in ("pending", "approving"):
+                from rwa_plugin_pershop.telegram import kb
+
+                action = L(osh, "approve_btn") if status == "pending" else L(osh, "resume_btn")
+                buttons = [{"text": action, "callback_data": f"approve:{row['id']}"}]
+                if status == "pending":
+                    buttons.append({"text": L(osh, "deny_btn"),
+                                    "callback_data": f"deny:{row['id']}"})
+                await tg.send_message(
+                    shop["admin_tg_id"], L(osh, "decide_order", id=row["id"]),
+                    reply_markup=kb([buttons]))
+        except Exception as notify_error:
+            ctx.logger.warning("shop.auto_approve_notify_failed",
+                               extra={"err": str(notify_error)})
+        return True
     if kind == "pkg" and not saved.get("renew_username") and res.get("username"):
         # Link a new-buy auto order to the sub it created, so a later
         # credit-cancel can find its originating order by username.
@@ -2470,7 +2541,7 @@ async def _notify_approval(ctx, shop, tg, order, res, sub_pre=None, edit=None) -
 
 
 async def _on_callback(ctx, shop, tg, cb) -> None:
-    from rwa_plugin_pershop.lang import L
+    from rwa_plugin_pershop.lang import H, L
     from rwa_plugin_pershop.telegram import kb
 
     data = cb.get("data") or ""
@@ -3136,7 +3207,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                                    f"await_receipt:svc:{svc['id']}", dict(saved, pm=mid))
                 pm = await _show(ctx, shop, tg, sender, mid,
                     L(shop, "send_receipt_new", pkg=svc["name"],
-                      price=format_price(shop, saved["total_units"]), card=_card_block(shop))
+                      price=format_price(shop, saved["total_units"]), card=H(_card_block(shop)))
                     + credit_note,
                     reply_markup=kb(_back_home_row(shop, "back:contract")))
                 if pm:
@@ -3184,7 +3255,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             pm = await _show(ctx, shop, tg, sender, mid,
                 L(shop, "send_receipt_topup", label=pkg["name"],
                   username=(sub["username"] if sub else saved.get("renew_username") or "?"),
-                  card=_card_block(shop)) + credit_note,
+                  card=H(_card_block(shop))) + credit_note,
                 reply_markup=kb(_back_home_row(shop, "back:contract")))
             if pm:
                 await _set_session(ctx, shop["id"], sender, "buyer", f"await_receipt:{pkg['id']}",
@@ -3192,7 +3263,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         pm = await _show(ctx, shop, tg, sender, mid,
             L(shop, "send_receipt_new", pkg=pkg["name"],
-              price=format_price(shop, saved["total_units"]), card=_card_block(shop))
+              price=format_price(shop, saved["total_units"]), card=H(_card_block(shop)))
             + credit_note,
             reply_markup=kb(_back_home_row(shop, "back:contract")))
         if pm:
@@ -3288,7 +3359,9 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             return
         from rwa_plugin_pershop.service import approve_order
 
-        order = await ctx.db.fetchrow("SELECT * FROM plugin_pershop_orders WHERE id=$1", order_id)
+        order = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_orders WHERE id=$1 AND shop_id=$2",
+            order_id, shop["id"])
         if not order:
             await tg.send_message(shop["admin_tg_id"], L(shop, "order_not_found", id=order_id))
             return
@@ -3298,7 +3371,7 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
                 "SELECT expire_at FROM plugin_pershop_subs WHERE shop_id=$1 AND username=$2",
                 shop["id"], order["renew_username"])
         try:
-            res = await approve_order(ctx, order_id, "admin-tg")
+            res = await approve_order(ctx, order_id, "admin-tg", shop_id=shop["id"])
         except ValueError as e:
             await tg.send_message(shop["admin_tg_id"], L(shop, "order_error", id=order_id, err=e))
             return
@@ -3350,6 +3423,13 @@ async def _on_callback(ctx, shop, tg, cb) -> None:
             order_id = int(data.split(":")[1])
         except ValueError:
             return
+        order = await ctx.db.fetchrow(
+            "SELECT id FROM plugin_pershop_orders WHERE id=$1 AND shop_id=$2 AND status IN ('pending','withdraw_requested')",
+            order_id, shop["id"])
+        if not order:
+            await tg.send_message(shop["admin_tg_id"], L(shop, "order_error", id=order_id,
+                                                           err="order is not awaiting a decision"))
+            return
         await _set_session(ctx, shop["id"], shop["admin_tg_id"], "admin",
                            f"await_reason:{order_id}", {"order_id": order_id})
         await _show(ctx, shop, tg, shop["admin_tg_id"], mid, L(shop, "ask_reason", id=order_id),
@@ -3366,18 +3446,25 @@ def build_telegram_router(ctx):
         from rwa_plugin_pershop.service import shop_by_id
 
         shop = await shop_by_id(ctx, shop_id)
-        if not shop:
-            return {"ok": False}
-        if shop.get("webhook_secret") and secret != shop["webhook_secret"]:
-            return {"ok": False}
+        if not shop or not shop.get("webhook_secret"):
+            raise HTTPException(403, "forbidden")
+        import hmac
+
+        if not secret or not hmac.compare_digest(str(secret), str(shop["webhook_secret"])):
+            raise HTTPException(403, "forbidden")
         try:
             update = await request.json()
+            if not isinstance(update, dict):
+                raise ValueError("update must be an object")
         except Exception:
-            return {"ok": True}
+            raise HTTPException(400, "invalid update")
         try:
-            await handle_update(ctx, dict(shop), update)
+            await handle_update_once(ctx, dict(shop), update)
         except Exception as e:
-            ctx.logger.warning("shop.update_failed", extra={"err": str(e)})
+            ctx.logger.error(
+                "shop.update_failed shop=%s update_id=%s err=%s",
+                shop.get("prefix"), update.get("update_id"), str(e)[:300])
+            raise HTTPException(503, "temporary update failure")
         return {"ok": True}
 
     return router

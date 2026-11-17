@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 from rwa_plugin_pershop.naming import allocate_username
@@ -216,6 +217,9 @@ async def disconnect_shop(ctx, owner_admin: str) -> dict:
 
 _PERSHOP_TABLES = [
     "plugin_pershop_events",
+    "plugin_pershop_credit_ledger",
+    "plugin_pershop_updates",
+    "plugin_pershop_campaign_uses",
     "plugin_pershop_broadcasts",
     "plugin_pershop_referrals",
     "plugin_pershop_test_claims",
@@ -267,7 +271,8 @@ async def reset_all(ctx) -> dict:
                 wiped.append(t)
             except Exception:
                 pass
-    for rev in ("pershop_001", "pershop_002", "pershop_003", "pershop_004"):
+    for rev in ("pershop_001", "pershop_002", "pershop_003", "pershop_004",
+                "pershop_005", "pershop_006", "pershop_007"):
         try:
             await ctx.db.execute(
                 "DELETE FROM alembic_version WHERE version_num = $1", rev)
@@ -297,6 +302,20 @@ async def existing_usernames(ctx, shop_id: int) -> set[str]:
     try:
         rows = await ctx.db.fetch("SELECT username FROM users")
         names.update(r["username"] for r in rows if r and r["username"])
+    except Exception:
+        pass
+    try:
+        rows = await ctx.db.fetch(
+            "SELECT provision_username AS username FROM plugin_pershop_orders "
+            "WHERE status='approving' AND provision_username IS NOT NULL")
+        names.update(r["username"] for r in rows if r["username"])
+    except Exception:
+        pass
+    try:
+        rows = await ctx.db.fetch(
+            "SELECT provision_username AS username FROM plugin_pershop_test_claims "
+            "WHERE provision_stage IS NOT NULL AND provision_username IS NOT NULL")
+        names.update(r["username"] for r in rows if r["username"])
     except Exception:
         pass
     return names
@@ -526,7 +545,7 @@ async def pending_for_sub(ctx, shop_id: int, username: str):
     try:
         return await ctx.db.fetchrow(
             """SELECT id FROM plugin_pershop_orders WHERE shop_id=$1
-               AND renew_username=$2 AND status IN ('pending','withdraw_requested')
+               AND renew_username=$2 AND status IN ('pending','approving','withdraw_requested')
                ORDER BY id DESC LIMIT 1""", shop_id, username)
     except Exception:
         return None
@@ -924,7 +943,7 @@ def format_when(shop_or_lang, dt, now=None) -> str:
 
 
 async def request_withdraw(ctx, order_id: int, buyer_tg_id: int,
-                         reason: str, card: str) -> dict:
+                         reason: str, card: str, shop_id: int | None = None) -> dict:
     """Buyer asks to withdraw their own receipt: order must still be pending
     (not approved/denied). Marks it withdraw_requested and attaches the
     reason + refund card details for the owner. Returns the order + shop +
@@ -933,12 +952,26 @@ async def request_withdraw(ctx, order_id: int, buyer_tg_id: int,
         "SELECT * FROM plugin_pershop_orders WHERE id=$1", order_id)
     if not order or order.get("buyer_tg_id") != buyer_tg_id:
         raise ValueError("order not found")
-    if order.get("status") != "pending":
-        raise ValueError("order is no longer pending")
-    await ctx.db.execute(
-        """UPDATE plugin_pershop_orders SET status='withdraw_requested',
-           withdraw_reason=$1, withdraw_card=$2 WHERE id=$3""",
-        (reason or "")[:1000], (card or "")[:1000], order_id)
+    if shop_id is not None and order.get("shop_id") != shop_id:
+        raise ValueError("order not found")
+    if order.get("status") == "withdraw_requested":
+        # A retry after prefunding or notification failed resumes the same
+        # request instead of rejecting before its idempotent refund step.
+        claimed = dict(order)
+    else:
+        if order.get("status") != "pending":
+            raise ValueError("order is no longer pending")
+        params = [(reason or "")[:1000], (card or "")[:1000], order_id, buyer_tg_id]
+        scope = "id=$3 AND buyer_tg_id=$4"
+        if shop_id is not None:
+            scope += " AND shop_id=$5"
+            params.append(shop_id)
+        claimed = await ctx.db.fetchrow(
+            f"""UPDATE plugin_pershop_orders SET status='withdraw_requested',
+                withdraw_reason=$1, withdraw_card=$2 WHERE {scope}
+                AND status='pending' RETURNING *""", *params)
+        if not claimed:
+            raise ValueError("order is no longer pending")
     shop = await shop_by_id(ctx, order["shop_id"])
     pkg = await ctx.db.fetchrow(
         "SELECT name FROM plugin_pershop_packages WHERE id=$1", order["package_id"])
@@ -962,12 +995,10 @@ async def resolve_withdraw(ctx, order_id: int, owner_admin: str, confirm: bool) 
         raise ValueError("order not found")
     if order.get("status") != "withdraw_requested":
         raise ValueError("order is not awaiting withdraw")
-    await ctx.db.execute(
-        "UPDATE plugin_pershop_orders SET status=$1, decided_at=NOW(), decided_by=$2 WHERE id=$3",
-        "withdrawn" if confirm else "pending", owner_admin, order_id)
-    out = dict(order)
-    out["status"] = "withdrawn" if confirm else "pending"
-    out["credit_refunded"] = await _refund_order_credit(ctx, dict(order)) if confirm else 0.0
+    from rwa_plugin_pershop.billing import resolve_withdrawal_atomic
+
+    out = await resolve_withdrawal_atomic(ctx, dict(order), owner_admin, confirm)
+    out["credit_refunded"] = float(out.get("credit_refunded") or 0)
     out["shop"] = dict(shop)
     return out
 
@@ -984,101 +1015,60 @@ async def credit_balance(ctx, shop_id: int, tg_id: int) -> float:
 
 
 async def add_credit(ctx, shop_id: int, tg_id: int, units: float) -> float:
-    """Add (negative = spend) credit; the balance floors at 0. Returns the
-    new balance. Never raises."""
-    try:
-        row = await ctx.db.fetchrow(
-            """INSERT INTO plugin_pershop_buyers(shop_id, tg_id, credit_units)
-               VALUES($1,$2,$3)
-               ON CONFLICT (shop_id, tg_id) DO UPDATE
-               SET credit_units = GREATEST(0, plugin_pershop_buyers.credit_units
-                                          + EXCLUDED.credit_units)
-               RETURNING credit_units""", shop_id, tg_id, float(units))
-        return float((row or {}).get("credit_units") or 0)
-    except Exception:
-        return await credit_balance(ctx, shop_id, tg_id)
+    """Apply an owner adjustment; negative amounts floor at zero.
+
+    Failures propagate. Checkout and earned/refunded credit use the stricter
+    ledger operations in billing.py instead of this manual-adjustment helper.
+    """
+    row = await ctx.db.fetchrow(
+        """INSERT INTO plugin_pershop_buyers(shop_id, tg_id, credit_units)
+           VALUES($1,$2,$3)
+           ON CONFLICT (shop_id, tg_id) DO UPDATE
+           SET credit_units = GREATEST(0, plugin_pershop_buyers.credit_units
+                                      + EXCLUDED.credit_units)
+           RETURNING credit_units""", shop_id, tg_id, float(units))
+    return float((row or {}).get("credit_units") or 0)
 
 
-async def _earn_referral_credit(ctx, shop: dict, order: dict, total_units) -> float:
-    """Credit the inviter referral_percent of an approved purchase's *cash*
-    portion. Credit the buyer already spent (tracked in the order snapshot)
-    mints nothing — otherwise balance-funded orders would print credit.
-    Runs inside approval but never blocks it; records the earned amount on
-    the order for later refunds. Returns the credited amount."""
-    try:
-        pct = float(shop.get("referral_percent") or 0)
-        buyer = int(order.get("buyer_tg_id") or 0)
-        if pct <= 0 or not total_units or not buyer:
-            return 0.0
-        ref = await ctx.db.fetchrow(
-            "SELECT referrer_tg_id FROM plugin_pershop_referrals"
-            " WHERE shop_id=$1 AND referred_tg_id=$2", shop["id"], buyer)
-        if not ref or int(ref.get("referrer_tg_id") or 0) == buyer:
-            return 0.0
-        cash = max(0.0, float(total_units) - _snapshot_credit(order))
-        earned = round(cash * pct / 100.0, 4)
-        if earned <= 0:
-            return 0.0
-        await add_credit(ctx, shop["id"], int(ref["referrer_tg_id"]), earned)
-        await ctx.db.execute(
-            "UPDATE plugin_pershop_orders SET credit_units=$1 WHERE id=$2",
-            earned, order["id"])
-        return earned
-    except Exception as e:
-        try:
-            ctx.logger.error("shop referral credit failed: %s", e)
-        except Exception:
-            pass
-        return 0.0
+async def _referral_reward(ctx, shop: dict, order: dict, total_units) -> tuple[int | None, Decimal]:
+    """Calculate the cash-only reward without changing the wallet."""
+    pct = float(shop.get("referral_percent") or 0)
+    buyer = int(order.get("buyer_tg_id") or 0)
+    if pct <= 0 or not total_units or not buyer:
+        return None, Decimal(0)
+    ref = await ctx.db.fetchrow(
+        "SELECT referrer_tg_id FROM plugin_pershop_referrals"
+        " WHERE shop_id=$1 AND referred_tg_id=$2", shop["id"], buyer)
+    if not ref or int(ref.get("referrer_tg_id") or 0) == buyer:
+        return None, Decimal(0)
+    cash = max(0.0, float(total_units) - float(_snapshot_credit(order)))
+    earned = Decimal(str(round(cash * pct / 100.0, 4)))
+    if earned <= 0:
+        return None, Decimal(0)
+    return int(ref["referrer_tg_id"]), earned
 
 
 async def _refund_order_credit(ctx, order: dict) -> float:
-    """Return the credit a denied/withdrawn order spent to the buyer's
-    balance. The spent amount travels in the order snapshot (credit_used);
-    orders.credit_units records what the sale *minted* for the referrer.
-    Skips orders already pre-funded at withdraw-submit time (the snapshot
-    flag), so the credit can never be paid twice. Returns the refunded
-    amount. Never raises."""
-    try:
-        if _snapshot_prefunded(order):
-            return 0.0
-        spent = _snapshot_credit(order)
-        if spent > 0 and order.get("buyer_tg_id"):
-            await add_credit(ctx, order["shop_id"], int(order["buyer_tg_id"]), spent)
-            return spent
+    """Compatibility wrapper for the ledger-backed order refund."""
+    from rwa_plugin_pershop.billing import grant_credit_once
+
+    if _snapshot_prefunded(order):
         return 0.0
-    except Exception:
+    spent = _snapshot_credit(order)
+    if spent <= 0 or not order.get("buyer_tg_id"):
         return 0.0
+    result = await grant_credit_once(
+        ctx, order["shop_id"], int(order["buyer_tg_id"]), spent,
+        kind="refund", idempotency_key=f"refund:order:{order['id']}",
+        order_id=order["id"])
+    return float(spent if result.get("applied") else 0)
 
 
 async def prefund_withdraw_credit(ctx, order: dict) -> float:
-    """Instantly return the credit a pending order spent to the buyer's
-    balance at withdraw-submit time, and stamp the snapshot so the later
-    confirm/deny refund path pays nothing more. Mixed-payment withdraws
-    work this way: the credit slice comes back now, the owner settles the
-    transfer slice manually. Idempotent — a second submit (e.g. after a
-    Keep) refunds 0. Never raises."""
-    import json
-    try:
-        raw = (order or {}).get("options_snapshot")
-        try:
-            data = json.loads(raw) if isinstance(raw, str) else (dict(raw) if raw else {})
-        except Exception:
-            data = {}
-        if (data or {}).get("credit_prefunded"):
-            return 0.0
-        used = _snapshot_credit(order)
-        buyer = int((order or {}).get("buyer_tg_id") or 0)
-        if used <= 0 or not buyer:
-            return 0.0
-        await add_credit(ctx, order["shop_id"], buyer, used)
-        data["credit_prefunded"] = True
-        await ctx.db.execute(
-            "UPDATE plugin_pershop_orders SET options_snapshot=$1 WHERE id=$2",
-            json.dumps(data), order["id"])
-        return used
-    except Exception:
-        return 0.0
+    """Return the credit slice once; the ledger key is shared with settlement."""
+    from rwa_plugin_pershop.billing import prefund_withdrawal
+
+    return float(await prefund_withdrawal(ctx, order))
 
 
 def _snapshot_prefunded(order: dict) -> bool:
@@ -1164,10 +1154,11 @@ async def cancel_credit_sub(ctx, sub_id: int, buyer_tg_id: int) -> dict:
                       (_shop or {}).get("owner_admin"))
     except Exception:
         pass
-    await add_credit(ctx, sub["shop_id"], int(buyer_tg_id), amount)
-    await ctx.db.execute(
-        "UPDATE plugin_pershop_subs SET cancelled=TRUE WHERE id=$1", sub_id)
-    return {"order_id": order["id"], "amount": amount, "username": sub["username"]}
+    from rwa_plugin_pershop.billing import cancel_credit_sub_atomic
+
+    settled = await cancel_credit_sub_atomic(ctx, dict(sub), dict(order), buyer_tg_id)
+    return {"order_id": order["id"], "amount": float(settled["amount"]),
+            "username": sub["username"]}
 
 
 async def _broadcast_blocked(ctx) -> set[int]:
@@ -1444,14 +1435,15 @@ async def shop_health(ctx, shop: dict) -> dict:
     try:
         total = await ctx.db.fetchval(
             "SELECT COUNT(*) FROM plugin_pershop_orders "
-            "WHERE shop_id=$1 AND status='pending'", shop["id"])
+            "WHERE shop_id=$1 AND status IN ('pending','approving','withdraw_requested')", shop["id"])
         out["pending"] = int(total or 0)
     except Exception:
         pass
     try:
         old = await ctx.db.fetchval(
             "SELECT COUNT(*) FROM plugin_pershop_orders WHERE shop_id=$1 "
-            "AND status='pending' AND created_at < NOW() - INTERVAL '24 hours'",
+            "AND status IN ('pending','approving','withdraw_requested')"
+            " AND created_at < NOW() - INTERVAL '24 hours'",
             shop["id"])
         out["pending_old"] = int(old or 0)
     except Exception:
@@ -1620,147 +1612,464 @@ async def contract_preview(ctx, shop: dict, sub: dict | None,
     return out
 
 
-async def approve_order(ctx, order_id: int, decided_by: str) -> dict:
-    """Approve a pending order. Renew orders extend; others create a new user.
+APPROVAL_ATTEMPT_STALE_SECONDS = 300
 
-    Single shared path for panel UI + shop-bot inline buttons.
+
+def _clean_json(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _clean_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean_json(v) for v in value]
+    return value
+
+
+def _decode_approval_stage(order: dict) -> dict:
+    import json
+
+    try:
+        stage = json.loads((order or {}).get("approval_stage") or "{}")
+        return stage if isinstance(stage, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _approval_result(order: dict) -> dict | None:
+    """Read the durable post-panel result used to resume finalization."""
+    stage = _decode_approval_stage(order)
+    result = stage.get("result") if stage.get("state") == "provisioned" else None
+    return result if isinstance(result, dict) else None
+
+
+async def _replace_approval_stage(ctx, order_id: int, stage: dict,
+                                  expected: str | None) -> str:
+    """Compare-and-swap one order's recovery journal.
+
+    The token and the expected JSON together fence a stale worker: it cannot
+    overwrite a newer attempt or a result saved by the attempt's real owner.
     """
-    order = await ctx.db.fetchrow("SELECT * FROM plugin_pershop_orders WHERE id = $1", order_id)
+    import json
+
+    raw = json.dumps(_clean_json(stage))
+    request = stage.get("request") if isinstance(stage, dict) else None
+    provision_username = request.get("username") if isinstance(request, dict) else None
+    row = await ctx.db.fetchrow(
+        """UPDATE plugin_pershop_orders SET approval_stage=$1,
+             provision_username=COALESCE($4,provision_username)
+           WHERE id=$2 AND status='approving'
+             AND approval_stage IS NOT DISTINCT FROM $3 RETURNING id""",
+        raw, order_id, expected, provision_username)
+    if not row:
+        raise ValueError("approval was changed by another worker")
+    return raw
+
+
+async def _save_approval_result(ctx, order_id: int, result: dict,
+                                state: str = "provisioned",
+                                expected: str | None = None) -> None:
+    await _replace_approval_stage(
+        ctx, order_id, {"state": state, "result": result}, expected)
+
+
+def _approval_attempt_active(stage: dict) -> bool:
+    if not stage.get("attempt"):
+        return False
+    try:
+        locked = datetime.fromisoformat(str(stage.get("locked_at")))
+        locked = locked if locked.tzinfo else locked.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - locked).total_seconds()
+        return age < APPROVAL_ATTEMPT_STALE_SECONDS
+    except (TypeError, ValueError):
+        # An opaque lock fails closed. Only a JSON journal with no attempt is
+        # immediately recoverable; corruption needs human reconciliation.
+        return True
+
+
+async def _begin_approval_attempt(ctx, order: dict, request: dict | None = None):
+    """Claim the external-work section, or take over an interrupted attempt."""
+    import uuid
+
+    expected = order.get("approval_stage")
+    old = _decode_approval_stage(order)
+    if expected:
+        state = old.get("state")
+        if state == "creating" and isinstance(old.get("request"), dict):
+            if _approval_attempt_active(old):
+                raise ValueError("approval is already in progress")
+            request = old["request"]
+        elif state != "preparing" or not isinstance(request, dict):
+            raise ValueError("approval outcome requires reconciliation")
+    if not isinstance(request, dict):
+        raise ValueError("approval outcome requires reconciliation")
+    stage = {"state": "creating", "attempt": uuid.uuid4().hex,
+             "locked_at": datetime.now(timezone.utc), "request": request}
+    stage["request"] = _clean_json(request)
+    raw = await _replace_approval_stage(ctx, order["id"], stage, expected)
+    return _clean_json(stage), raw
+
+
+async def _release_approval_attempt(ctx, order_id: int, stage: dict,
+                                    expected: str) -> None:
+    """Make a caught failure retryable without losing the pre-panel request."""
+    released = dict(stage, attempt=None, locked_at=None)
+    try:
+        await _replace_approval_stage(ctx, order_id, released, expected)
+    except Exception:
+        # A newer worker/result owns the journal now. Never overwrite it.
+        pass
+
+
+async def _complete_approval(ctx, order: dict, decided_by: str, result: dict) -> dict:
+    """Commit local subscription state, approval, and referral reward together."""
+    from types import SimpleNamespace
+
+    from rwa_plugin_pershop.billing import _db_transaction, finalize_approval
+
+    result = dict(result)
+    if isinstance(result.get("expire_at"), str):
+        result["expire_at"] = datetime.fromisoformat(result["expire_at"])
+    async with _db_transaction(ctx) as db:
+        tx_ctx = SimpleNamespace(db=db)
+        shop = await shop_by_id(tx_ctx, order["shop_id"])
+        if not shop:
+            raise ValueError("shop gone")
+        if not result.get("service"):
+            if result.get("renewed"):
+                effect = result.get("effect") or "full"
+                if effect == "traffic_only":
+                    flag_sql = "notified_80=FALSE, notified_out=FALSE"
+                elif effect == "time_only":
+                    flag_sql = "notified_72h=FALSE, notified_expired=FALSE"
+                else:
+                    flag_sql = ("notified_80=FALSE, notified_72h=FALSE, "
+                                "notified_expired=FALSE, notified_out=FALSE")
+                await db.execute(
+                    f"""UPDATE plugin_pershop_subs SET expire_at=$1,
+                       traffic_limit_bytes=COALESCE($2,traffic_limit_bytes),
+                       {flag_sql},updated_at=NOW()
+                       WHERE shop_id=$3 AND username=$4""",
+                    result.get("expire_at"), result.get("traffic_limit_bytes"),
+                    shop["id"], result["username"])
+            else:
+                pkg = await db.fetchrow(
+                    "SELECT * FROM plugin_pershop_packages WHERE id=$1", order["package_id"])
+                if not pkg:
+                    raise ValueError("package gone")
+                await db.execute(
+                    """INSERT INTO plugin_pershop_subs(shop_id,buyer_tg_id,user_uuid,username,
+                       expire_at,traffic_limit_bytes,package_id)
+                       VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(username) DO NOTHING""",
+                    shop["id"], order["buyer_tg_id"], str(result["user_uuid"]),
+                    result["username"], result["expire_at"], pkg["traffic_limit_bytes"], pkg["id"])
+                existing = await db.fetchrow(
+                    "SELECT * FROM plugin_pershop_subs WHERE shop_id=$1 AND username=$2",
+                    shop["id"], result["username"])
+                if (not existing or int(existing.get("buyer_tg_id") or 0) != int(order["buyer_tg_id"])
+                        or str(existing.get("user_uuid")) != str(result["user_uuid"])):
+                    raise ValueError("subscription result does not match")
+                await db.execute(
+                    "UPDATE plugin_pershop_orders SET renew_username=$1 WHERE id=$2 AND status='approving'",
+                    result["username"], order["id"])
+        referrer, earned = await _referral_reward(
+            tx_ctx, shop, order, order.get("total_units"))
+        await finalize_approval(tx_ctx, order, decided_by, referrer, earned)
+    await log_event(ctx, order["shop_id"], "approved", order.get("buyer_tg_id"),
+                    f"#{order['id']} {order.get('buyer_username')}")
+    result["referrer_earned"] = float(earned if referrer else 0)
+    if not result.get("service") and result.get("renewed"):
+        changed = ["traffic_limit_bytes"] if result.get("effect") == "traffic_only" else ["expire_at"]
+        if result.get("effect") == "full":
+            changed.append("traffic_limit_bytes")
+            if result.get("squad_changed"):
+                changed.append("active_internal_squads")
+        sub = await ctx.db.fetchrow(
+            "SELECT user_uuid FROM plugin_pershop_subs WHERE shop_id=$1 AND username=$2",
+            shop["id"], result["username"])
+        if sub:
+            _fire_updated(ctx, sub["user_uuid"], result["username"], changed, shop.get("owner_admin"))
+    return result
+
+
+def _user_field(row: dict, *names):
+    for name in names:
+        if name in row:
+            return row.get(name)
+    return None
+
+
+def _creation_belongs_to_request(row: dict, request: dict) -> bool:
+    """Adopt only the unique, order-tagged account created for this request."""
+    row_username = _user_field(row, "username")
+    req_username = request.get("username")
+    if isinstance(row_username, str) and isinstance(req_username, str):
+        if row_username.lower() != req_username.lower():
+            return False
+    if _user_field(row, "description") != request.get("description"):
+        return False
+    try:
+        expected_tg = int(request.get("telegram_id"))
+        actual_tg = int(_user_field(row, "telegram_id", "telegramId"))
+    except (TypeError, ValueError):
+        return False
+    return actual_tg == expected_tg and bool(_user_field(row, "uuid", "id"))
+
+
+def _created_result_from_row(row: dict, request: dict) -> dict:
+    user_uuid = _user_field(row, "uuid", "id") or request["username"]
+    return {
+        "username": request["username"], "renewed": False,
+        "user_uuid": str(user_uuid),
+        "subscription_url": _user_field(row, "subscription_url", "subscriptionUrl"),
+        "expire_at": _user_field(row, "expire_at", "expireAt") or request["expire_at"],
+    }
+
+
+async def _provision_paid_create(ctx, order: dict, stage: dict, expected: str,
+                                 *, allow_create: bool):
+    """Recover a committed create, or perform the one initial planned create.
+
+    A retry never creates blindly: a missing or foreign mirror row leaves the
+    original request intact for reconciliation instead of provisioning twice.
+    """
+    request = dict(stage["request"])
+    username = request["username"]
+    row = await ctx.db.fetchrow("SELECT * FROM users WHERE lower(username)=lower($1)", username)
+    if row:
+        row = dict(row)
+        if _creation_belongs_to_request(row, request):
+            return _created_result_from_row(row, request), stage, expected
+        raise RuntimeError("provisioned username belongs to another account")
+    if not allow_create:
+        raise RuntimeError("provisioning outcome requires reconciliation")
+
+    created = await panel_create_user(
+        ctx, username=username, expire_at=datetime.fromisoformat(request["expire_at"]),
+        traffic_limit_bytes=request.get("traffic_limit_bytes"),
+        telegram_id=request.get("telegram_id"), squad_uuid=request.get("squad_uuid"),
+        hwid_device_limit=request.get("hwid_device_limit"),
+        owner_admin=request.get("owner_admin"), description=request["description"])
+    result = {"username": username, "renewed": False,
+              "user_uuid": str(created.get("uuid") or username),
+              "subscription_url": created.get("subscription_url"),
+              "expire_at": request["expire_at"]}
+    return result, stage, expected
+
+
+async def _provision_renewal(ctx, order: dict, stage: dict):
+    """Apply absolute renewal targets, so retrying never adds days twice."""
+    request = stage["request"]
+    user_uuid = request["user_uuid"]
+    try:
+        from shared.data_access import resolve_panel_user_id
+        panel_id = await resolve_panel_user_id(user_uuid)
+    except Exception:
+        panel_id = user_uuid
+    fields = {}
+    effect = request.get("effect") or "full"
+    if effect != "traffic_only" and request.get("expire_at"):
+        fields["expireAt"] = request["expire_at"]
+    if effect != "time_only" and request.get("traffic_limit_bytes") is not None:
+        fields["trafficLimitBytes"] = request["traffic_limit_bytes"]
+    if fields:
+        await _panel_client().update_user(panel_id, **fields)
+    sub = {"user_uuid": user_uuid, "username": request["username"]}
+    squad_changed = False
+    if effect == "full":
+        squad_changed = await _maybe_move_squad(ctx, sub, request.get("squad_uuid"))
+    if effect != "time_only":
+        try:
+            from web.backend.core.admin_accounts import increment_usage_counter
+            owner_id = await _owner_account_id(ctx, request.get("owner_admin"))
+            if owner_id is not None:
+                old_limit = request.get("previous_traffic_limit_bytes") or 0
+                delta = (request.get("traffic_limit_bytes") or 0) - old_limit
+                if delta:
+                    await increment_usage_counter(owner_id, "traffic_used_bytes", delta)
+        except Exception as e:
+            ctx.logger.error("shop renew counter sync failed: %s", e)
+    return {"username": request["username"], "renewed": True,
+            "expire_at": request.get("expire_at"), "subscription_url": None,
+            "squad_changed": squad_changed,
+            "traffic_limit_bytes": request.get("traffic_limit_bytes"),
+            "effect": effect}
+
+
+async def _run_approval_attempt(ctx, order: dict, decided_by: str,
+                                stage: dict, expected: str,
+                                *, allow_create: bool) -> dict:
+    try:
+        request = stage["request"]
+        if request.get("operation") == "renew":
+            result = await _provision_renewal(ctx, order, stage)
+        elif request.get("operation") == "create":
+            result, stage, expected = await _provision_paid_create(
+                ctx, order, stage, expected, allow_create=allow_create)
+        else:
+            raise ValueError("approval outcome requires reconciliation")
+        await _save_approval_result(ctx, order["id"], result, expected=expected)
+        return await _complete_approval(ctx, order, decided_by, result)
+    except Exception:
+        await _release_approval_attempt(ctx, order["id"], stage, expected)
+        raise
+
+
+async def approve_order(ctx, order_id: int, decided_by: str,
+                        shop_id: int | None = None) -> dict:
+    """Atomically claim and approve one shop's pending order.
+
+    Only one worker can move pending -> approving. Panel effects happen after
+    that durable claim; an uncertain panel outcome deliberately leaves the
+    order in approving rather than provisioning it a second time.
+    """
+    if shop_id is None:
+        order = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_orders WHERE id=$1", order_id)
+        scope = "id=$2"
+        args = (decided_by, order_id)
+    else:
+        order = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_orders WHERE id=$1 AND shop_id=$2",
+            order_id, shop_id)
+        scope = "id=$2 AND shop_id=$3"
+        args = (decided_by, order_id, shop_id)
     if not order:
         raise ValueError("order not found")
-    if order["status"] != "pending":
+    if order["status"] == "approving":
+        order = dict(order)
+        result = _approval_result(order)
+        if result is not None:
+            return await _complete_approval(ctx, order, decided_by, result)
+        if _decode_approval_stage(order).get("state") != "preparing":
+            stage, expected = await _begin_approval_attempt(ctx, order)
+            return await _run_approval_attempt(
+                ctx, order, decided_by, stage, expected, allow_create=False)
+    elif order["status"] != "pending":
         raise ValueError(f"order already {order['status']}")
-    await count_promo_use(ctx, order)
-    await log_event(ctx, order["shop_id"], "approved", order.get("buyer_tg_id"),
-                    f"#{order_id} {order.get('buyer_username')}")
-    if order.get("service_id"):
-        # Other-service order: no panel account, no subscription — the
-        # buyer's completion text is delivered by the caller.
-        svc = await service_by_id(ctx, order["service_id"])
+    if order["status"] == "pending":
+        claimed = await ctx.db.fetchrow(
+            f"""UPDATE plugin_pershop_orders SET status='approving',
+                decided_at=NOW(), decided_by=$1,
+                approval_stage='{{"state":"preparing"}}'
+                WHERE {scope} AND status='pending' RETURNING *""", *args)
+        if not claimed:
+            raise ValueError("order was already decided")
+        order = dict(claimed)
+    sub = None
+    applied = None
+    username = None
+    try:
         shop = await shop_by_id(ctx, order["shop_id"])
-        if not svc or not shop:
-            raise ValueError("service/shop gone")
-        await ctx.db.execute(
-            "UPDATE plugin_pershop_orders SET status='approved', decided_at=NOW(), decided_by=$1 WHERE id=$2",
-            decided_by, order_id)
-        earned = await _earn_referral_credit(ctx, shop, order, order.get("total_units"))
-        return {"service": True, "renewed": False, "service_name": svc["name"],
-                "done_text": (svc.get("done_text") or "").strip() or None,
-                "total_units": order.get("total_units"), "referrer_earned": earned}
-    pkg = await ctx.db.fetchrow("SELECT * FROM plugin_pershop_packages WHERE id = $1", order["package_id"])
-    shop = await shop_by_id(ctx, order["shop_id"])
-    if not pkg or not shop:
-        raise ValueError("package/shop gone")
+        if not shop:
+            raise ValueError("shop gone")
+        if order.get("service_id"):
+            svc = await service_by_id(ctx, order["service_id"])
+            if not svc:
+                raise ValueError("service gone")
+        else:
+            pkg = await ctx.db.fetchrow(
+                "SELECT * FROM plugin_pershop_packages WHERE id=$1", order["package_id"])
+            if not pkg:
+                raise ValueError("package gone")
+            if pkg_effect(pkg) != "full" and not order.get("renew_username"):
+                raise ValueError("top-up offers can only extend an existing subscription")
+            applied = await resolve_applied(ctx, pkg, _snapshot_hwid(order))
+            if order.get("renew_username"):
+                sub = await ctx.db.fetchrow(
+                    "SELECT * FROM plugin_pershop_subs WHERE shop_id=$1 AND username=$2",
+                    shop["id"], order["renew_username"])
+                if not sub:
+                    raise ValueError("subscription to renew not found")
+            else:
+                taken = await existing_usernames(ctx, shop["id"])
+                username = allocate_username(
+                    shop["prefix"], order["buyer_username"], order["buyer_tg_id"], taken)
+        await count_promo_use(ctx, order)
+    except Exception:
+        from rwa_plugin_pershop.billing import release_order_discounts
 
-    if order.get("renew_username"):
-        sub = await ctx.db.fetchrow(
-            "SELECT * FROM plugin_pershop_subs WHERE shop_id=$1 AND username=$2",
-            shop["id"], order["renew_username"])
-        if not sub:
-            raise ValueError("subscription to renew not found")
-        applied = await resolve_applied(ctx, pkg, _snapshot_hwid(order))
-        effect = pkg_effect(pkg)
-        squad_changed = False
-        if effect == "traffic_only":
-            # Top-up: leftover + package traffic, expiry untouched.
-            new_limit, _used = await _renew_traffic_target(
-                ctx, sub, dict(pkg, traffic_reset=False), applied)
-            await _panel_set_traffic(ctx, sub["user_uuid"], new_limit)
-            new_exp = sub.get("expire_at")
+        try:
+            await release_order_discounts(ctx, order_id)
+        finally:
+            await ctx.db.execute(
+                "UPDATE plugin_pershop_orders SET status='pending',decided_at=NULL,"
+                "approval_stage=NULL,provision_username=NULL WHERE id=$1 AND status='approving' "
+                "AND approval_stage=$2", order_id, order.get("approval_stage"))
+        raise
+    if order.get("service_id"):
+        # Other-service order: no panel account, no subscription.
+        result = {"service": True, "renewed": False, "service_name": svc["name"],
+                  "done_text": (svc.get("done_text") or "").strip() or None,
+                  "total_units": order.get("total_units")}
+        await _save_approval_result(
+            ctx, order_id, result, expected=order.get("approval_stage"))
+        return await _complete_approval(ctx, order, decided_by, result)
+
+    try:
+        if order.get("renew_username"):
+            effect = pkg_effect(pkg)
             try:
                 prow = await ctx.db.get_user_by_uuid(sub["user_uuid"])
-                if prow and prow.get("expire_at"):
-                    new_exp = prow.get("expire_at")
             except Exception:
-                pass
-            flag_sql = "notified_80=FALSE, notified_out=FALSE"
-        else:
-            if effect == "time_only":
-                # +days offer: date moves, traffic untouched.
-                new_limit = sub.get("traffic_limit_bytes")
-                traffic_arg = None
-                flag_sql = "notified_72h=FALSE, notified_expired=FALSE"
+                prow = None
+            prow = prow or {}
+            cur_exp = prow.get("expire_at") or sub.get("expire_at")
+            if effect == "traffic_only":
+                new_limit, _used = await _renew_traffic_target(
+                    ctx, sub, dict(pkg, traffic_reset=False), applied)
+                new_exp = cur_exp
             else:
-                new_limit, _used = await _renew_traffic_target(ctx, sub, pkg, applied)
-                traffic_arg = new_limit
-                flag_sql = ("notified_80=FALSE, notified_72h=FALSE, "
-                            "notified_expired=FALSE, notified_out=FALSE")
-            cur_exp = sub.get("expire_at")
-            if is_timeless(cur_exp) or applied["unlimited"]:
-                new_exp = datetime(2999, 12, 31, tzinfo=timezone.utc)
-            else:
-                new_exp = await panel_extend_user(
-                    ctx, sub["user_uuid"], applied["expire_days"] or 30, traffic_arg)
-            if effect == "full":
-                squad_changed = await _maybe_move_squad(ctx, sub, applied.get("squad_uuid"))
-        await ctx.db.execute(
-            "UPDATE plugin_pershop_orders SET status='approved', decided_at=NOW(), decided_by=$1 WHERE id=$2",
-            decided_by, order_id)
-        await ctx.db.execute(
-            f"""UPDATE plugin_pershop_subs SET expire_at=$1,
-               traffic_limit_bytes=COALESCE($2, traffic_limit_bytes),
-               {flag_sql}, updated_at=NOW() WHERE id=$3""",
-            new_exp, new_limit, sub["id"])
-        if effect != "time_only":
-            try:
-                from web.backend.core.admin_accounts import increment_usage_counter
-                owner_id = await _owner_account_id(ctx, shop.get("owner_admin"))
-                if owner_id is not None:
-                    delta = (new_limit or 0) - (sub["traffic_limit_bytes"] or 0)
-                    if delta:
-                        await increment_usage_counter(owner_id, "traffic_used_bytes", delta)
-            except Exception as e:
-                ctx.logger.error("shop renew counter sync failed: %s", e)
-        earned = await _earn_referral_credit(ctx, shop, order, order.get("total_units"))
-        changed = ["traffic_limit_bytes"] if effect == "traffic_only" else ["expire_at"]
-        if effect == "full":
-            changed.append("traffic_limit_bytes")
-            if squad_changed:
-                changed.append("active_internal_squads")
-        _fire_updated(ctx, sub["user_uuid"], sub["username"], changed, shop.get("owner_admin"))
-        return {"username": sub["username"], "renewed": True, "expire_at": new_exp,
-                "subscription_url": None, "squad_changed": squad_changed,
+                if effect == "time_only":
+                    new_limit = sub.get("traffic_limit_bytes")
+                else:
+                    new_limit, _used = await _renew_traffic_target(ctx, sub, pkg, applied)
+                if is_timeless(cur_exp) or applied["unlimited"]:
+                    new_exp = datetime(2999, 12, 31, tzinfo=timezone.utc)
+                else:
+                    now = datetime.now(timezone.utc)
+                    base = _as_aware(cur_exp)
+                    base = now if base is None or base < now else base
+                    new_exp = base + timedelta(days=applied["expire_days"] or 30)
+            request = {
+                "operation": "renew", "user_uuid": sub["user_uuid"],
+                "username": sub["username"], "expire_at": new_exp,
                 "traffic_limit_bytes": new_limit, "effect": effect,
-                "referrer_earned": earned}
+                "squad_uuid": applied.get("squad_uuid"),
+                "previous_traffic_limit_bytes": sub.get("traffic_limit_bytes"),
+                "owner_admin": shop.get("owner_admin"),
+            }
+        else:
+            if applied["unlimited"]:
+                expire_at = datetime(2999, 12, 31, tzinfo=timezone.utc)
+            else:
+                expire_at = (datetime.now(timezone.utc)
+                             + timedelta(days=applied["expire_days"] or 30))
+            request = {
+                "operation": "create", "username": username,
+                "prefix": shop["prefix"], "expire_at": expire_at,
+                "traffic_limit_bytes": applied["traffic_limit_bytes"],
+                "telegram_id": order["buyer_tg_id"],
+                "squad_uuid": applied["squad_uuid"],
+                "hwid_device_limit": applied["hwid"],
+                "owner_admin": shop.get("owner_admin"),
+                "description": f"pershop:{shop['prefix']} order #{order_id}",
+            }
+    except Exception:
+        from rwa_plugin_pershop.billing import release_order_discounts
 
-    if pkg_effect(pkg) != "full":
-        raise ValueError("top-up offers can only extend an existing subscription")
-    taken = await existing_usernames(ctx, shop["id"])
-    username = allocate_username(shop["prefix"], order["buyer_username"], order["buyer_tg_id"], taken)
-    applied = await resolve_applied(ctx, pkg, _snapshot_hwid(order))
-    if applied["unlimited"]:
-        expire_at = datetime(2999, 12, 31, tzinfo=timezone.utc)
-    else:
-        expire_at = datetime.now(timezone.utc) + timedelta(days=applied["expire_days"] or 30)
-    created = await panel_create_user(
-        ctx, username=username, expire_at=expire_at,
-        traffic_limit_bytes=applied["traffic_limit_bytes"], telegram_id=order["buyer_tg_id"],
-        squad_uuid=applied["squad_uuid"], hwid_device_limit=applied["hwid"],
-        owner_admin=shop.get("owner_admin"),
-        description=f"pershop:{shop['prefix']} order #{order_id}",
-    )
-    user_uuid = created.get("uuid") or username
-    await ctx.db.execute(
-        "UPDATE plugin_pershop_orders SET status='approved', decided_at=NOW(), decided_by=$1 WHERE id=$2",
-        decided_by, order_id,
-    )
-    await ctx.db.execute(
-        """INSERT INTO plugin_pershop_subs(shop_id, buyer_tg_id, user_uuid, username, expire_at, traffic_limit_bytes,
-           package_id)
-           VALUES($1,$2,$3,$4,$5,$6,$7)""",
-        shop["id"], order["buyer_tg_id"], str(user_uuid), username,
-        expire_at, pkg["traffic_limit_bytes"], pkg["id"],
-    )
-    # Link the order to its sub: powers the mixed-payment note, the
-    # full-credit cancel lookup, and later cancels (same as the auto path).
-    await ctx.db.execute(
-        "UPDATE plugin_pershop_orders SET renew_username=$1 WHERE id=$2",
-        username, order_id)
-    earned = await _earn_referral_credit(ctx, shop, order, order.get("total_units"))
-    return {"username": username, "renewed": False,
-            "subscription_url": created.get("subscription_url"), "expire_at": expire_at,
-            "referrer_earned": earned}
-
+        try:
+            await release_order_discounts(ctx, order_id)
+        finally:
+            await ctx.db.execute(
+                "UPDATE plugin_pershop_orders SET status='pending',decided_at=NULL,"
+                "approval_stage=NULL,provision_username=NULL WHERE id=$1 AND status='approving' "
+                "AND approval_stage=$2", order_id, order.get("approval_stage"))
+        raise
+    stage, expected = await _begin_approval_attempt(ctx, order, request)
+    return await _run_approval_attempt(
+        ctx, order, decided_by, stage, expected, allow_create=True)
 
 async def has_services(ctx, shop_id: int) -> bool:
     """Any active sellable service (for the Other-Services menu button)."""
@@ -1835,19 +2144,30 @@ def snapshot_note(order: dict) -> str:
     return str(note)[:500]
 
 
-async def deny_order(ctx, order_id: int, decided_by: str, reason: str) -> None:
-    order = await ctx.db.fetchrow("SELECT * FROM plugin_pershop_orders WHERE id = $1", order_id)
+async def deny_order(ctx, order_id: int, decided_by: str, reason: str,
+                     shop_id: int | None = None):
+    """Atomically decide one order, then perform an idempotent credit refund."""
+    if shop_id is None:
+        order = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_orders WHERE id=$1", order_id)
+        scope = "id=$4"
+        args = (reason, decided_by, order_id, order_id)
+    else:
+        order = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_orders WHERE id=$1 AND shop_id=$2",
+            order_id, shop_id)
+        scope = "id=$3 AND shop_id=$4"
+        args = (reason, decided_by, order_id, shop_id)
     if not order:
         raise ValueError("order not found")
     if order["status"] not in ("pending", "withdraw_requested"):
         raise ValueError(f"order already {order['status']}")
-    await ctx.db.execute(
-        "UPDATE plugin_pershop_orders SET status='denied', deny_reason=$1, decided_at=NOW(), decided_by=$2 WHERE id=$3",
-        reason, decided_by, order_id,
-    )
+    from rwa_plugin_pershop.billing import deny_order_atomic
+
+    refunded = await deny_order_atomic(ctx, dict(order), decided_by, reason, shop_id)
     await log_event(ctx, order["shop_id"], "denied", order.get("buyer_tg_id"),
                     f"#{order_id} {order.get('buyer_username')}")
-    return await _refund_order_credit(ctx, dict(order))
+    return float(refunded)
 
 
 # kind -> shop column holding the admin-editable template.
@@ -2011,10 +2331,11 @@ def tutorial_link_rows(raw: str) -> list:
 
 
 def fmt_safe(text: str, **vars: Any) -> str:
-    """Format owner-written text with the given variables, leaving the raw
-    text untouched when a placeholder is unknown (never raises)."""
+    """Format trusted owner HTML with escaped dynamic values."""
+    from rwa_plugin_pershop.lang import html_vars
+
     try:
-        return (text or "").format(**vars)
+        return (text or "").format(**html_vars(vars))
     except Exception:
         return text or ""
 
@@ -2024,15 +2345,16 @@ def message_text(shop: dict, kind: str, **vars: Any) -> str:
 
     Admin-written text always wins; otherwise the shop language default.
     """
-    from rwa_plugin_pershop.lang import L
+    from rwa_plugin_pershop.lang import L, html_vars
 
     default = L(shop, f"tpl_{kind}")
     tpl = (shop.get(TEXT_COLUMNS[kind]) or "").strip() or default
+    safe = html_vars(vars)
     try:
-        return tpl.format(**vars)
+        return tpl.format(**safe)
     except Exception:
         try:
-            return default.format(**vars)
+            return default.format(**safe)
         except Exception:
             return default
 
@@ -2094,20 +2416,27 @@ async def mark_scammer(ctx, order_id: int, owner_admin: str) -> dict:
         "SELECT name FROM plugin_pershop_packages WHERE id=$1",
         order["package_id"])
     reason = f"order #{order_id} ({(pkg or {}).get('name') or '?'})"
+    if order["status"] == "pending":
+        # Settle through the normal ledger path. A raw status update would
+        # strand checkout debits and reserved discounts.
+        await deny_order(ctx, order_id, owner_admin, reason, shop_id=order["shop_id"])
+        order = await ctx.db.fetchrow(
+            "SELECT * FROM plugin_pershop_orders WHERE id=$1 AND shop_id=$2",
+            order_id, shop["id"])
+        if not order or order["status"] != "denied":
+            raise RuntimeError("scammer denial did not settle")
     await ctx.db.execute(
         """INSERT INTO plugin_pershop_scammers(tg_id, marked_by_admin, reason)
            VALUES($1,$2,$3)
            ON CONFLICT(tg_id) DO UPDATE SET marked_by_admin=$2, reason=$3""",
         order["buyer_tg_id"], owner_admin, reason)
-    await ctx.db.execute(
-        "UPDATE plugin_pershop_orders SET status='denied', decided_at=NOW() WHERE id=$1",
-        order_id)
     return {"order": dict(order), "shop": dict(shop), "reason": reason}
 
 
 async def shop_stats(ctx, shop: dict) -> dict:
     """Small overview strip for the owner: counts only, never raises."""
-    out = {"subs_active": 0, "orders_pending": 0, "orders_approved": 0,
+    out = {"subs_active": 0, "orders_pending": 0, "orders_approving": 0,
+           "orders_approved": 0,
            "units_sold": 0, "orders_denied": 0, "orders_withdrawn": 0,
            "tests_claimed": 0, "subs_linked": 0, "referral_earned": 0}
     try:
@@ -2116,7 +2445,10 @@ async def shop_stats(ctx, shop: dict) -> dict:
             "SELECT COUNT(*) FROM plugin_pershop_subs WHERE shop_id=$1 AND expire_at>$2",
             shop["id"], now) or 0
         out["orders_pending"] = await ctx.db.fetchval(
-            "SELECT COUNT(*) FROM plugin_pershop_orders WHERE shop_id=$1 AND status IN ('pending','withdraw_requested')",
+            "SELECT COUNT(*) FROM plugin_pershop_orders WHERE shop_id=$1 AND status IN ('pending','approving','withdraw_requested')",
+            shop["id"]) or 0
+        out["orders_approving"] = await ctx.db.fetchval(
+            "SELECT COUNT(*) FROM plugin_pershop_orders WHERE shop_id=$1 AND status='approving'",
             shop["id"]) or 0
         appr = await ctx.db.fetchrow(
             "SELECT COUNT(*) AS n, COALESCE(SUM(total_units),0) AS u FROM plugin_pershop_orders WHERE shop_id=$1 AND status='approved'",
@@ -2173,47 +2505,252 @@ async def test_terms(ctx, shop: dict) -> dict:
     return {"days": days, "gb": gb, "squad_uuid": squad or None, "hwid": hwid}
 
 
-async def claim_test_sub(ctx, shop: dict, buyer_tg_id: int, buyer_username: str) -> dict:
-    """Create a one-per-person free test account: {prefix}-Test-{N}.
+def _decode_trial_stage(claim: dict) -> dict:
+    import json
 
-    Panel-global: the claim is recorded in plugin_pershop_test_claims, so
-    one Telegram id gets a single test account across ALL shops on this
-    panel, no matter which shop hands it out. No admin approval involved.
-    Raises ValueError when disabled or already claimed network-wide.
-    """
-    if not (shop.get("test_enabled") and (shop.get("prefix") or "").strip()):
+    try:
+        stage = json.loads((claim or {}).get("provision_stage") or "{}")
+        return stage if isinstance(stage, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _trial_result(claim: dict) -> dict | None:
+    stage = _decode_trial_stage(claim)
+    result = stage.get("result") if stage.get("state") == "provisioned" else None
+    return dict(result) if isinstance(result, dict) else None
+
+
+def _public_trial_result(result: dict) -> dict:
+    result = dict(result)
+    if isinstance(result.get("expire_at"), str):
+        result["expire_at"] = datetime.fromisoformat(result["expire_at"])
+    return result
+
+
+async def _replace_trial_stage(ctx, shop_id: int, buyer_tg_id: int,
+                               stage: dict, expected: str | None) -> str:
+    import json
+
+    raw = json.dumps(_clean_json(stage))
+    request = stage.get("request") if isinstance(stage, dict) else None
+    username = request.get("username") if isinstance(request, dict) else None
+    row = await ctx.db.fetchrow(
+        """UPDATE plugin_pershop_test_claims SET provision_stage=$1,
+             provision_username=COALESCE($4,provision_username)
+           WHERE tg_id=$2 AND shop_id=$3
+             AND provision_stage IS NOT DISTINCT FROM $5 RETURNING tg_id""",
+        raw, buyer_tg_id, shop_id, username, expected)
+    if not row:
+        raise ValueError("trial provisioning was changed by another worker")
+    return raw
+
+
+async def _prepare_test_claim(ctx, shop: dict, buyer_tg_id: int,
+                              terms: dict) -> tuple[dict, bool]:
+    """Reserve the global claim, counter, and immutable request in one commit."""
+    import json
+
+    from rwa_plugin_pershop.billing import _db_transaction
+
+    initial = '{"state":"preparing"}'
+    async with _db_transaction(ctx) as db:
+        claimed = await db.fetchrow(
+            """INSERT INTO plugin_pershop_test_claims(tg_id,shop_id,provision_stage)
+               SELECT $1,s.id,$3 FROM plugin_pershop_shops s
+               WHERE s.id=$2 AND s.test_enabled AND NULLIF(BTRIM(s.prefix),'') IS NOT NULL
+               ON CONFLICT(tg_id) DO NOTHING RETURNING *""",
+            buyer_tg_id, shop["id"], initial)
+        if claimed:
+            allocated = await db.fetchrow(
+                """UPDATE plugin_pershop_shops SET test_counter=test_counter+1
+                   WHERE id=$1 RETURNING prefix,owner_admin,test_counter""",
+                shop["id"])
+            if not allocated:
+                raise ValueError("shop gone")
+            prefix = allocated["prefix"].strip()
+            request = {
+                "username": f"{prefix}-Test-{allocated['test_counter']}",
+                "expire_at": (datetime.now(timezone.utc)
+                              + timedelta(days=terms["days"])),
+                "traffic_limit_bytes": (int(round(terms["gb"] * 1000 * 1000 * 1000))
+                                        if terms["gb"] else None),
+                "telegram_id": buyer_tg_id,
+                "squad_uuid": terms.get("squad_uuid"),
+                "hwid_device_limit": terms.get("hwid"),
+                "owner_admin": allocated["owner_admin"],
+                "description": f"pershop:{prefix} test #{buyer_tg_id}",
+            }
+            stage = {"state": "preparing", "request": _clean_json(request)}
+            row = await db.fetchrow(
+                """UPDATE plugin_pershop_test_claims
+                   SET provision_stage=$1,provision_username=$2
+                   WHERE tg_id=$3 AND shop_id=$4 AND provision_stage=$5
+                   RETURNING *""",
+                json.dumps(stage), request["username"], buyer_tg_id,
+                shop["id"], initial)
+            if not row:
+                raise ValueError("trial reservation was changed by another worker")
+            return dict(row), True
+
+        existing = await db.fetchrow(
+            "SELECT * FROM plugin_pershop_test_claims WHERE tg_id=$1", buyer_tg_id)
+    if not existing:
         raise ValueError("test subscriptions are off")
-    prefix = shop["prefix"].strip()
-    claimed = await ctx.db.fetchrow(
-        """INSERT INTO plugin_pershop_test_claims(tg_id, shop_id)
-           VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING tg_id""",
-        buyer_tg_id, shop["id"])
-    if not claimed:
+    if int(existing["shop_id"]) != int(shop["id"]):
         raise ValueError("test already claimed")
-    terms = await test_terms(ctx, shop)
-    number = int(shop.get("test_counter") or 0) + 1
-    username = f"{prefix}-Test-{number}"
-    expire_at = datetime.now(timezone.utc) + timedelta(days=terms["days"])
-    # Decimal GB, like every traffic number the plugin shows (0.25 GB = 250 MB).
-    traffic = int(round(terms["gb"] * 1000 * 1000 * 1000)) if terms["gb"] else None
+    return dict(existing), False
+
+
+async def _begin_trial_attempt(ctx, claim: dict, request: dict | None = None):
+    import uuid
+
+    expected = claim.get("provision_stage")
+    old = _decode_trial_stage(claim)
+    if expected:
+        state = old.get("state")
+        if state == "creating" and isinstance(old.get("request"), dict):
+            if _approval_attempt_active(old):
+                raise ValueError("trial provisioning is already in progress")
+            request = old["request"]
+        elif state != "preparing" or not isinstance(request, dict):
+            raise RuntimeError("trial outcome requires reconciliation")
+    if not isinstance(request, dict):
+        raise RuntimeError("trial outcome requires reconciliation")
+    stage = {"state": "creating", "attempt": uuid.uuid4().hex,
+             "locked_at": datetime.now(timezone.utc), "request": request}
+    stage["request"] = _clean_json(request)
+    raw = await _replace_trial_stage(
+        ctx, claim["shop_id"], claim["tg_id"], stage, expected)
+    return _clean_json(stage), raw
+
+
+async def _release_trial_attempt(ctx, claim: dict, stage: dict, expected: str) -> None:
+    released = dict(stage, attempt=None, locked_at=None)
+    try:
+        await _replace_trial_stage(
+            ctx, claim["shop_id"], claim["tg_id"], released, expected)
+    except Exception:
+        pass
+
+
+def _trial_created_result(row: dict, request: dict) -> dict:
+    result = _created_result_from_row(row, request)
+    result["traffic_limit_bytes"] = request.get("traffic_limit_bytes")
+    return result
+
+
+async def _provision_trial_create(ctx, stage: dict, *, allow_create: bool) -> dict:
+    request = dict(stage["request"])
+    username = request["username"]
+    row = await ctx.db.fetchrow("SELECT * FROM users WHERE lower(username)=lower($1)", username)
+    if row:
+        row = dict(row)
+        if _creation_belongs_to_request(row, request):
+            return _trial_created_result(row, request)
+        raise RuntimeError("trial username belongs to another account")
+    if not allow_create:
+        raise RuntimeError("trial outcome requires reconciliation")
     created = await panel_create_user(
-        ctx, username=username, expire_at=expire_at,
-        traffic_limit_bytes=traffic, telegram_id=buyer_tg_id,
-        squad_uuid=terms.get("squad_uuid"), hwid_device_limit=terms.get("hwid"),
-        owner_admin=shop.get("owner_admin"),
-        description=f"pershop:{prefix} test",
-    )
-    await ctx.db.execute("UPDATE plugin_pershop_shops SET test_counter=$1 WHERE id=$2",
-                         number, shop["id"])
-    await ctx.db.execute(
-        """INSERT INTO plugin_pershop_subs(shop_id, buyer_tg_id, user_uuid, username,
-           expire_at, traffic_limit_bytes, is_test)
-           VALUES($1,$2,$3,$4,$5,$6,TRUE)""",
-        shop["id"], buyer_tg_id, str(created.get("uuid") or username),
-        username, expire_at, traffic,
-    )
-    return {"username": username, "expire_at": expire_at,
-            "subscription_url": created.get("subscription_url"), **terms}
+        ctx, username=username, expire_at=datetime.fromisoformat(request["expire_at"]),
+        traffic_limit_bytes=request.get("traffic_limit_bytes"),
+        telegram_id=request.get("telegram_id"), squad_uuid=request.get("squad_uuid"),
+        hwid_device_limit=request.get("hwid_device_limit"),
+        owner_admin=request.get("owner_admin"), description=request["description"])
+    return {
+        "username": username, "renewed": False,
+        "user_uuid": str(created.get("uuid") or username),
+        "subscription_url": created.get("subscription_url"),
+        "expire_at": request["expire_at"],
+        "traffic_limit_bytes": request.get("traffic_limit_bytes"),
+    }
+
+
+async def _complete_trial_claim(ctx, claim: dict, result: dict,
+                                expected: str) -> dict:
+    """Save the subscription and durable completion marker atomically."""
+    from rwa_plugin_pershop.billing import _db_transaction
+
+    result = _public_trial_result(result)
+    request = _decode_trial_stage(claim).get("request") or {}
+    traffic = result.get("traffic_limit_bytes", request.get("traffic_limit_bytes"))
+    async with _db_transaction(ctx) as db:
+        await db.execute(
+            """INSERT INTO plugin_pershop_subs(shop_id,buyer_tg_id,user_uuid,username,
+               expire_at,traffic_limit_bytes,is_test)
+               VALUES($1,$2,$3,$4,$5,$6,TRUE) ON CONFLICT(username) DO NOTHING""",
+            claim["shop_id"], claim["tg_id"], str(result["user_uuid"]),
+            result["username"], result["expire_at"], traffic)
+        existing = await db.fetchrow(
+            "SELECT * FROM plugin_pershop_subs WHERE shop_id=$1 AND username=$2",
+            claim["shop_id"], result["username"])
+        if (not existing or int(existing.get("buyer_tg_id") or 0) != int(claim["tg_id"])
+                or str(existing.get("user_uuid")) != str(result["user_uuid"])
+                or not existing.get("is_test")):
+            raise RuntimeError("trial subscription result does not match")
+        final = {"state": "provisioned", "finalized": True,
+                 "result": _clean_json(result)}
+        updated = await db.fetchrow(
+            """UPDATE plugin_pershop_test_claims SET provision_stage=$1
+               WHERE tg_id=$2 AND shop_id=$3 AND provision_stage IS NOT DISTINCT FROM $4
+               RETURNING tg_id""",
+            __import__("json").dumps(final), claim["tg_id"],
+            claim["shop_id"], expected)
+        if not updated:
+            raise ValueError("trial provisioning was changed by another worker")
+    return result
+
+
+async def _run_trial_attempt(ctx, claim: dict, stage: dict, expected: str,
+                             *, allow_create: bool) -> dict:
+    creating_expected = expected
+    try:
+        result = await _provision_trial_create(ctx, stage, allow_create=allow_create)
+        saved = {"state": "provisioned", "request": stage["request"],
+                 "result": _clean_json(result)}
+        expected = await _replace_trial_stage(
+            ctx, claim["shop_id"], claim["tg_id"], saved, creating_expected)
+        claim = dict(claim, provision_stage=expected)
+        return await _complete_trial_claim(ctx, claim, result, expected)
+    except Exception:
+        await _release_trial_attempt(ctx, claim, stage, creating_expected)
+        raise
+
+
+async def claim_test_sub(ctx, shop: dict, buyer_tg_id: int, buyer_username: str) -> dict:
+    """Create or resume the buyer's one panel-wide trial exactly once.
+
+    Only the first ``preparing → creating`` transition may call the panel's
+    create operation. Any interrupted create is recovered by exact username,
+    description, Telegram id, and UUID; uncertainty fails closed instead of
+    consuming another trial username or creating a replacement account.
+    """
+    terms = await test_terms(ctx, shop)
+    claim, created = await _prepare_test_claim(ctx, shop, buyer_tg_id, terms)
+    result = _trial_result(claim)
+    if result is not None:
+        if _decode_trial_stage(claim).get("finalized"):
+            # Preserve the original second-tap behaviour; recovery only applies
+            # to work that has not already delivered a completed local trial.
+            raise ValueError("test already claimed")
+        return await _complete_trial_claim(
+            ctx, claim, result, claim.get("provision_stage"))
+    raw = claim.get("provision_stage")
+    state = _decode_trial_stage(claim).get("state")
+    if not raw:
+        # Claims written before pershop_007 have no identity that can be proven.
+        raise ValueError("test already claimed")
+    if state == "preparing":
+        request = _decode_trial_stage(claim).get("request")
+        stage, expected = await _begin_trial_attempt(ctx, claim, request)
+        allow_create = True
+    elif state == "creating":
+        stage, expected = await _begin_trial_attempt(ctx, claim)
+        allow_create = False
+    else:
+        raise RuntimeError("trial outcome requires reconciliation")
+    return await _run_trial_attempt(
+        ctx, claim, stage, expected, allow_create=allow_create)
 
 
 async def record_referral(ctx, shop_id: int, referrer_tg_id: int, referred_tg_id: int) -> None:
@@ -2331,9 +2868,12 @@ async def promo_validate(ctx, shop_id: int, code: str, buyer_tg_id: int,
             if vu <= datetime.now(timezone.utc):
                 return None
         if int(promo.get("max_uses") or 0) > 0:
-            used = await ctx.db.fetchval(
-                "SELECT COUNT(*) FROM plugin_pershop_promo_uses WHERE promo_id=$1",
-                promo["id"])
+            if promo.get("uses_reserved") is None:
+                used = await ctx.db.fetchval(
+                    "SELECT COUNT(*) FROM plugin_pershop_promo_uses WHERE promo_id=$1",
+                    promo["id"])
+            else:
+                used = promo.get("uses_reserved") or 0
             if int(used or 0) >= int(promo["max_uses"]):
                 return None
         mine = await ctx.db.fetchrow(
@@ -2405,28 +2945,22 @@ async def checkout_discount(ctx, shop, buyer_tg_id: int, total_units: float,
 
 
 async def count_promo_use(ctx, order: dict | None) -> None:
-    """Burn one promo use at approval time (never-raises accounting)."""
-    try:
-        raw = (order or {}).get("options_snapshot")
-        snap = _snap_dict(raw)
-        code = str(snap.get("promo_code") or "").strip().upper()
-        if not code:
-            return
-        shop_id = (order or {}).get("shop_id")
-        promo = await ctx.db.fetchrow(
-            "SELECT id FROM plugin_pershop_promos WHERE shop_id=$1 AND code=$2",
-            shop_id, code)
-        if not promo:
-            return
-        await ctx.db.execute(
-            """INSERT INTO plugin_pershop_promo_uses(promo_id, shop_id, order_id, buyer_tg_id)
-               VALUES($1,$2,$3,$4) ON CONFLICT (promo_id, buyer_tg_id) DO NOTHING""",
-            promo["id"], shop_id, (order or {}).get("id"),
-            (order or {}).get("buyer_tg_id"))
-        await log_event(ctx, shop_id, "promo", (order or {}).get("buyer_tg_id"),
-                        f"{code} on #{(order or {}).get('id')}")
-    except Exception:
-        pass
+    """Reserve every snapshot discount or reject the approval.
+
+    Capacity and first-order eligibility are checked at the decision point,
+    where concurrent approvals can no longer spend the same discount twice.
+    """
+    if not order or not order.get("id"):
+        return
+    from rwa_plugin_pershop.billing import reserve_order_discounts
+
+    kind = "svc" if order.get("service_id") else "pkg" if order.get("package_id") else None
+    await reserve_order_discounts(ctx, dict(order), kind)
+    snap = _snap_dict(order.get("options_snapshot"))
+    code = str(snap.get("promo_code") or "").strip().upper()
+    if code:
+        await log_event(ctx, order.get("shop_id"), "promo", order.get("buyer_tg_id"),
+                        f"{code} on #{order.get('id')}")
 
 
 def _snap_dict(raw) -> dict:
