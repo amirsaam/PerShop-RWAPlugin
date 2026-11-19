@@ -421,7 +421,7 @@ class FakeDB:
             return out
         if "SELECT username FROM plugin_pershop_subs" in q:
             return [{"username": s["username"]} for s in self.subs.values() if s["shop_id"] == a[0]]
-        if "created_by_admin_id IS NOT DISTINCT FROM" in q:
+        if "created_by_admin_id IS NOT DISTINCT FROM" in q and "LIMIT" not in q:
             # plan-matching orphans: panel users of this owner (plus the
             # superadmin's own and unattributed legacy users inside
             # superadmin-owned shops) with no subs row
@@ -4635,6 +4635,8 @@ async def _pub_users_flow(ctx, shop, db):
     real_owner, real_super = svc._owner_account_id, svc._owner_is_superadmin
     real_client = svc._panel_client
     real_acct_row = svc._owner_account_row
+    from rwa_plugin_pershop import provisioning
+    real_external = provisioning.create_external_user
     svc._owner_account_id = _fake_owner
     svc._owner_is_superadmin = _fake_not_super
     panel = FakePanel()
@@ -4644,7 +4646,52 @@ async def _pub_users_flow(ctx, shop, db):
         return True, {"id": 7, "role_id": 1, "role_name": "admin"}
 
     svc._owner_account_row = _fake_acct_row
+
+    async def fake_external_create(c, s, request, _key):
+        # FakeDB covers only control flow here. Real journal SQL, constraints
+        # and recovery are exercised by test_postgres_api_users.py.
+        created = await svc.panel_create_user(
+            c, username=request["username"],
+            expire_at=datetime.fromisoformat(request["expire_at"]),
+            traffic_limit_bytes=request.get("traffic_limit_bytes"),
+            telegram_id=request.get("telegram_id"),
+            squad_uuid=request.get("squad_uuid"),
+            hwid_device_limit=request.get("hwid_device_limit"),
+            owner_admin=s.get("owner_admin"), description=request["description"])
+        row = await c.db.fetchrow(
+            """INSERT INTO plugin_pershop_subs(shop_id,buyer_tg_id,user_uuid,
+               username,expire_at,traffic_limit_bytes,package_id)
+               VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id""",
+            s["id"], request.get("telegram_id"), created["uuid"],
+            request["username"], datetime.fromisoformat(request["expire_at"]),
+            request.get("traffic_limit_bytes"), None)
+        return {"uuid": created["uuid"], "username": request["username"],
+                "subscription_url": created.get("subscription_url"),
+                "sub_id": row["id"]}
+
+    provisioning.create_external_user = fake_external_create
     saved_mods = {}
+    for name in ("web", "web.backend", "web.backend.core", "web.backend.core.rbac"):
+        saved_mods[name] = sys.modules.get(name)
+        stub = types.ModuleType(name)
+        stub.__path__ = []
+        sys.modules[name] = stub
+
+    async def _allow_squad(_admin, _rt, _uuid, _action="view"):
+        return True
+
+    sys.modules["web.backend.core.rbac"].check_access = _allow_squad
+    sys.modules["web.backend.core.admin_accounts"] = types.ModuleType(
+        "web.backend.core.admin_accounts")
+
+    async def _initial_account(_owner):
+        return {"id": 7, "role_id": 1, "role_name": "admin"}
+
+    async def _initial_counter(*_args):
+        return True
+
+    sys.modules["web.backend.core.admin_accounts"].get_admin_account_by_username = _initial_account
+    sys.modules["web.backend.core.admin_accounts"].increment_usage_counter = _initial_counter
     try:
         sid = shop["id"]
         exp = datetime.now(timezone.utc) + timedelta(days=100)
@@ -4659,12 +4706,13 @@ async def _pub_users_flow(ctx, shop, db):
         res = await svc.api_create_user(ctx, dict(shop), username="vip-bob",
                                         expire_at=new_exp, traffic_limit_bytes=20 * GB,
                                         telegram_id=555, squad_uuid="sqT",
-                                        hwid_device_limit=2)
+                                        hwid_device_limit=2,
+                                        idempotency_key="pub-users-flow-0001")
         assert res["uuid"] == "uuid-1", res
         assert res["sub_id"] is not None
         kw = panel.created[0]
         assert kw["username"] == "vip-bob" and kw["active_internal_squads"] == ["sqT"], kw
-        assert kw["description"] == "pershop:vip api", kw
+        assert kw["description"].startswith("pershop:vip api:"), kw
         assert kw["hwid_device_limit"] == 2 and kw["telegram_id"] == 555, kw
         assert db.users["uuid-1"]["created_by_admin_id"] == 7
         sub = db.subs[res["sub_id"]]
@@ -4691,13 +4739,14 @@ async def _pub_users_flow(ctx, shop, db):
             return False
 
         async def _visible(_admin):
-            return {"uu-1"}
+            return {"uu-1", "uuid-1"}
 
         sys.modules["web.backend.core.rbac"].check_access = _deny
         sys.modules["web.backend.core.rbac"].get_visible_user_uuids = _visible
         try:
             await svc.api_create_user(ctx, dict(shop), username="vip-denied",
-                                      expire_at=new_exp, squad_uuid="sqX")
+                                      expire_at=new_exp, squad_uuid="sqX",
+                                      idempotency_key="pub-users-denied-0001")
             assert False, "out-of-scope squad accepted"
         except ValueError as e:
             assert "squad" in str(e), e
@@ -4710,10 +4759,29 @@ async def _pub_users_flow(ctx, shop, db):
         sys.modules["web.backend.core"] = types.ModuleType("web.backend.core")
         sys.modules["web.backend.core.rbac"] = types.ModuleType("web.backend.core.rbac")
         sys.modules["web.backend.core.rbac"].get_visible_user_uuids = _visible
+        sys.modules["web.backend.core.rbac"].check_access = _allow_squad
+        sys.modules["web.backend.core.admin_accounts"] = types.ModuleType(
+            "web.backend.core.admin_accounts")
+
+        async def _account(_owner):
+            return {"id": 7, "role_id": 1, "role_name": "admin"}
+
+        async def _accept(*_args):
+            return True
+
+        sys.modules["web.backend.core.admin_accounts"].get_admin_account_by_username = _account
+        sys.modules["web.backend.core.admin_accounts"].increment_usage_counter = _accept
+        sys.modules["shared"] = types.ModuleType("shared")
+        sys.modules["shared.data_access"] = types.ModuleType("shared.data_access")
+
+        async def _panel_id(user_uuid):
+            return user_uuid
+
+        sys.modules["shared.data_access"].resolve_panel_user_id = _panel_id
         # list: owner-created only, RBAC visibility applied, search works
         users = await svc.api_list_users(ctx, dict(shop))
         uuids = {u["uuid"] for u in users}
-        assert uuids == {"uu-1"}, uuids
+        assert uuids == {"uu-1", "uuid-1"}, uuids
         users = await svc.api_list_users(ctx, dict(shop), search="ALI")
         assert [u["username"] for u in users] == ["vip-alice"], users
         users = await svc.api_list_users(ctx, dict(shop), limit=1)
@@ -4761,6 +4829,7 @@ async def _pub_users_flow(ctx, shop, db):
         svc._owner_account_id, svc._owner_is_superadmin = real_owner, real_super
         svc._panel_client = real_client
         svc._owner_account_row = real_acct_row
+        provisioning.create_external_user = real_external
         for name, prev in saved_mods.items():
             if prev is None:
                 sys.modules.pop(name, None)
@@ -5106,7 +5175,7 @@ async def _shop_admin_flow():
     await ctx.settings.set("tg_offset:1", 42)
     assert len(db.shops) == 1
     res = await svc.reset_all(ctx)
-    assert res["ok"] is True and len(res["dropped"]) == 19, res
+    assert res["ok"] is True and len(res["dropped"]) == 21, res
     assert db.dropped is True and db.versions == set(), res
     assert db.shops == {} and db.pkgs == {} and db.subs == {}, db
     assert ctx.settings.d == {}, ctx.settings.d
@@ -5503,6 +5572,12 @@ def test_approval_recovers_uncertain_panel_create():
 
 
 if __name__ == "__main__":
+    from rwa_test_support import recognized_legacy_owner
+
+    # The production helpers fail closed. Flow fakes explicitly model the
+    # recognized row-less legacy superadmin instead of a failed RWA lookup.
+    _legacy_owner = recognized_legacy_owner()
+    _legacy_owner.__enter__()
     test_naming()
     test_templates()
     test_lang()

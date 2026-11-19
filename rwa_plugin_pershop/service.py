@@ -217,6 +217,8 @@ async def disconnect_shop(ctx, owner_admin: str) -> dict:
 
 _PERSHOP_TABLES = [
     "plugin_pershop_events",
+    "plugin_pershop_update_incidents",
+    "plugin_pershop_api_user_creates",
     "plugin_pershop_credit_ledger",
     "plugin_pershop_updates",
     "plugin_pershop_campaign_uses",
@@ -272,7 +274,8 @@ async def reset_all(ctx) -> dict:
             except Exception:
                 pass
     for rev in ("pershop_001", "pershop_002", "pershop_003", "pershop_004",
-                "pershop_005", "pershop_006", "pershop_007"):
+                "pershop_005", "pershop_006", "pershop_007", "pershop_008",
+                "pershop_009"):
         try:
             await ctx.db.execute(
                 "DELETE FROM alembic_version WHERE version_num = $1", rev)
@@ -372,12 +375,17 @@ async def _owner_account_id(ctx, owner_admin: str | None) -> int | None:
 
 
 async def _owner_policy(owner_admin: str | None) -> tuple[Any | None, str]:
-    """(role_name, unlimited_traffic_policy) for the owner; default = permissive."""
+    """(role_name, unlimited_traffic_policy) for the owner.
+
+    A successful row-less lookup is the panel's recognized legacy/env
+    superadmin state. Import and lookup failures are unavailable policy, not
+    permission to create or mutate a user.
+    """
     try:
         from web.backend.core.admin_accounts import get_admin_account_by_username
         acct = await get_admin_account_by_username(owner_admin or "")
-    except Exception:
-        return None, "allowed"
+    except Exception as exc:
+        raise RuntimeError("owner policy unavailable") from exc
     if not acct:
         return None, "allowed"
     return acct.get("role_name"), acct.get("unlimited_traffic_policy", "allowed")
@@ -389,21 +397,32 @@ async def panel_create_user(ctx, *, username: str, expire_at: datetime,
                             hwid_device_limit: int | None = None,
                             owner_admin: str | None = None,
                             description: str | None = None) -> dict:
-    """Create via panel_api, then mirror the panel's own create route: persist
-    the row locally, stamp users.created_by_admin_id so the SHOP OWNER sees the
-    account in their users list, and charge their quota counters (rollback the
-    core account when the quota gate shuts). Returns
-    {'uuid','subscription_url','username'}.
+    """Create through panel_api and fail closed on ownership/quota work.
+
+    A successfully resolved row-less owner is the recognized legacy/env
+    superadmin case. Every database-backed owner must have a durable local
+    mirror, an exact ownership stamp, and successful quota accounting before
+    this helper can report success. Uncertain post-create work is left for
+    the caller's durable recovery journal, never hidden or compensated by a
+    guessed second create.
     """
-    client = _panel_client()
-    account_id = await _owner_account_id(ctx, owner_admin)
-    if account_id is not None:
+    ok, owner = await _owner_account_row(ctx, owner_admin)
+    if not ok:
+        raise RuntimeError("owner account unavailable")
+    account_id = None
+    if owner is not None:
+        try:
+            account_id = int(owner["id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("owner account unavailable") from exc
         role_name, policy = await _owner_policy(owner_admin)
         if role_name != "superadmin":
             if policy == "enforced":
                 traffic_limit_bytes = None
             elif policy == "disabled" and not traffic_limit_bytes:
                 raise RuntimeError("owner traffic policy requires a limit")
+
+    client = _panel_client()
     kwargs = _create_kwargs(username=username, expire_at=expire_at,
                             traffic_limit_bytes=traffic_limit_bytes,
                             telegram_id=telegram_id, squad_uuid=squad_uuid,
@@ -411,48 +430,50 @@ async def panel_create_user(ctx, *, username: str, expire_at: datetime,
                             description=description)
     user = _unwrap(await client.create_user(**kwargs))
     if not isinstance(user, dict):
-        raise RuntimeError(f"panel_api user-create returned {type(user)}")
+        raise RuntimeError("panel user-create returned an invalid response")
 
-    user_uuid = user.get("uuid") or ""
+    user_uuid = str(user.get("uuid") or "")
     panel_id = user.get("id")
     sub_url = user.get("subscription_url") or user.get("subscriptionUrl")
-
     try:
-        await ctx.db.upsert_user(user)
+        user_uuid = str(await ctx.db.upsert_user(user) or user_uuid)
         if not user_uuid and panel_id is not None:
-            user_uuid = await ctx.db.get_user_uuid_by_panel_id(int(panel_id)) or ""
+            user_uuid = str(await ctx.db.get_user_uuid_by_panel_id(int(panel_id)) or "")
         if not sub_url and user_uuid:
             row = await ctx.db.get_user_by_uuid(user_uuid)
             if row:
                 sub_url = row.get("subscription_url") or row.get("subscriptionUrl")
-    except Exception as e:
-        ctx.logger.error("shop local user sync failed for %s: %s", username, e)
+    except Exception as exc:
+        ctx.logger.error("shop local user sync failed for %s: %s", username, exc)
+        raise RuntimeError("provisioning local sync requires reconciliation") from exc
+    if not user_uuid:
+        raise RuntimeError("provisioning identity requires reconciliation")
+
     if account_id is not None:
         try:
-            if user_uuid:
-                await ctx.db.execute(
-                    "UPDATE users SET created_by_admin_id = $1 WHERE uuid = $2",
-                    account_id, user_uuid,
-                )
-            ok = True
-            try:
-                from web.backend.core.admin_accounts import increment_usage_counter
-                ok = await increment_usage_counter(account_id, "users_created")
-                if ok and traffic_limit_bytes:
-                    ok = await increment_usage_counter(
-                        account_id, "traffic_used_bytes", traffic_limit_bytes)
-            except ImportError:
-                pass
-            if not ok:
-                try:
-                    await client.delete_user(panel_id)
-                except Exception:
-                    pass
-                raise RuntimeError("owner quota exceeded, core account rolled back")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            ctx.logger.error("shop ownership stamping failed for %s: %s", username, e)
+            await ctx.db.execute(
+                "UPDATE users SET created_by_admin_id=$1 WHERE uuid=$2 "
+                "AND (created_by_admin_id IS NULL OR created_by_admin_id=$1)",
+                account_id, user_uuid)
+            stamped = await ctx.db.get_user_by_uuid(user_uuid)
+            if (not stamped or int(stamped.get("created_by_admin_id",
+                                               stamped.get("createdByAdminId"))) != account_id):
+                raise RuntimeError("ownership stamp was not saved")
+        except Exception as exc:
+            ctx.logger.error("shop ownership stamping failed for %s: %s", username, exc)
+            raise RuntimeError("provisioning ownership requires reconciliation") from exc
+        try:
+            from web.backend.core.admin_accounts import increment_usage_counter
+            charged = bool(await increment_usage_counter(account_id, "users_created"))
+            if charged and traffic_limit_bytes:
+                charged = bool(await increment_usage_counter(
+                    account_id, "traffic_used_bytes", traffic_limit_bytes))
+        except Exception as exc:
+            ctx.logger.error("shop quota accounting failed for %s: %s", username, exc)
+            raise RuntimeError("provisioning quota requires reconciliation") from exc
+        if not charged:
+            raise RuntimeError("provisioning quota requires reconciliation")
+
     try:
         from web.backend.core.webhook_security import fire_event
         fire_event("user.created", {
@@ -462,7 +483,7 @@ async def panel_create_user(ctx, *, username: str, expire_at: datetime,
         })
     except Exception:
         pass
-    return {"uuid": user_uuid or panel_id or username,
+    return {"uuid": user_uuid,
             "subscription_url": sub_url, "username": username}
 
 
@@ -1020,13 +1041,18 @@ async def add_credit(ctx, shop_id: int, tg_id: int, units: float) -> float:
     Failures propagate. Checkout and earned/refunded credit use the stricter
     ledger operations in billing.py instead of this manual-adjustment helper.
     """
+    import math
+
+    amount = float(units)
+    if not math.isfinite(amount):
+        raise ValueError("credit units must be finite")
     row = await ctx.db.fetchrow(
         """INSERT INTO plugin_pershop_buyers(shop_id, tg_id, credit_units)
            VALUES($1,$2,$3)
            ON CONFLICT (shop_id, tg_id) DO UPDATE
            SET credit_units = GREATEST(0, plugin_pershop_buyers.credit_units
                                       + EXCLUDED.credit_units)
-           RETURNING credit_units""", shop_id, tg_id, float(units))
+           RETURNING credit_units""", shop_id, tg_id, amount)
     return float((row or {}).get("credit_units") or 0)
 
 
@@ -3220,6 +3246,27 @@ async def _api_admin_ns(ctx, shop):
                                  role=row.get("role_name"))
 
 
+async def _api_visible_user_uuids(ns):
+    """Resolve RBAC visibility without turning an outage into full access.
+
+    None is a legitimate unrestricted result only for the recognized row-less
+    or role-bearing superadmin namespace. Other owners need an explicit set.
+    """
+    if ns is None:
+        return None
+    try:
+        from web.backend.core.rbac import get_visible_user_uuids
+    except Exception as exc:
+        raise ValueError("user visibility unavailable") from exc
+    try:
+        visible = await get_visible_user_uuids(ns)
+    except Exception as exc:
+        raise ValueError("user visibility unavailable") from exc
+    if visible is None and getattr(ns, "role", None) != "superadmin":
+        raise ValueError("user visibility unavailable")
+    return visible
+
+
 async def _api_assert_owner_user(ctx, shop, user_uuid: str):
     """Users row + owner namespace, enforcing attribution: the creator must
     be the owner's account, or the user creator-less with a row-less owner.
@@ -3239,22 +3286,24 @@ async def _api_assert_owner_user(ctx, shop, user_uuid: str):
             raise ValueError("foreign user")
     elif ns is not None:
         raise ValueError("foreign user")
+    visible = await _api_visible_user_uuids(ns)
+    if visible is not None and str(row.get("uuid")) not in visible:
+        raise ValueError("user not found")
     return row, ns
 
 
 async def _api_check_squad(ctx, ns, squad_uuid: str | None) -> None:
-    """Squad assignment must sit inside the owner's RBAC view scope.
-    Permissive when the RBAC layer is unreachable (same default as _owner_policy)."""
-    if not squad_uuid:
+    """Squad assignment must sit inside the owner's RBAC view scope."""
+    if not squad_uuid or ns is None:
         return
     try:
         from web.backend.core.rbac import check_access
-    except Exception:
-        return
+    except Exception as exc:
+        raise ValueError("squad scope unavailable") from exc
     try:
         ok = await check_access(ns, "squad", str(squad_uuid), "view")
-    except Exception:
-        return
+    except Exception as exc:
+        raise ValueError("squad scope unavailable") from exc
     if not ok:
         raise ValueError("squad outside owner scope")
 
@@ -3262,13 +3311,14 @@ async def _api_check_squad(ctx, ns, squad_uuid: str | None) -> None:
 async def _charge_traffic(ctx, account_id: int, delta_bytes: int) -> bool:
     try:
         from web.backend.core.admin_accounts import increment_usage_counter
-    except ImportError:
-        return True
+    except Exception as exc:
+        raise RuntimeError("traffic quota unavailable") from exc
     try:
-        return bool(await increment_usage_counter(account_id, "traffic_used_bytes", delta_bytes))
-    except Exception as e:
-        ctx.logger.error("shop traffic quota charge failed: %s", e)
-        return True
+        return bool(await increment_usage_counter(
+            account_id, "traffic_used_bytes", delta_bytes))
+    except Exception as exc:
+        ctx.logger.error("shop traffic quota charge failed: %s", exc)
+        raise RuntimeError("traffic quota unavailable") from exc
 
 
 def _as_aware_api(exp) -> datetime:
@@ -3295,11 +3345,7 @@ async def api_list_users(ctx, shop: dict, *, limit: int = 50,
         """SELECT * FROM users WHERE created_by_admin_id IS NOT DISTINCT FROM $1
            AND username ILIKE $2 ORDER BY username LIMIT $3 OFFSET $4""",
         owner_id, f"%{search or ''}%", limit, offset)
-    try:
-        from web.backend.core.rbac import get_visible_user_uuids
-        visible = await get_visible_user_uuids(ns)
-    except Exception:
-        visible = None
+    visible = await _api_visible_user_uuids(ns)
     if visible is not None:
         rows = [r for r in rows if str(r.get("uuid")) in visible]
     return [_api_public_user(r) for r in rows]
@@ -3314,37 +3360,73 @@ async def api_create_user(ctx, shop: dict, *, username: str, expire_at: datetime
                           traffic_limit_bytes: int | None = None,
                           telegram_id: int | None = None,
                           squad_uuid: str | None = None,
-                          hwid_device_limit: int | None = None) -> dict:
-    """Free-form user (no package needed) created with the owner's hands:
-    prefix-enforced username, owner traffic policy + quota gates, owner
-    attribution stamp, plus a plan-less subs row so stats/matching/notifier
-    pick it up. Raises ValueError / RuntimeError."""
+                          hwid_device_limit: int | None = None,
+                          idempotency_key: str | None = None) -> dict:
+    """Create one durable external-API user request.
+
+    ``idempotency_key`` is supplied by the Idempotency-Key HTTP header. Raw
+    creation, ownership, quota accounting and response persistence are journaled
+    in provisioning.py; no payload hash is used as request identity.
+    """
     prefix = (shop.get("prefix") or "").strip()
     uname = (username or "").strip()
     if not prefix or not uname.lower().startswith(prefix.lower() + "-"):
         raise ValueError("username must start with '<prefix>-'")
+    key = (idempotency_key or "").strip()
+    if not 8 <= len(key) <= 200:
+        raise ValueError("Idempotency-Key must contain 8 to 200 characters")
     exp = _as_aware_api(expire_at)
     ns = await _api_admin_ns(ctx, shop)
-    await _api_check_squad(ctx, ns, squad_uuid)
-    created = await panel_create_user(
-        ctx, username=uname, expire_at=exp,
-        traffic_limit_bytes=traffic_limit_bytes, telegram_id=telegram_id,
-        squad_uuid=(squad_uuid or "").strip() or None,
-        hwid_device_limit=hwid_device_limit,
-        owner_admin=shop.get("owner_admin"),
-        description=f"pershop:{prefix} api")
-    uuid = str(created.get("uuid") or "")
-    sub_id = None
+    squad = (squad_uuid or "").strip() or None
+    await _api_check_squad(ctx, ns, squad)
+    owner_id = getattr(ns, "account_id", None) if ns is not None else None
+    role_name, policy = await _owner_policy(shop.get("owner_admin"))
+    if role_name != "superadmin":
+        if policy == "enforced":
+            traffic_limit_bytes = None
+        elif policy == "disabled" and not traffic_limit_bytes:
+            raise ValueError("owner traffic policy requires a limit")
+    if owner_id is not None:
+        try:
+            from web.backend.core.admin_accounts import increment_usage_counter  # noqa: F401
+        except Exception as exc:
+            raise RuntimeError("owner quota unavailable") from exc
+    request = {
+        "shop_id": int(shop["id"]),
+        "owner_admin": shop.get("owner_admin"),
+        "owner_id": int(owner_id) if owner_id is not None else None,
+        "username": uname,
+        "expire_at": exp.isoformat(),
+        "traffic_limit_bytes": traffic_limit_bytes,
+        "telegram_id": telegram_id,
+        "squad_uuid": squad,
+        "hwid_device_limit": hwid_device_limit,
+        "description": f"pershop:{prefix} api:{shop['id']}:{key}",
+    }
+    from rwa_plugin_pershop.provisioning import create_external_user
+
+    return await create_external_user(ctx, shop, request, key)
+
+
+async def _record_update_incident(ctx, shop: dict, panel_row: dict, panel_id,
+                                  fields: dict, old_traffic, new_traffic,
+                                  quota_delta: int, compensation: str,
+                                  reason: str) -> None:
+    """Persist only allowlisted recovery facts, never tokens or raw errors."""
     try:
-        row = await ctx.db.fetchrow(
-            """INSERT INTO plugin_pershop_subs(shop_id,buyer_tg_id,user_uuid,username,expire_at,
-               traffic_limit_bytes,package_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id""",
-            shop["id"], telegram_id, uuid, uname, exp, traffic_limit_bytes, None)
-        sub_id = row["id"] if row else None
-    except Exception as e:
-        ctx.logger.error("shop api-create subs row failed for %s: %s", uname, e)
-    return {"uuid": uuid, "username": uname,
-            "subscription_url": created.get("subscription_url"), "sub_id": sub_id}
+        import json
+
+        await ctx.db.execute(
+            """INSERT INTO plugin_pershop_update_incidents(
+                   shop_id,user_uuid,username,panel_id,request,
+                   previous_traffic_limit_bytes,attempted_traffic_limit_bytes,
+                   quota_delta_bytes,compensation,reason)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+            shop["id"], panel_row["uuid"], panel_row.get("username") or "",
+            str(panel_id), json.dumps(_clean_json(fields)), old_traffic, new_traffic,
+            quota_delta, compensation, reason)
+    except Exception:
+        ctx.logger.error("shop update incident save failed shop=%s", shop.get("id"))
 
 
 async def api_update_user(ctx, shop: dict, user_uuid: str, *,
@@ -3363,8 +3445,8 @@ async def api_update_user(ctx, shop: dict, user_uuid: str, *,
     try:
         from shared.data_access import resolve_panel_user_id
         panel_id = await resolve_panel_user_id(user_uuid)
-    except Exception:
-        panel_id = user_uuid
+    except Exception as exc:
+        raise RuntimeError("panel user lookup unavailable") from exc
     owner_id = getattr(ns, "account_id", None) if ns is not None else None
     fields: dict = {}
     new_expire = prow.get("expire_at")
@@ -3409,18 +3491,40 @@ async def api_update_user(ctx, shop: dict, user_uuid: str, *,
         fields["status"] = s.upper()
     if not fields:
         raise ValueError("nothing to update")
-    await _panel_client().update_user(panel_id, **fields)
+    old = prow.get("traffic_limit_bytes") or 0
+    quota_delta = 0
     if "trafficLimitBytes" in fields:
-        old = prow.get("traffic_limit_bytes") or 0
-        delta = (fields["trafficLimitBytes"] or 0) - old
-        if delta > 0 and owner_id is not None:
-            if not await _charge_traffic(ctx, int(owner_id), delta):
-                try:
-                    if old:
-                        await _panel_client().update_user(panel_id, trafficLimitBytes=old)
-                except Exception:
-                    pass
-                raise RuntimeError("owner quota exceeded")
+        quota_delta = (fields["trafficLimitBytes"] or 0) - old
+    if quota_delta > 0 and owner_id is not None:
+        try:
+            from web.backend.core.admin_accounts import increment_usage_counter  # noqa: F401
+        except Exception as exc:
+            raise RuntimeError("traffic quota unavailable") from exc
+    await _panel_client().update_user(panel_id, **fields)
+    if quota_delta > 0 and owner_id is not None:
+        async def restore_traffic():
+            try:
+                await _panel_client().update_user(panel_id, trafficLimitBytes=old)
+                return True
+            except Exception:
+                return False
+        try:
+            charged = await _charge_traffic(ctx, int(owner_id), quota_delta)
+        except Exception as exc:
+            restored = await restore_traffic()
+            await _record_update_incident(
+                ctx, shop, prow, panel_id, fields, old,
+                fields["trafficLimitBytes"], quota_delta,
+                "restored" if restored else "failed", "uncertain_traffic_quota")
+            raise RuntimeError("user update requires reconciliation") from exc
+        if not charged:
+            if not await restore_traffic():
+                await _record_update_incident(
+                    ctx, shop, prow, panel_id, fields, old,
+                    fields["trafficLimitBytes"], quota_delta,
+                    "failed", "traffic_restore_after_quota_refusal")
+                raise RuntimeError("user update requires reconciliation")
+            raise RuntimeError("owner quota exceeded")
     try:
         await ctx.db.execute(
             "UPDATE plugin_pershop_subs SET expire_at=$1, traffic_limit_bytes=$2 WHERE shop_id=$3 AND user_uuid=$4",

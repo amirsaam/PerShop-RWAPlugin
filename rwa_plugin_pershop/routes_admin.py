@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Request
 from pydantic import BaseModel, Field
@@ -109,7 +110,7 @@ class PromoIn(BaseModel):
 
 class CreditIn(BaseModel):
     """Owner credit adjustment. Negative = deduct (floors at 0)."""
-    units: float
+    units: float = Field(allow_inf_nan=False)
 
 
 class SvcCatIn(BaseModel):
@@ -150,6 +151,16 @@ class PubUserUpdate(BaseModel):
     status: str | None = None
 
 
+class RecoveryQuotaIn(BaseModel):
+    """Operator-verified outcomes for counters whose results were uncertain."""
+    quota_users: Literal["charged", "not_needed"] | None = None
+    quota_traffic: Literal["charged", "not_needed"] | None = None
+
+
+class RecoveryNoteIn(BaseModel):
+    note: str = Field(default="", max_length=500)
+
+
 class AssignIn(BaseModel):
     user_uuid: str = Field(min_length=1)
     package_id: int = 0
@@ -161,7 +172,7 @@ class AssignIn(BaseModel):
 def build_admin_router(ctx):
     from datetime import timezone
 
-    from fastapi import APIRouter, Depends, HTTPException, Response
+    from fastapi import APIRouter, Depends, Header, HTTPException, Response
     from web.backend.core.plugin_api import auth_deps
 
     from rwa_plugin_pershop.crypto import decrypt_token, encrypt_token
@@ -296,13 +307,19 @@ def build_admin_router(ctx):
                 webhook = await register_webhook(ctx, dict(fresh))
         return {"id": shop_id, "webhook_secret": secret, "webhook": webhook}
 
-    async def _pub_shop(request: Request) -> dict:
-        """Shop resolved from its external API key (X-Shop-Key header or
-        ?key=). 401 when missing/unknown. No admin auth by design."""
+    async def _pub_shop(request: Request, *, allow_query: bool = False) -> dict:
+        """Resolve a shop key without logging or reflecting the credential.
+
+        Query credentials remain only for the read-only catalog widget contract.
+        Every user-management route requires the X-Shop-Key header.
+        """
         import hashlib
 
-        provided = (request.headers.get("x-shop-key")
-                    or request.query_params.get("key") or "")
+        if not allow_query and "key" in request.query_params:
+            raise HTTPException(401, "query-string keys are not accepted")
+        provided = request.headers.get("x-shop-key") or ""
+        if allow_query and not provided:
+            provided = request.query_params.get("key") or ""
         digest = hashlib.sha256(provided.encode()).hexdigest() if provided else ""
         shop = await shop_by_public_key(ctx, digest)
         if not shop or not await verify_public_key(ctx, shop, provided):
@@ -314,10 +331,12 @@ def build_admin_router(ctx):
 
     @router.get("/pub/catalog")
     async def pub_catalog(request: Request):
-        """Public per-shop catalog: exactly what buyers see in the bot
-        (tiers, packages, services, converted prices). Auth is the shop's own
-        external API key: X-Shop-Key header or ?key= query. No admin auth."""
-        return await shop_catalog(ctx, await _pub_shop(request))
+        """Public read-only catalog for website widgets.
+
+        X-Shop-Key is preferred. ?key= is retained only here for existing
+        read-only embeds; user-management endpoints reject query credentials.
+        """
+        return await shop_catalog(ctx, await _pub_shop(request, allow_query=True))
 
     @router.get("/pub/users")
     async def pub_users(request: Request, limit: int = 50,
@@ -332,10 +351,10 @@ def build_admin_router(ctx):
             raise HTTPException(400, str(e))
 
     @router.post("/pub/users", status_code=201)
-    async def pub_users_create(payload: PubUserCreate, request: Request):
-        """Create a panel user with the owner's hands: prefix-enforced
-        username, owner traffic policy + quota gates, owner attribution, and
-        a plan-less plugin row (stats/matching/notifier pick it up)."""
+    async def pub_users_create(payload: PubUserCreate, request: Request,
+                               idempotency_key: str | None = Header(
+                                   default=None, alias="Idempotency-Key")):
+        """Resume one durable create request identified by Idempotency-Key."""
         shop = await _pub_shop(request)
         try:
             return await api_create_user(
@@ -344,11 +363,17 @@ def build_admin_router(ctx):
                 traffic_limit_bytes=payload.traffic_limit_bytes,
                 telegram_id=payload.telegram_id,
                 squad_uuid=(payload.squad_uuid or "").strip() or None,
-                hwid_device_limit=payload.hwid_device_limit)
+                hwid_device_limit=payload.hwid_device_limit,
+                idempotency_key=idempotency_key)
         except ValueError as e:
             raise HTTPException(400, str(e))
         except RuntimeError as e:
+            # Service errors are deliberately finite, controlled messages;
+            # never interpolate a database/panel exception into the response.
             raise HTTPException(422, str(e))
+        except Exception:
+            ctx.logger.error("shop external user create failed shop=%s", shop.get("id"))
+            raise HTTPException(422, "user provisioning failed")
 
     @router.get("/pub/users/{user_uuid}")
     async def pub_user_get(user_uuid: str, request: Request):
@@ -386,6 +411,59 @@ def build_admin_router(ctx):
             raise HTTPException(400, msg)
         except RuntimeError as e:
             raise HTTPException(422, str(e))
+
+    async def recovery_shop(admin):
+        shop = await shop_for_owner(ctx, owner(admin))
+        if not shop:
+            raise HTTPException(404, "create shop first")
+        return dict(shop)
+
+    @router.get("/provisioning/recoveries")
+    async def provisioning_recoveries(_a: AdminUser = Depends(require_permission("pershop", "view"))):
+        from rwa_plugin_pershop.reconciliation import list_incidents
+
+        return await list_incidents(ctx, await recovery_shop(_a))
+
+    @router.post("/provisioning/recoveries/{journal_id}/resume-ownership")
+    async def provisioning_resume_ownership(
+            journal_id: int,
+            _a: AdminUser = Depends(require_permission("pershop", "moderate"))):
+        from rwa_plugin_pershop.reconciliation import resume_ownership
+
+        try:
+            return await resume_ownership(
+                ctx, await recovery_shop(_a), journal_id, owner(_a))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except RuntimeError as e:
+            raise HTTPException(422, str(e))
+
+    @router.post("/provisioning/recoveries/{journal_id}/resolve-quota")
+    async def provisioning_resolve_quota(
+            journal_id: int, payload: RecoveryQuotaIn,
+            _a: AdminUser = Depends(require_permission("pershop", "moderate"))):
+        from rwa_plugin_pershop.reconciliation import resolve_create_quota
+
+        try:
+            return await resolve_create_quota(
+                ctx, await recovery_shop(_a), journal_id, owner(_a),
+                payload.model_dump(exclude_none=True))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except RuntimeError as e:
+            raise HTTPException(422, str(e))
+
+    @router.post("/provisioning/update-incidents/{incident_id}/resolve")
+    async def provisioning_resolve_update(
+            incident_id: int, payload: RecoveryNoteIn,
+            _a: AdminUser = Depends(require_permission("pershop", "moderate"))):
+        from rwa_plugin_pershop.reconciliation import resolve_update_incident
+
+        try:
+            return await resolve_update_incident(
+                ctx, await recovery_shop(_a), incident_id, owner(_a), payload.note)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
 
     @router.get("/shops/mine/apikey")
     async def shops_apikey(_a: AdminUser = Depends(require_permission("pershop", "view"))):

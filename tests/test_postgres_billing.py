@@ -15,6 +15,9 @@ from postgres_support import Context, SERVER, migrated_database, new_order, seed
 from rwa_plugin_pershop import billing
 
 
+from rwa_test_support import recognized_legacy_owner
+
+
 def pg_test(function):
     @functools.wraps(function)
     def run():
@@ -24,7 +27,8 @@ def pg_test(function):
                 await function(pool)
             finally:
                 await SERVER.drop(pool, name)
-        asyncio.run(main())
+        with recognized_legacy_owner():
+            asyncio.run(main())
     run.__signature__ = inspect.Signature()
     return run
 
